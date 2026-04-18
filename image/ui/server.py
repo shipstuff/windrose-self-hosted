@@ -871,7 +871,14 @@ class Handler(BaseHTTPRequestHandler):
         self._authed = check_basic_auth(self.headers.get("Authorization", ""))
         if path not in self.PUBLIC_PATHS and not self._authed:
             self.send_response(HTTPStatus.UNAUTHORIZED)
-            self.send_header("WWW-Authenticate", 'Basic realm="Windrose Admin"')
+            # WWW-Authenticate triggers the browser's native Basic Auth
+            # modal, which we don't want — the SPA runs its own sign-in
+            # flow and stores creds in sessionStorage. If the XHR marker
+            # is present we skip the challenge so the browser stays out
+            # of our auth state; curl / scripts without the header still
+            # get a standard challenge.
+            if self.headers.get("X-Requested-With") != "XMLHttpRequest":
+                self.send_header("WWW-Authenticate", 'Basic realm="Windrose Admin"')
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"authentication required\n")

@@ -104,7 +104,14 @@ async function authFetch(input, init) {
   const hdrs = new Headers((init || {}).headers || {});
   const auth = getAuthHeader();
   if (auth && !hdrs.has("Authorization")) hdrs.set("Authorization", auth);
-  const res = await fetch(input, { ...(init || {}), headers: hdrs });
+  // Marker header so the server can suppress WWW-Authenticate on 401 —
+  // otherwise the browser pops up its native Basic Auth modal the first
+  // time the page loads and any unauth'd admin fetch 401s. Also pins
+  // credentials: "omit" so the browser's per-origin basic-auth cache
+  // cannot leak creds we didn't explicitly put on the request (which
+  // would survive setAuthHeader("") and break sign-out).
+  hdrs.set("X-Requested-With", "XMLHttpRequest");
+  const res = await fetch(input, { ...(init || {}), headers: hdrs, credentials: "omit" });
   if (res.status === 401 && auth) {
     // Credentials went stale or were revoked — clear + re-render.
     setAuthHeader("");
@@ -458,6 +465,16 @@ function applyStatus(data) {
     }
     el.classList.toggle("hidden", !showAdmin);
   });
+  // Fire admin data fetches once per transition into admin view.
+  // Prevents unauth'd page loads from 401-spamming /api/config and
+  // /api/backups (which otherwise triggers the browser's native auth
+  // modal before our sign-in button is even clicked).
+  if (showAdmin && !window._adminHydrated) {
+    window._adminHydrated = true;
+    loadConfig(); loadBackups();
+  } else if (!showAdmin) {
+    window._adminHydrated = false;
+  }
   [uploadBtn, configSaveBtn, configApplyBtn, configRevertBtn, backupCreateBtn, worldUploadBtn, stopServerBtn, worldSaveBtn].forEach(b => {
     if (b) b.disabled = !destructive;
   });
@@ -717,15 +734,22 @@ async function attemptSignIn() {
   const pw = signInPassword.value;
   if (!pw) return;
   const header = "Basic " + btoa("admin:" + pw);
-  // Probe a definitely-auth-gated endpoint to validate creds.
-  const probe = await fetch("/api/config", { headers: { Authorization: header } });
+  // Probe a definitely-auth-gated endpoint to validate creds. Pass the
+  // XHR marker so the server suppresses WWW-Authenticate — otherwise a
+  // wrong password here would pop up the browser's native modal.
+  const probe = await fetch("/api/config", {
+    headers: { Authorization: header, "X-Requested-With": "XMLHttpRequest" },
+    credentials: "omit",
+  });
   if (probe.ok) {
     setAuthHeader(header);
     signInCard.classList.add("hidden");
     signInError.classList.add("hidden");
     signInPassword.value = "";
     log("signed in");
-    loadStatus(); loadConfig(); loadBackups();
+    // applyStatus will fire loadConfig/loadBackups once it sees
+    // showAdmin transition true.
+    loadStatus();
   } else {
     signInError.textContent = probe.status === 401
       ? "Wrong password."
@@ -742,6 +766,9 @@ signOutBtn.addEventListener("click", () => {
 });
 
 // --- Init ---------------------------------------------------------
-loadStatus(); loadConfig(); loadBackups();
+// Only fetch the public status on boot. Admin endpoints get fetched
+// the first time applyStatus() sees we have admin access — otherwise
+// an unauth'd page load would 401-spam /api/config and /api/backups.
+loadStatus();
 setInterval(loadStatus, 5000);
-setInterval(loadBackups, 30000);
+setInterval(() => { if (window._adminHydrated) loadBackups(); }, 30000);
