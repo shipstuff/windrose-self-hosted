@@ -131,6 +131,29 @@ function setTagValue(section, tagName, value) {
   section[`{"TagName": "${tagName}"}`] = value;
 }
 
+// Stable serialization for the world editor's raw JSON view / diff.
+// Without this, setTagValue's delete+insert reshuffles the textarea
+// every time a form field changes — the edited tag pops to the
+// bottom of its section, making diffs noisy. Server-side normalize
+// sorts too, so initial load and edited-and-resaved land on the
+// same order.
+function stableStringifyWorld(doc) {
+  if (!doc) return "";
+  const clone = structuredClone(doc);
+  const settings = clone?.WorldDescription?.WorldSettings;
+  if (settings && typeof settings === "object") {
+    for (const sec of ["BoolParameters", "FloatParameters", "TagParameters"]) {
+      const obj = settings[sec];
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        settings[sec] = Object.fromEntries(
+          Object.entries(obj).sort(([a], [b]) => a.localeCompare(b))
+        );
+      }
+    }
+  }
+  return JSON.stringify(clone, null, 2);
+}
+
 // --- Auth session -------------------------------------------------
 // Auth credentials persist in sessionStorage (per-tab). Cleared on
 // sign-out or on 401 response. We never store the plaintext password;
@@ -717,7 +740,7 @@ async function openWorldEditor(islandId) {
     worldEditorId.textContent = `${islandId.slice(0,8)}…${islandId.slice(-4)}`;
     worldStagedTag.classList.toggle("hidden", !data.staged);
     populateWorldFormFromDoc(editingWorldDoc);
-    worldEditorJson.value = JSON.stringify(editingWorldDoc, null, 2);
+    worldEditorJson.value = stableStringifyWorld(editingWorldDoc);
     renderWorldDiff();
     worldEditorInline.scrollIntoView({behavior: "smooth", block: "nearest"});
   } catch (err) { log("world editor error: " + err); }
@@ -761,8 +784,8 @@ function renderWorldDiff() {
   if (!editingWorldLive || !editingWorldDoc) {
     worldConfigDiffBox.classList.add("hidden"); return;
   }
-  const a = JSON.stringify(editingWorldLive, null, 2);
-  const b = JSON.stringify(editingWorldDoc,  null, 2);
+  const a = stableStringifyWorld(editingWorldLive);
+  const b = stableStringifyWorld(editingWorldDoc);
   if (a === b) { worldConfigDiffBox.classList.add("hidden"); return; }
   const lines = diffLines(a.split("\n"), b.split("\n"));
   worldConfigDiff.innerHTML = lines.map(([tag, text]) => {
@@ -779,7 +802,7 @@ function renderWorldDiff() {
   el.addEventListener("input", () => {
     if (!editingWorldId) return;
     editingWorldDoc = collectWorldDocFromForm();
-    worldEditorJson.value = JSON.stringify(editingWorldDoc, null, 2);
+    worldEditorJson.value = stableStringifyWorld(editingWorldDoc);
     renderWorldDiff();
   }));
 worldEditorJson.addEventListener("input", () => {

@@ -581,9 +581,13 @@ def _dedupe_tag_section(section: Any) -> Any:
             # Non-gametag key (unlikely — game files only hold gametag
             # keys here) — preserved verbatim so we don't silently eat it.
             passthrough[k] = v
+    # Sort by TagName so the on-disk order is stable across edits —
+    # otherwise setTagValue's delete+insert in the UI would reshuffle
+    # the textarea every time a field changes, making the "what
+    # changed" read noisy.
     out: dict[str, Any] = {}
-    for tag, v in by_tag.items():
-        out[_canonical_tag_key(tag)] = v
+    for tag in sorted(by_tag.keys()):
+        out[_canonical_tag_key(tag)] = by_tag[tag]
     out.update(passthrough)
     return out
 
