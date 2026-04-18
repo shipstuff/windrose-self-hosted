@@ -48,6 +48,30 @@ UI_PASSWORD="${UI_PASSWORD:-}"
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD="${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}"
 
 log() { printf '[install] %s\n' "$*"; }
+warn() { printf '\033[33m[install] WARN: %s\033[0m\n' "$*" >&2; }
+
+# --- Memory / swap preflight -----------------------------------------
+# Windrose idles around 850 MiB RSS but spikes during world load + ICE
+# negotiation; a constrained box with no swap OOMs silently mid-join.
+# We don't configure swap automatically (too opinionated for a host
+# that may be multi-tenant), but we do warn loudly so the operator
+# knows to run the tuning recipe from bare-linux/README.md.
+mem_mib="$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)"
+swap_mib="$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo)"
+log "host memory: ${mem_mib} MiB RAM, ${swap_mib} MiB swap"
+if [ "${mem_mib:-0}" -lt 4096 ]; then
+  warn "Host RAM is under 4 GiB (${mem_mib} MiB). The game can peak above"
+  warn "this during world load — expect OOM kills with no swap."
+  if [ "${swap_mib:-0}" -lt 2048 ]; then
+    warn "Swap is also under 2 GiB (${swap_mib} MiB). See"
+    warn "  bare-linux/README.md § 'Swap'"
+    warn "for a 4 GiB swapfile + sysctl recipe. Install is continuing anyway."
+  fi
+elif [ "${swap_mib:-0}" -lt 1024 ]; then
+  log "NOTE: no meaningful swap configured. The game usually fits in 4 GiB"
+  log "      RAM alone, but a 2 GiB swapfile is cheap insurance against"
+  log "      spiky world-load peaks. See bare-linux/README.md § 'Swap'."
+fi
 
 # --- Packages ---------------------------------------------------------
 log "installing OS packages (apt)"

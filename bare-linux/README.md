@@ -103,6 +103,35 @@ sudo systemctl start windrose-game
 See the repo README's *World Island ID is backend-assigned* caveat for
 why preserving `ServerDescription.json` specifically matters.
 
+## Swap
+
+The installer deliberately does not touch swap — too opinionated for a
+host that may be multi-tenant. It does warn if the host has under 4 GiB
+RAM with under 2 GiB swap, which is the configuration that OOM-kills the
+game mid-world-load.
+
+Recommended recipe for a dedicated Windrose host under 6 GiB combined
+RAM+swap (DigitalOcean / Hetzner / Linode droplets in that tier):
+
+```bash
+sudo fallocate -l 4G /swapfile
+sudo chmod 0600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+# Low swappiness: swap as OOM cushion, not routine paging.
+# vfs_cache_pressure=50 keeps inode/dentry cache warmer — UE5 paks
+# touch a lot of small files through Proton.
+sudo tee /etc/sysctl.d/90-windrose-swap.conf <<'EOF'
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+EOF
+sudo sysctl --system
+```
+
+You'll see `Swap: 0 used` under normal operation; it only kicks in when
+the game's RSS spikes on world load + backend handshake.
+
 ## Files And Services Layout
 
 ```
