@@ -4,9 +4,11 @@ ARG CONTAINER_GID=10000
 ARG CONTAINER_UID=10000
 
 ENV DEBIAN_FRONTEND="noninteractive"
-# Windrose Dedicated Server. Steam app is gated (no anonymous depot download);
-# the operator brings their own WindowsServer bundle. The UI sidecar container
-# (see ui/) accepts uploads and writes them into the PVC this container reads.
+# Windrose Dedicated Server. Steam app id 4129620. Default bootstrap is
+# anonymous SteamCMD (WINDROSE_SERVER_SOURCE=steamcmd, validated on the
+# in-cluster canary and on the bare-Linux DO droplet). The UI sidecar
+# (see ui/) also accepts uploads for operators running modded / pre-
+# release builds (WINDROSE_SERVER_SOURCE=files).
 ENV STEAM_APP_ID="4129620"
 ENV HOME="/home/steam"
 ENV WINDROSE_PATH="/home/steam/windrose"

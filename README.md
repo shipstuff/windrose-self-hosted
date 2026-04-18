@@ -6,7 +6,7 @@ This is a community project. It is not affiliated with or endorsed by the Windro
 
 ## What Makes This Different
 
-Anonymous SteamCMD cannot pull the Windrose dedicated-server depot (app id `4129620` is gated), so this repo does not try. Instead, the operator packs the `WindowsServer` folder from their own Steam install once, uploads it through a small browser UI the server exposes on first boot, and the server takes it from there. Save data is preserved across re-uploads (game updates).
+The Windrose dedicated-server Steam app (id `4129620`) pulls fine via anonymous SteamCMD — that's the default bootstrap, so a fresh pod / droplet / compose stack goes from nothing to a running server without any WindowsServer tarball work. Save data lives on persistent storage and survives game patches automatically. The admin console also exposes an upload path for operators running a pre-release or modded `WindowsServer/` build; see *Optional: Bring Your Own Server Files* below.
 
 The pod runs three containers:
 
@@ -43,63 +43,15 @@ The single knob operators most need to understand. The dedicated server advertis
 - WAN-first deployments where you'd rather advertise the public IP than the LAN IP (most operators don't need this — ICE's srflx candidate handles WAN via STUN automatically).
 - Air-gapped environments where `8.8.8.8:53` isn't reachable and auto-detect falls back to `0.0.0.0`.
 
-## Step 0: Get The WindowsServer Bundle Into The Pod
+## Server Binaries
 
-The Windrose dedicated-server depot (app id `4129620`) is **gated** — anonymous SteamCMD cannot download it. Bring your own `WindowsServer/` folder from a Steam install of Windrose (~2.8 GiB uncompressed; contains the UE5 engine + all server content). One-time per cluster; the PVC persists across restarts. Game patches require a re-upload of just `WindowsServer/` (saves survive).
+On first boot the container runs anonymous SteamCMD against app id `4129620` and pulls `WindowsServer/` (~3 GiB) straight onto the PVC / local volume. The game launches as soon as the pull completes. Subsequent restarts are quick: SteamCMD re-checks for updates in seconds. That's the default (`serverConfig.source: steamcmd` in Helm, `WINDROSE_SERVER_SOURCE=steamcmd` in compose / bare-Linux) — no operator action required.
 
-### Locate your `WindowsServer/` folder
+### Optional: Bring Your Own Server Files
 
-The folder is inside your Steam install of Windrose, at `<Steam library>/steamapps/common/Windrose/R5/Builds/WindowsServer/`. Typical `<Steam library>` location by platform:
+If you need to run a pre-release, modded, or pinned `WindowsServer/` build instead of whatever SteamCMD serves today, flip `serverConfig.source: files` (k8s) / `WINDROSE_SERVER_SOURCE=files` (compose / bare-Linux) and upload the tarball through the admin console. The server waits for the files to appear before launching.
 
-| Platform | Typical path |
-|---|---|
-| Windows | `C:\Program Files (x86)\Steam` (or wherever you set the Steam library) |
-| WSL (operator shell on Windows) | `/mnt/c/Program Files (x86)/Steam` (Windows Steam surfaced into WSL) |
-| Linux (Steam + Proton) | `~/.steam/steam` or `~/.local/share/Steam` |
-
-If Steam has multiple library folders, the exact per-library location is recorded in `steamapps/libraryfolders.vdf`. The `tools/pack-windowsserver.sh` script parses that file automatically on WSL and Linux.
-
-### A. Direct copy via `kubectl cp` (recommended for LAN)
-
-Apply the chart first so the pod is running in the files-waiting state:
-
-```bash
-helm upgrade --install windrose ./helm/windrose --namespace games --create-namespace
-kubectl -n games wait --for=condition=Ready pod/windrose-0 --timeout=5m || true
-```
-
-Then push the folder straight into the PVC via the UI sidecar. Pick the command for your workstation:
-
-**Windows (PowerShell):**
-```powershell
-kubectl -n games cp `
-  "C:\Program Files (x86)\Steam\steamapps\common\Windrose\R5\Builds\WindowsServer" `
-  "windrose-0:/home/steam/windrose/WindowsServer" `
-  -c windrose-ui
-```
-
-**WSL:**
-```bash
-kubectl -n games cp \
-  "/mnt/c/Program Files (x86)/Steam/steamapps/common/Windrose/R5/Builds/WindowsServer" \
-  windrose-0:/home/steam/windrose/WindowsServer \
-  -c windrose-ui
-```
-
-**Linux (Steam Proton install):**
-```bash
-STEAM_DIR="${STEAM_DIR:-$HOME/.steam/steam}"
-kubectl -n games cp \
-  "$STEAM_DIR/steamapps/common/Windrose/R5/Builds/WindowsServer" \
-  windrose-0:/home/steam/windrose/WindowsServer \
-  -c windrose-ui
-```
-
-(Copying via the `windrose-ui` sidecar avoids the game container's tighter PATH/tools.) The entrypoint polls for the binary and proceeds to launch as soon as it appears. `kubectl cp` streams through the k8s API and has no practical size limit.
-
-### B. Pack-and-upload via the UI (recommended for remote / compose / bare-Linux)
-
-Pack `WindowsServer/` into a tarball on your workstation, then POST it to `/api/upload`. The UI at `http://windrose.local` (or whatever hostname you configured for the Ingress) has a file picker that does the same POST.
+Pack from your workstation's Steam install (the folder lives at `<Steam library>/steamapps/common/Windrose/R5/Builds/WindowsServer/`):
 
 **Windows (PowerShell — `tar.exe` ships with Windows 10+):**
 ```powershell
@@ -107,38 +59,28 @@ $src = 'C:\Program Files (x86)\Steam\steamapps\common\Windrose\R5\Builds'
 tar.exe -czf "$HOME\windrose-server.tgz" -C $src WindowsServer
 ```
 
-**WSL:**
+**WSL / Linux (helper script auto-locates via `libraryfolders.vdf`):**
 ```bash
-tar -czf ~/windrose-server.tgz \
-  -C "/mnt/c/Program Files (x86)/Steam/steamapps/common/Windrose/R5/Builds" \
-  WindowsServer
-# Or use the helper script, which auto-locates via libraryfolders.vdf:
 bash tools/pack-windowsserver.sh ~/windrose-server.tgz
 ```
 
-**Linux (Steam Proton install):**
-```bash
-STEAM_DIR="${STEAM_DIR:-$HOME/.steam/steam}"
-tar -czf ~/windrose-server.tgz \
-  -C "$STEAM_DIR/steamapps/common/Windrose/R5/Builds" \
-  WindowsServer
-# Or: bash tools/pack-windowsserver.sh ~/windrose-server.tgz
-```
-
-Then upload either through the browser or via curl:
+Then drop the tarball into the admin console's **Manual WindowsServer Update** card, or POST it directly:
 
 ```bash
 curl --fail --data-binary @~/windrose-server.tgz \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-Filename: windrose-server.tgz' \
-  http://windrose.local/api/upload
+  -u admin:$PASSWORD \
+  http://<host>/api/upload
 ```
 
-(PowerShell equivalent uses `Invoke-WebRequest -InFile ... -ContentType ... -Headers @{...}`.)
+For LAN k8s, `kubectl cp` is faster than a round-trip through the Ingress:
 
-### C. Authenticated SteamCMD (not implemented)
+```bash
+kubectl -n games cp "<path>/WindowsServer" windrose-0:/home/steam/windrose/WindowsServer -c windrose-ui
+```
 
-`steamcmd +login <user> +app_update 4129620` works if the Steam account owns the game, but Steam 2FA makes it hard to automate. Not wired up today.
+Uploads preserve `R5/Saved/`, `ServerDescription.json`, and `WorldDescription.json`; a timestamped snapshot of the previous tree lands in `/home/steam/backups/<utc>/`.
 
 ## Install On Kubernetes With Helm
 
@@ -453,7 +395,7 @@ CI runs these plus JSON validation and YAML lint.
 
 ## Windrose-Specific Caveats
 
-- **Bring your own server files.** Gated depot; auto-update on boot is intentionally not implemented.
+- **Default bootstrap uses anonymous SteamCMD against app id `4129620`.** No BYO WindowsServer required for stock Windrose. Bring-your-own is available for modded / pre-release builds via `serverConfig.source: files`.
 - **No official Linux support.** Windows binary only; we run it under GE-Proton.
 - **No RCON.** No documented remote-admin protocol. Tune via `ServerDescription.json` / `WorldDescription.json` and restart.
 - **Fronting the admin console with nginx.** The Python admin server is fine on its own but plays nicely behind an nginx proxy if you want basic-auth / OIDC / a CDN in front:
@@ -526,7 +468,7 @@ Bare-Linux is a planned fourth surface. When changing ports, env vars, image nam
 
 Important specifics:
 
-- Anonymous SteamCMD cannot fetch app `4129620`. Files-import is the intended bootstrap; there is no `AUTO_UPDATE_ON_BOOT` flag.
+- Anonymous SteamCMD against app id `4129620` is the default bootstrap (`WINDROSE_SERVER_SOURCE=steamcmd`); the entrypoint runs it on every boot so the `WindowsServer/` tree auto-updates. Files-import (`WINDROSE_SERVER_SOURCE=files`) is the BYO path for modded / pre-release builds.
 - `WINDROSE_CONFIG_MODE=mutable` requires an existing config on disk; the entrypoint will not create one.
 - `WINDROSE_LAUNCH_STRATEGY=shipping` (the UE5 shipping binary) is the default for headless stability; `launcher` falls back to `WindroseServer.exe` which shells out to the same binary with a launcher wrapper.
 - Xvfb lives in a sibling container. The game container's entrypoint waits up to 10 s for the X11 socket at `/tmp/.X11-unix/X99` before exec'ing Proton.
