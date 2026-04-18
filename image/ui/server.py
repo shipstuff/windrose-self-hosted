@@ -970,7 +970,16 @@ class Handler(BaseHTTPRequestHandler):
         ])
         raw_players = parse_active_players() if pid else []
         ceiling = resource_ceiling()
-        authed = getattr(self, "_authed", False)
+        # Two distinct notions of "authed":
+        # - allowed_admin: the request is allowed through the /api/* auth
+        #   gate (either valid creds, or no password configured at all).
+        #   Drives which fields we include in the payload below.
+        # - signed_in: the operator actually presented a valid credential.
+        #   When UI_PASSWORD is empty, this is False even though admin is
+        #   open — the UI uses this to flip between the "Signed in" banner
+        #   and the "DANGER — open + writable" banner.
+        allowed_admin = getattr(self, "_authed", False)
+        signed_in = bool(UI_PASSWORD) and allowed_admin
 
         # Public fields — safe to expose without auth. Player names shown
         # but AccountIds stripped. Admin-only bits (allowDestructive,
@@ -991,10 +1000,10 @@ class Handler(BaseHTTPRequestHandler):
             "rssBytes":            rss,
             "cpuPercent":          cpu_sample(pid),
             "adminAuthRequired":   bool(UI_PASSWORD),
-            "authenticated":       authed,
+            "authenticated":       signed_in,
             **ceiling,
         }
-        if authed:
+        if allowed_admin:
             data["players"]             = raw_players
             data["allowDestructive"]    = allow_destructive()
             data["stagedConfigPending"] = STAGED_CONFIG_PATH.is_file()
