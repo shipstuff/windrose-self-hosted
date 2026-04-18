@@ -355,6 +355,23 @@ def load_json(p: Path) -> dict | None:
     except (OSError, ValueError):
         return None
 
+def _world_desc_path(island_id: str) -> "Path | None":
+    """Resolve the active WorldDescription.json for island_id, picking the
+    newest GameVersion that has one."""
+    if not SAVE_ROOT.exists():
+        return None
+    for ver in sorted([p.name for p in SAVE_ROOT.iterdir() if p.is_dir()], reverse=True):
+        wd = SAVE_ROOT / ver / "Worlds" / island_id / "WorldDescription.json"
+        if wd.is_file():
+            return wd
+    return None
+
+def _world_staged_path(island_id: str) -> "Path | None":
+    """Path to the per-world staged file. Returns None if we can't locate
+    the live world directory."""
+    live = _world_desc_path(island_id)
+    return live.with_name("WorldDescription.staged.json") if live else None
+
 def find_worlds() -> list[dict]:
     """List worlds on disk from all GameVersions."""
     worlds: list[dict] = []
@@ -366,7 +383,12 @@ def find_worlds() -> list[dict]:
             continue
         for island in sorted(wdir.iterdir()):
             wd = island / "WorldDescription.json"
-            w: dict = {"gameVersion": version_dir.name, "islandId": island.name}
+            staged = island / "WorldDescription.staged.json"
+            w: dict = {
+                "gameVersion": version_dir.name,
+                "islandId":    island.name,
+                "staged":      staged.is_file(),
+            }
             data = load_json(wd)
             if data:
                 inner = data.get("WorldDescription", data)
@@ -519,6 +541,68 @@ def validate_server_description(doc: Any) -> list[str]:
     need("InviteCode", str, lambda k, v: check_str(k, v, _INVITE, 6, 16))
     need("WorldIslandId", str, lambda k, v: check_str(k, v, _HEX32, 32, 32))
     return errs
+
+def _tagname_of(key: str) -> str:
+    """Parse a FGameplayTag-shaped dict key like '{"TagName": "WDS.Parameter.X"}'
+    and return the TagName value. Returns "" if parse fails — caller then
+    treats the key as a raw string instead of a gametag."""
+    try:
+        obj = json.loads(key)
+        if isinstance(obj, dict):
+            return obj.get("TagName", "")
+    except (ValueError, TypeError):
+        pass
+    return ""
+
+def _canonical_tag_key(tag_name: str) -> str:
+    """Emit the game's with-space canonical form for a TagName key."""
+    return json.dumps({"TagName": tag_name})  # json.dumps defaults to ": " (with space)
+
+def _dedupe_tag_section(section: Any) -> Any:
+    """Collapse duplicate FGameplayTag-shaped keys within one
+    Bool/Float/TagParameters dict. Dict keys that parse to the same
+    TagName get coalesced — the most recent value (last insertion in
+    Python dict order) wins, and the surviving key is re-emitted in
+    canonical with-space form.
+
+    Handles the bug where app.js used to look up with
+    '{"TagName":"X"}' (no space) while the game writes with
+    '{"TagName": "X"}' (with space), so each UI save appended a new
+    canonical-less key next to the original rather than overwriting it."""
+    if not isinstance(section, dict):
+        return section
+    by_tag: dict[str, Any] = {}
+    passthrough: dict[str, Any] = {}
+    for k, v in section.items():
+        tag = _tagname_of(k)
+        if tag:
+            by_tag[tag] = v  # later writes win — matches dict insertion order
+        else:
+            # Non-gametag key (unlikely — game files only hold gametag
+            # keys here) — preserved verbatim so we don't silently eat it.
+            passthrough[k] = v
+    out: dict[str, Any] = {}
+    for tag, v in by_tag.items():
+        out[_canonical_tag_key(tag)] = v
+    out.update(passthrough)
+    return out
+
+def normalize_world_desc(doc: Any) -> Any:
+    """Idempotent: dedupe gametag keys across the three
+    Bool/Float/TagParameters sections and rewrite them in canonical
+    form. Safe to call on already-clean docs (no-op)."""
+    if not isinstance(doc, dict):
+        return doc
+    w = doc.get("WorldDescription")
+    if not isinstance(w, dict):
+        return doc
+    settings = w.get("WorldSettings")
+    if not isinstance(settings, dict):
+        return doc
+    for section_key in ("BoolParameters", "FloatParameters", "TagParameters"):
+        if section_key in settings:
+            settings[section_key] = _dedupe_tag_section(settings[section_key])
+    return doc
 
 def validate_world_description(doc: Any) -> list[str]:
     errs: list[str] = []
@@ -855,6 +939,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/config/validate",    "_api_config_validate"),
         ("POST",   "/api/config/apply",       "_api_config_apply"),
         ("POST",   "/api/server/stop",        "_api_server_stop"),
+        ("POST",   "/api/server/restart",     "_api_server_restart"),
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
         # /api/backups/{id}/restore, /api/worlds/{id}/upload, and
@@ -900,11 +985,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Dynamic: /api/worlds/{islandId}/config
         m = re.match(r"^/api/worlds/([0-9A-Fa-f]{32})/config$", path)
-        if m and method in ("GET", "PUT"):
+        if m and method in ("GET", "PUT", "DELETE"):
             if method == "GET":
                 self._api_world_config_get(m.group(1))
-            else:
+            elif method == "PUT":
                 self._api_world_config_put(m.group(1))
+            else:
+                self._api_world_config_discard(m.group(1))
             return
         # Static fall-through.
         if method == "GET":
@@ -1007,6 +1094,11 @@ class Handler(BaseHTTPRequestHandler):
             data["players"]             = raw_players
             data["allowDestructive"]    = allow_destructive()
             data["stagedConfigPending"] = STAGED_CONFIG_PATH.is_file()
+            # Per-world staging — islandIds that have a
+            # WorldDescription.staged.json waiting to apply. The UI uses
+            # this both to tag world rows and to decide whether the
+            # global button reads "Apply + restart" or "Restart".
+            data["stagedWorlds"] = [island_id for island_id, _, _ in self._staged_world_paths()]
         else:
             # Public player list: names + state only, no AccountIds or
             # NetAddress. allowDestructive omitted; stagedConfigPending
@@ -1108,71 +1200,139 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, {"ok": True, "detail": msg})
 
     def _api_world_config_get(self, island_id: str):
-        # Find the WorldDescription.json for this island across GameVersions.
-        for ver in sorted([p.name for p in SAVE_ROOT.iterdir() if p.is_dir()], reverse=True):
-            wd = SAVE_ROOT / ver / "Worlds" / island_id / "WorldDescription.json"
-            if wd.is_file():
-                self._json(HTTPStatus.OK, {"path": str(wd), "content": load_json(wd), "gameVersion": ver})
-                return
-        self._send(HTTPStatus.NOT_FOUND, "text/plain", b"world not found\n")
+        live_path = _world_desc_path(island_id)
+        if not live_path:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"world not found\n")
+            return
+        # Normalize the live doc opportunistically — collapses any
+        # duplicate gametag keys left by earlier bad UI writes. The dedupe
+        # isn't written back to disk here; a subsequent PUT (staging) +
+        # apply is what persists the cleaned form.
+        live = normalize_world_desc(load_json(live_path))
+        staged_path = live_path.with_name("WorldDescription.staged.json")
+        staged = normalize_world_desc(load_json(staged_path)) if staged_path.is_file() else None
+        self._json(HTTPStatus.OK, {
+            "path":        str(live_path),
+            "stagedPath":  str(staged_path),
+            "live":        live,
+            "staged":      staged,
+            "gameVersion": live_path.parent.parent.parent.name,  # .../<ver>/Worlds/<id>/WorldDescription.json
+        })
 
     def _api_world_config_put(self, island_id: str):
+        """Stage per-world changes. Writes WorldDescription.staged.json
+        next to the live file; /api/config/apply is the swap-and-restart
+        path. Does NOT modify the live file — even for the active world
+        — so it's safe to stage while the game is running."""
         if not allow_destructive():
             self._forbidden(); return
-        # Block if the game is running and the world is the active one —
-        # live WorldDescription edits can race with RocksDB writes.
-        pid, _ = find_game_pid()
-        if pid:
-            active = ""
-            cfg = load_json(CONFIG_PATH) or {}
-            active = (cfg.get("ServerDescription_Persistent") or cfg).get("WorldIslandId", "")
-            if active == island_id:
-                self._send(HTTPStatus.CONFLICT, "text/plain",
-                           b"game is running with this world active; stop the server first\n")
-                return
         length = int(self.headers.get("Content-Length", "0"))
         try:
             new = json.loads(self.rfile.read(length))
         except ValueError as e:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid json", "detail": str(e)})
             return
+        # Normalize first so validation sees the canonical shape; also
+        # prevents us from staging a doc that still has duplicate
+        # gametag keys.
+        new = normalize_world_desc(new)
         errs = validate_world_description(new)
         if errs:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "schema validation failed", "errors": errs})
             return
-        # Find the target file and write atomically.
-        for ver in sorted([p.name for p in SAVE_ROOT.iterdir() if p.is_dir()], reverse=True):
-            wd = SAVE_ROOT / ver / "Worlds" / island_id / "WorldDescription.json"
-            if wd.is_file():
-                tmp = wd.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(new, indent=2))
-                tmp.replace(wd)
-                self._json(HTTPStatus.OK, {"ok": True, "path": str(wd)})
-                return
-        self._send(HTTPStatus.NOT_FOUND, "text/plain", b"world not found\n")
+        staged_path = _world_staged_path(island_id)
+        if not staged_path:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"world not found\n"); return
+        tmp = staged_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(new, indent=2))
+        tmp.replace(staged_path)
+        self._json(HTTPStatus.OK, {"ok": True, "stagedPath": str(staged_path)})
 
-    def _api_config_apply(self):
+    def _api_world_config_discard(self, island_id: str):
         if not allow_destructive():
             self._forbidden(); return
-        if not STAGED_CONFIG_PATH.is_file():
-            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"no staged config\n")
+        staged_path = _world_staged_path(island_id)
+        if staged_path and staged_path.exists():
+            staged_path.unlink()
+        self._json(HTTPStatus.OK, {"ok": True})
+
+    def _staged_world_paths(self) -> list[tuple[str, "Path", "Path"]]:
+        """All (islandId, staged_path, live_path) triples where a
+        WorldDescription.staged.json currently exists."""
+        out: list[tuple[str, Path, Path]] = []
+        if not SAVE_ROOT.exists():
+            return out
+        for version_dir in sorted(SAVE_ROOT.iterdir()):
+            wdir = version_dir / "Worlds"
+            if not wdir.is_dir():
+                continue
+            for island in sorted(wdir.iterdir()):
+                staged = island / "WorldDescription.staged.json"
+                live   = island / "WorldDescription.json"
+                if staged.is_file() and live.is_file():
+                    out.append((island.name, staged, live))
+        return out
+
+    def _api_config_apply(self):
+        """Swap staged → live for the server config AND for every world
+        that has staged changes, then kick a restart. Accepts either the
+        server or per-world staging alone (both are optional) — empty
+        400s out so the UI can surface "nothing to apply" cleanly."""
+        if not allow_destructive():
+            self._forbidden(); return
+        staged_worlds = self._staged_world_paths()
+        have_server = STAGED_CONFIG_PATH.is_file()
+        if not have_server and not staged_worlds:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"no staged changes\n")
             return
-        # Swap atomically.
-        tmp = CONFIG_PATH.with_suffix(".json.tmp")
-        shutil.copy2(STAGED_CONFIG_PATH, tmp)
-        tmp.replace(CONFIG_PATH)
-        STAGED_CONFIG_PATH.unlink(missing_ok=True)
+        applied_worlds: list[str] = []
+        if have_server:
+            tmp = CONFIG_PATH.with_suffix(".json.tmp")
+            shutil.copy2(STAGED_CONFIG_PATH, tmp)
+            tmp.replace(CONFIG_PATH)
+            STAGED_CONFIG_PATH.unlink(missing_ok=True)
+        for island_id, staged, live in staged_worlds:
+            tmp = live.with_suffix(".json.tmp")
+            shutil.copy2(staged, tmp)
+            tmp.replace(live)
+            staged.unlink(missing_ok=True)
+            applied_worlds.append(island_id)
         request_restart()
         fire_event("config.applied", serverName=(load_json(CONFIG_PATH) or {})
-                   .get("ServerDescription_Persistent", {}).get("ServerName", ""))
-        self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True})
+                   .get("ServerDescription_Persistent", {}).get("ServerName", ""),
+                   worldsApplied=applied_worlds)
+        self._json(HTTPStatus.OK, {
+            "ok": True, "restartRequested": True,
+            "serverApplied": have_server, "worldsApplied": applied_worlds,
+        })
 
     def _api_config_discard(self):
+        """Discard the server config staging. Per-world discards go
+        through DELETE /api/worlds/{id}/config."""
         if not allow_destructive():
             self._forbidden(); return
         if STAGED_CONFIG_PATH.exists():
             STAGED_CONFIG_PATH.unlink()
         self._json(HTTPStatus.OK, {"ok": True})
+
+    def _api_server_restart(self):
+        """Restart the game without applying any staged changes — the
+        clean-state sibling to Apply+restart. Safe to call when no
+        staged changes exist (the UI flips its button label based on
+        stagedConfigPending / stagedWorlds)."""
+        if not allow_destructive():
+            self._forbidden(); return
+        pid, _ = find_game_pid()
+        if not pid:
+            self._send(HTTPStatus.CONFLICT, "text/plain", b"game process not running\n")
+            return
+        ok, msg = signal_game(signal.SIGTERM)
+        if not ok:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain",
+                       (msg + "\n").encode())
+            return
+        RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg})
 
     def _api_world_upload(self, island_id: str):
         """Receive a world tarball and extract into R5/Saved/.../Worlds/<islandId>/.

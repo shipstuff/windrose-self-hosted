@@ -42,13 +42,18 @@ const configEditorErrors  = document.getElementById("configEditorErrors");
 const configDiffBox       = document.getElementById("configDiffBox");
 const configDiff          = document.getElementById("configDiff");
 const configSaveBtn       = document.getElementById("configSaveBtn");
-const configApplyBtn      = document.getElementById("configApplyBtn");
 const configRevertBtn     = document.getElementById("configRevertBtn");
-const stopServerBtn       = document.getElementById("stopServerBtn");
-const worldEditorCard     = document.getElementById("worldEditorCard");
+const restartServerBtn    = document.getElementById("restartServerBtn");
+const discardAllStagedBtn = document.getElementById("discardAllStagedBtn");
+const worldsStagedTag     = document.getElementById("worldsStagedTag");
+const worldEditorInline   = document.getElementById("worldEditorInline");
 const worldEditorId       = document.getElementById("worldEditorId");
+const worldStagedTag      = document.getElementById("worldStagedTag");
 const worldEditorJson     = document.getElementById("worldEditorJson");
-const worldSaveBtn        = document.getElementById("worldSaveBtn");
+const worldConfigDiffBox  = document.getElementById("worldConfigDiffBox");
+const worldConfigDiff     = document.getElementById("worldConfigDiff");
+const worldStageBtn       = document.getElementById("worldStageBtn");
+const worldDiscardBtn     = document.getElementById("worldDiscardBtn");
 const worldCloseBtn       = document.getElementById("worldCloseBtn");
 const fwName              = document.getElementById("fwName");
 const fwPreset            = document.getElementById("fwPreset");
@@ -90,9 +95,41 @@ let lastStatus = null;
 let lastConfig = null;
 let selectedWorldSlot = null;
 let editingWorldId = null;
-let editingWorldDoc = null;
+let editingWorldDoc = null;   // current edit buffer (form-driven)
+let editingWorldLive = null;  // on-disk live doc — used for diff
 let suppressSync = false;   // avoid infinite sync loops between form and raw JSON
 let rawDebounceTimer = null;
+
+// --- FGameplayTag key helpers -------------------------------------
+// World gametag keys are JSON-stringified dicts like
+// '{"TagName": "WDS.Parameter.MobHealthMultiplier"}'. The game writes
+// them with a space after the colon; JSON.stringify in JS emits them
+// without. Matching on the raw string therefore silently fails, which
+// was the "duplicate keys accumulating on every save" bug. These
+// helpers read/write via parsed TagName so whitespace never matters,
+// and always emit the canonical (with-space) form when writing.
+function getTagValue(section, tagName) {
+  if (!section || typeof section !== "object") return undefined;
+  for (const [k, v] of Object.entries(section)) {
+    try {
+      const obj = JSON.parse(k);
+      if (obj && obj.TagName === tagName) return v;
+    } catch { /* non-JSON key; skip */ }
+  }
+  return undefined;
+}
+function setTagValue(section, tagName, value) {
+  // Evict any existing keys that point at this tag, regardless of
+  // whitespace — prevents duplicates from snowballing across saves.
+  for (const k of Object.keys(section)) {
+    try {
+      const obj = JSON.parse(k);
+      if (obj && obj.TagName === tagName) delete section[k];
+    } catch { /* non-JSON key; skip */ }
+  }
+  // Canonical form: matches Python's json.dumps({"TagName": ...}).
+  section[`{"TagName": "${tagName}"}`] = value;
+}
 
 // --- Auth session -------------------------------------------------
 // Auth credentials persist in sessionStorage (per-tab). Cleared on
@@ -134,6 +171,11 @@ function formatUptime(s) {
   if (h) return `${h}h ${m}m ${sec}s`;
   if (m) return `${m}m ${sec}s`;
   return `${sec}s`;
+}
+function parseBackupId(id) {
+  // "20260418T174447Z" → "2026-04-18T17:44:47Z"
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(id || "");
+  return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z` : (id || "");
 }
 function formatBytes(b) {
   if (!b) return "-";
@@ -226,6 +268,8 @@ function renderPlayers(players) {
   wireReveal(playersBody);
 }
 function renderWorlds(worlds) {
+  const anyStaged = worlds.some(w => w.staged);
+  worldsStagedTag.classList.toggle("hidden", !anyStaged);
   if (!worlds.length) {
     worldsTable.classList.add("hidden"); worldsEmpty.classList.remove("hidden");
   } else {
@@ -234,9 +278,10 @@ function renderWorlds(worlds) {
     const activeId = lastStatus?.worldIslandId || "";
     worlds.forEach(w => {
       const active = w.islandId === activeId ? ' <span class="tag">active</span>' : "";
+      const staged = w.staged ? ' <span class="tag">staged</span>' : "";
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${revealable(w.islandId, 8, 4)}${active}</td>
+        <td>${revealable(w.islandId, 8, 4)}${active}${staged}</td>
         <td>${escapeHtml(w.worldName)}</td>
         <td>${escapeHtml(w.worldPresetType)}</td>
         <td class="mono">${escapeHtml(w.gameVersion)}</td>
@@ -266,9 +311,15 @@ function renderBackups(backups) {
   backupsBody.innerHTML = "";
   const destructive = lastStatus?.allowDestructive !== false;
   backups.forEach(b => {
+    // Backup IDs are compact UTC stamps like "20260418T174447Z".
+    // Prefer the server's createdAt (already ISO) and fall back to
+    // parsing the id so older rows still render readably.
+    const display = b.createdAt
+      ? new Date(b.createdAt).toISOString().replace(/\.\d+Z$/, "Z")
+      : parseBackupId(b.id);
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="mono">${escapeHtml(b.id)}</td>
+      <td class="mono" title="${escapeHtml(b.id)}">${escapeHtml(display)}</td>
       <td>${formatBytes(b.sizeBytes)}</td>
       <td><button class="danger restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button></td>`;
     backupsBody.appendChild(tr);
@@ -454,13 +505,14 @@ function applyStatus(data) {
   }
 
   // Public view: hide admin cards. Admin view: show everything unless
-  // another rule hides it (e.g. worldEditorCard stays hidden until
+  // another rule hides it (e.g. worldEditorInline stays hidden until
   // Edit clicked).
   const showAdmin = authed || (authNeeded === false && destructive);
   document.querySelectorAll(".admin-only").forEach(el => {
-    if (el.id === "worldEditorCard") {
-      // Only hide worldEditorCard based on admin gating when not open;
-      // its content flow is driven by openWorldEditor / worldCloseBtn.
+    if (el.id === "worldEditorInline" || el.id === "discardAllStagedBtn") {
+      // These are driven by their own state — leave them hidden on
+      // sign-out but never force them visible on sign-in. Their show
+      // logic runs separately (openWorldEditor, anyStaged check).
       if (!showAdmin) el.classList.add("hidden");
       return;
     }
@@ -476,10 +528,19 @@ function applyStatus(data) {
   } else if (!showAdmin) {
     window._adminHydrated = false;
   }
-  [uploadBtn, configSaveBtn, configApplyBtn, configRevertBtn, backupCreateBtn, worldUploadBtn, stopServerBtn, worldSaveBtn].forEach(b => {
+  [uploadBtn, configSaveBtn, configRevertBtn, backupCreateBtn, worldUploadBtn,
+   restartServerBtn, discardAllStagedBtn, worldStageBtn, worldDiscardBtn].forEach(b => {
     if (b) b.disabled = !destructive;
   });
   stagedTag.classList.toggle("hidden", !data.stagedConfigPending);
+
+  // Global restart button — label flips to "Apply + restart" whenever
+  // ANY staged changes exist (server config or per-world). Keep
+  // "Discard all staged" visible in the same window.
+  const stagedWorldCount = Array.isArray(data.stagedWorlds) ? data.stagedWorlds.length : 0;
+  const anyStaged = !!data.stagedConfigPending || stagedWorldCount > 0;
+  restartServerBtn.textContent = anyStaged ? "Apply + restart" : "Restart server";
+  discardAllStagedBtn.classList.toggle("hidden", !anyStaged);
 
   // H1 flips between a neutral "Status" title in the public view and
   // the full "Admin Console" label once signed in — so anons see a
@@ -609,11 +670,35 @@ configSaveBtn.addEventListener("click", () => {
 fIsProtected.addEventListener("change", syncFormToRaw);
 configEditor.addEventListener("input", syncRawToForm);
 
-stopServerBtn.addEventListener("click", async () => {
-  if (!confirm("Stop the Windrose game server? In-progress players will be disconnected. Kubelet (or Docker) will restart the container unless you scale the deployment to 0.")) return;
-  const res = await authFetch("/api/server/stop", { method: "POST" });
-  log(`${res.ok ? "server stop" : "server stop failed"}: ${await res.text()}`);
-  setTimeout(loadStatus, 1500);
+// Global restart button — dynamic label (managed in applyStatus).
+// When staged changes exist anywhere, it hits /api/config/apply which
+// swaps server + per-world staged files in before killing the game.
+// Otherwise it just signals SIGTERM and lets the supervisor bring the
+// game back up.
+restartServerBtn.addEventListener("click", async () => {
+  const hasStaged = !!(lastStatus?.stagedConfigPending ||
+    (Array.isArray(lastStatus?.stagedWorlds) && lastStatus.stagedWorlds.length));
+  const prompt = hasStaged
+    ? "Apply staged changes and restart the server? In-progress players will be disconnected."
+    : "Restart the game server? In-progress players will be disconnected.";
+  if (!confirm(prompt)) return;
+  const url = hasStaged ? "/api/config/apply" : "/api/server/restart";
+  const res = await authFetch(url, { method: "POST" });
+  log(`${res.ok ? "ok" : "failed"}: ${await res.text()}`);
+  setTimeout(() => { loadStatus(); loadConfig(); }, 1500);
+});
+discardAllStagedBtn.addEventListener("click", async () => {
+  if (!confirm("Discard all staged changes (server config + every world)?")) return;
+  // Server staging first (if any)...
+  if (lastStatus?.stagedConfigPending) {
+    await authFetch("/api/config", { method: "DELETE" });
+  }
+  // ...then each staged world.
+  for (const id of (lastStatus?.stagedWorlds || [])) {
+    await authFetch(`/api/worlds/${id}/config`, { method: "DELETE" });
+  }
+  log("all staged discarded");
+  loadStatus(); loadConfig();
 });
 
 async function openWorldEditor(islandId) {
@@ -622,25 +707,35 @@ async function openWorldEditor(islandId) {
     if (!res.ok) { log(`load world failed: ${await res.text()}`); return; }
     const data = await res.json();
     editingWorldId = islandId;
-    editingWorldDoc = data.content || {WorldDescription: {islandId, WorldName: "", WorldPresetType: "Medium", WorldSettings: {BoolParameters:{}, FloatParameters:{}, TagParameters:{}}}};
-    worldEditorCard.classList.remove("hidden");
+    editingWorldLive = data.live || null;
+    // Edit buffer starts from staged (if present) so the user picks up
+    // where they left off — otherwise from live. Both are normalized
+    // server-side before we receive them, so no duplicate tag keys.
+    const source = data.staged || data.live || {WorldDescription: {islandId, WorldName: "", WorldPresetType: "Medium", WorldSettings: {BoolParameters:{}, FloatParameters:{}, TagParameters:{}}}};
+    editingWorldDoc = structuredClone(source);
+    worldEditorInline.classList.remove("hidden");
     worldEditorId.textContent = `${islandId.slice(0,8)}…${islandId.slice(-4)}`;
-    const w = editingWorldDoc.WorldDescription || {};
-    const s = w.WorldSettings || {};
-    const fp = s.FloatParameters || {};
-    const bp = s.BoolParameters  || {};
-    fwName.value      = w.WorldName || "";
-    fwPreset.value    = w.WorldPresetType || "Medium";
-    fwMobHealth.value   = fp['{"TagName":"WDS.Parameter.MobHealthMultiplier"}']   ?? 1;
-    fwMobDamage.value   = fp['{"TagName":"WDS.Parameter.MobDamageMultiplier"}']   ?? 1;
-    fwShipHealth.value  = fp['{"TagName":"WDS.Parameter.ShipsHealthMultiplier"}'] ?? 1;
-    fwShipDamage.value  = fp['{"TagName":"WDS.Parameter.ShipsDamageMultiplier"}'] ?? 1;
-    fwBoarding.value    = fp['{"TagName":"WDS.Parameter.BoardingDifficultyMultiplier"}'] ?? 1;
-    fwCoopQuests.checked  = !!bp['{"TagName":"WDS.Parameter.Coop.SharedQuests"}'];
-    fwEasyExplore.checked = !!bp['{"TagName":"WDS.Parameter.EasyExplore"}'];
+    worldStagedTag.classList.toggle("hidden", !data.staged);
+    populateWorldFormFromDoc(editingWorldDoc);
     worldEditorJson.value = JSON.stringify(editingWorldDoc, null, 2);
-    worldEditorCard.scrollIntoView({behavior: "smooth"});
+    renderWorldDiff();
+    worldEditorInline.scrollIntoView({behavior: "smooth", block: "nearest"});
   } catch (err) { log("world editor error: " + err); }
+}
+function populateWorldFormFromDoc(doc) {
+  const w  = doc?.WorldDescription || {};
+  const s  = w.WorldSettings || {};
+  const fp = s.FloatParameters || {};
+  const bp = s.BoolParameters  || {};
+  fwName.value      = w.WorldName || "";
+  fwPreset.value    = w.WorldPresetType || "Medium";
+  fwMobHealth.value  = getTagValue(fp, "WDS.Parameter.MobHealthMultiplier")   ?? 1;
+  fwMobDamage.value  = getTagValue(fp, "WDS.Parameter.MobDamageMultiplier")   ?? 1;
+  fwShipHealth.value = getTagValue(fp, "WDS.Parameter.ShipsHealthMultiplier") ?? 1;
+  fwShipDamage.value = getTagValue(fp, "WDS.Parameter.ShipsDamageMultiplier") ?? 1;
+  fwBoarding.value   = getTagValue(fp, "WDS.Parameter.BoardingDifficultyMultiplier") ?? 1;
+  fwCoopQuests.checked  = !!getTagValue(bp, "WDS.Parameter.Coop.SharedQuests");
+  fwEasyExplore.checked = !!getTagValue(bp, "WDS.Parameter.EasyExplore");
 }
 function collectWorldDocFromForm() {
   const base = structuredClone(editingWorldDoc || {WorldDescription: {}});
@@ -653,16 +748,49 @@ function collectWorldDocFromForm() {
   w.WorldSettings.FloatParameters = w.WorldSettings.FloatParameters || {};
   w.WorldSettings.BoolParameters  = w.WorldSettings.BoolParameters  || {};
   const fp = w.WorldSettings.FloatParameters, bp = w.WorldSettings.BoolParameters;
-  fp['{"TagName":"WDS.Parameter.MobHealthMultiplier"}']   = Number(fwMobHealth.value)  || 1;
-  fp['{"TagName":"WDS.Parameter.MobDamageMultiplier"}']   = Number(fwMobDamage.value)  || 1;
-  fp['{"TagName":"WDS.Parameter.ShipsHealthMultiplier"}'] = Number(fwShipHealth.value) || 1;
-  fp['{"TagName":"WDS.Parameter.ShipsDamageMultiplier"}'] = Number(fwShipDamage.value) || 1;
-  fp['{"TagName":"WDS.Parameter.BoardingDifficultyMultiplier"}'] = Number(fwBoarding.value) || 1;
-  bp['{"TagName":"WDS.Parameter.Coop.SharedQuests"}'] = !!fwCoopQuests.checked;
-  bp['{"TagName":"WDS.Parameter.EasyExplore"}']      = !!fwEasyExplore.checked;
+  setTagValue(fp, "WDS.Parameter.MobHealthMultiplier",   Number(fwMobHealth.value)  || 1);
+  setTagValue(fp, "WDS.Parameter.MobDamageMultiplier",   Number(fwMobDamage.value)  || 1);
+  setTagValue(fp, "WDS.Parameter.ShipsHealthMultiplier", Number(fwShipHealth.value) || 1);
+  setTagValue(fp, "WDS.Parameter.ShipsDamageMultiplier", Number(fwShipDamage.value) || 1);
+  setTagValue(fp, "WDS.Parameter.BoardingDifficultyMultiplier", Number(fwBoarding.value) || 1);
+  setTagValue(bp, "WDS.Parameter.Coop.SharedQuests", !!fwCoopQuests.checked);
+  setTagValue(bp, "WDS.Parameter.EasyExplore",       !!fwEasyExplore.checked);
   return base;
 }
-worldSaveBtn.addEventListener("click", async () => {
+function renderWorldDiff() {
+  if (!editingWorldLive || !editingWorldDoc) {
+    worldConfigDiffBox.classList.add("hidden"); return;
+  }
+  const a = JSON.stringify(editingWorldLive, null, 2);
+  const b = JSON.stringify(editingWorldDoc,  null, 2);
+  if (a === b) { worldConfigDiffBox.classList.add("hidden"); return; }
+  const lines = diffLines(a.split("\n"), b.split("\n"));
+  worldConfigDiff.innerHTML = lines.map(([tag, text]) => {
+    const cls = tag === "+" ? "add" : tag === "-" ? "del" : "same";
+    return `<span class="${cls}">${tag} ${escapeHtml(text)}</span>`;
+  }).join("");
+  worldConfigDiffBox.classList.remove("hidden");
+}
+// Keep raw JSON + form in sync. Field edits rebuild the full doc from
+// the form, then re-render the diff so "what's about to be staged"
+// tracks live.
+[fwName, fwPreset, fwMobHealth, fwMobDamage, fwShipHealth, fwShipDamage,
+ fwBoarding, fwCoopQuests, fwEasyExplore].forEach(el =>
+  el.addEventListener("input", () => {
+    if (!editingWorldId) return;
+    editingWorldDoc = collectWorldDocFromForm();
+    worldEditorJson.value = JSON.stringify(editingWorldDoc, null, 2);
+    renderWorldDiff();
+  }));
+worldEditorJson.addEventListener("input", () => {
+  if (!editingWorldId) return;
+  try {
+    editingWorldDoc = JSON.parse(worldEditorJson.value);
+    populateWorldFormFromDoc(editingWorldDoc);
+    renderWorldDiff();
+  } catch { /* wait for valid JSON */ }
+});
+worldStageBtn.addEventListener("click", async () => {
   if (!editingWorldId) return;
   const doc = collectWorldDocFromForm();
   const res = await authFetch(`/api/worlds/${editingWorldId}/config`, {
@@ -670,18 +798,21 @@ worldSaveBtn.addEventListener("click", async () => {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(doc),
   });
-  log(`${res.ok ? "world saved" : "world save failed"}: ${await res.text()}`);
-  loadConfig();
+  log(`${res.ok ? "world staged" : "world stage failed"}: ${await res.text()}`);
+  loadStatus(); loadConfig();
+});
+worldDiscardBtn.addEventListener("click", async () => {
+  if (!editingWorldId) return;
+  if (!confirm("Discard this world's staged changes?")) return;
+  const res = await authFetch(`/api/worlds/${editingWorldId}/config`, { method: "DELETE" });
+  log(`${res.ok ? "world staged discarded" : "world discard failed"}: ${await res.text()}`);
+  // Reload the world so the form reverts to live.
+  if (editingWorldId) openWorldEditor(editingWorldId);
+  loadStatus(); loadConfig();
 });
 worldCloseBtn.addEventListener("click", () => {
-  worldEditorCard.classList.add("hidden");
-  editingWorldId = null; editingWorldDoc = null;
-});
-configApplyBtn.addEventListener("click", async () => {
-  if (!confirm("Apply staged config and restart the server?")) return;
-  const res = await authFetch("/api/config/apply", { method: "POST" });
-  log(`${res.ok ? "apply ok" : "apply failed"}: ${await res.text()}`);
-  loadStatus(); loadConfig();
+  worldEditorInline.classList.add("hidden");
+  editingWorldId = null; editingWorldDoc = null; editingWorldLive = null;
 });
 configRevertBtn.addEventListener("click", async () => {
   const res = await authFetch("/api/config", { method: "DELETE" });

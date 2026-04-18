@@ -63,3 +63,5 @@ td.mono { font-family: ui-monospace, monospace; }
 .auth-box .muted { color: #777; }
 .auth-box.authed .muted { color: #0a7a0a; }
 .admin-only { }  /* marker class; actual hide is via .hidden toggled by JS */
+.inline-editor { margin-top: 1rem; padding: 1rem; border: 1px dashed #ccc; border-radius: 6px; background: #fafafa; }
+.inline-editor-head { margin: 0 0 0.6rem 0; font-size: 1rem; display: flex; gap: 0.5rem; align-items: center; }

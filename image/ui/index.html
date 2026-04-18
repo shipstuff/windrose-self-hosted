@@ -63,7 +63,11 @@
       <div class="row">
         <button id="refreshBtn" type="button">Refresh</button>
         <button id="downloadSavesBtn" class="admin-only" type="button">Download saves (.tar.gz)</button>
-        <button id="stopServerBtn" class="danger admin-only" type="button">Stop server</button>
+        <!-- Single dynamic restart button — label flips to
+             "Apply + restart" when any staged changes exist (server
+             config or per-world). Plain "Restart server" otherwise. -->
+        <button id="restartServerBtn" class="danger admin-only" type="button">Restart server</button>
+        <button id="discardAllStagedBtn" class="admin-only hidden" type="button">Discard all staged</button>
       </div>
     </div>
 
@@ -77,12 +81,70 @@
     </div>
 
     <div class="card admin-only">
-      <h2>Worlds</h2>
+      <h2>Worlds <span id="worldsStagedTag" class="tag hidden">pending changes</span></h2>
       <div id="worldsEmpty" class="empty-note hidden">No worlds found on disk.</div>
       <table id="worldsTable">
         <thead><tr><th>Island ID</th><th>Name</th><th>Preset</th><th>GameVersion</th><th></th></tr></thead>
         <tbody id="worldsBody"></tbody>
       </table>
+
+      <!-- Inline per-world editor. Expands in-place when a row's Edit
+           button is clicked; stages changes to WorldDescription.staged.json
+           (not the live file), leaving the apply+restart swap to the
+           global button at the top of Server Status. -->
+      <div id="worldEditorInline" class="hidden inline-editor">
+        <h3 class="inline-editor-head">
+          Edit <span id="worldEditorId" class="tag"></span>
+          <span id="worldStagedTag" class="tag hidden">staged</span>
+        </h3>
+        <p class="muted" id="worldEditorBlurb">Changes are staged — they apply on the next server restart via <em>Apply + restart</em> up top. Safe to stage even for the active world.</p>
+        <div id="worldConfigDiffBox" class="hidden">
+          <p class="muted row"><strong>Staged vs live diff:</strong> lines added in green, removed in red.</p>
+          <div id="worldConfigDiff" class="diff"></div>
+        </div>
+        <div class="form-grid">
+          <label for="fwName">World name</label>
+          <div class="field"><input id="fwName" type="text"></div>
+
+          <label for="fwPreset">Preset</label>
+          <div class="field">
+            <select id="fwPreset">
+              <option>Easy</option><option>Medium</option><option>Hard</option><option>Custom</option>
+            </select>
+          </div>
+
+          <label>Mob health ×</label>
+          <div class="field"><input id="fwMobHealth" type="number" step="0.1" min="0.2" max="5"></div>
+
+          <label>Mob damage ×</label>
+          <div class="field"><input id="fwMobDamage" type="number" step="0.1" min="0.2" max="5"></div>
+
+          <label>Ship health ×</label>
+          <div class="field"><input id="fwShipHealth" type="number" step="0.1" min="0.4" max="5"></div>
+
+          <label>Ship damage ×</label>
+          <div class="field"><input id="fwShipDamage" type="number" step="0.1" min="0.2" max="2.5"></div>
+
+          <label>Boarding difficulty ×</label>
+          <div class="field"><input id="fwBoarding" type="number" step="0.1" min="0.2" max="5"></div>
+
+          <label>Shared quests (co-op)</label>
+          <div class="field"><input id="fwCoopQuests" type="checkbox"></div>
+
+          <label>Immersive exploration</label>
+          <div class="field"><input id="fwEasyExplore" type="checkbox"></div>
+        </div>
+        <details class="row">
+          <summary>Raw JSON</summary>
+          <textarea id="worldEditorJson" spellcheck="false"></textarea>
+        </details>
+        <div class="row">
+          <button id="worldStageBtn" class="danger">Stage changes</button>
+          <button id="worldDiscardBtn" type="button">Discard this world's staged</button>
+          <button id="worldCloseBtn" type="button">Close</button>
+        </div>
+      </div>
+
       <div class="row">
         <input id="worldUploadFile" type="file" accept=".tar,.tgz,.gz,.zip" class="hidden">
         <button id="worldUploadBtn" class="danger">Upload world into slot…</button>
@@ -148,55 +210,8 @@
 
       <div class="row">
         <button id="configSaveBtn" class="danger">Stage changes</button>
-        <button id="configApplyBtn" class="danger">Apply + restart</button>
         <button id="configRevertBtn" type="button">Discard staged</button>
       </div>
-    </div>
-
-    <!-- Per-world editor (appears when a world row's Edit button is clicked) -->
-    <div id="worldEditorCard" class="card admin-only hidden">
-      <h2>Edit World <span id="worldEditorId" class="tag"></span></h2>
-      <p class="muted" id="worldEditorBlurb">Editing a world's <code>WorldDescription.json</code> while the game holds the RocksDB lock is unsafe — stop the server first or edit a non-active world.</p>
-      <div class="form-grid">
-        <label for="fwName">World name</label>
-        <div class="field"><input id="fwName" type="text"></div>
-
-        <label for="fwPreset">Preset</label>
-        <div class="field">
-          <select id="fwPreset">
-            <option>Easy</option><option>Medium</option><option>Hard</option><option>Custom</option>
-          </select>
-        </div>
-
-        <label>Mob health ×</label>
-        <div class="field"><input id="fwMobHealth" type="number" step="0.1" min="0.2" max="5"></div>
-
-        <label>Mob damage ×</label>
-        <div class="field"><input id="fwMobDamage" type="number" step="0.1" min="0.2" max="5"></div>
-
-        <label>Ship health ×</label>
-        <div class="field"><input id="fwShipHealth" type="number" step="0.1" min="0.4" max="5"></div>
-
-        <label>Ship damage ×</label>
-        <div class="field"><input id="fwShipDamage" type="number" step="0.1" min="0.2" max="2.5"></div>
-
-        <label>Boarding difficulty ×</label>
-        <div class="field"><input id="fwBoarding" type="number" step="0.1" min="0.2" max="5"></div>
-
-        <label>Shared quests (co-op)</label>
-        <div class="field"><input id="fwCoopQuests" type="checkbox"></div>
-
-        <label>Immersive exploration</label>
-        <div class="field"><input id="fwEasyExplore" type="checkbox"></div>
-      </div>
-      <div class="row">
-        <button id="worldSaveBtn" class="danger">Save world</button>
-        <button id="worldCloseBtn" type="button">Close</button>
-      </div>
-      <details class="row">
-        <summary>Raw JSON</summary>
-        <textarea id="worldEditorJson" spellcheck="false"></textarea>
-      </details>
     </div>
 
     <!-- Backups -->
