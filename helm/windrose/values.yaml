@@ -1,0 +1,292 @@
+imagePullSecrets: []
+
+namespace: games
+createNamespace: true
+
+replicaCount: 1
+# The game container exec's Proton which handles SIGTERM by saving + quitting.
+# Sidecars have preStop hooks that short-circuit to an immediate exit. 45s is
+# plenty for the game's save-on-exit; bump it if you observe the server being
+# killed mid-save during rollouts.
+terminationGracePeriodSeconds: 45
+
+image:
+  repository: ghcr.io/shipstuff/windrose-server
+  tag: latest
+  pullPolicy: Always
+
+# Deprecated: UI now runs from the same image as the game (stdlib Python
+# admin console under /opt/windrose-ui/). Set these only if you really
+# want a separate image for the UI sidecar — otherwise `image.*` above
+# is used for both containers.
+uiImage:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
+# Admin console configuration.
+ui:
+  # If set (directly or via passwordSecret), the UI requires HTTP basic
+  # auth. Username is ignored; any username + correct password works.
+  # Leave empty for LAN-only deployments where Ingress + firewall gates.
+  password: ""
+  passwordSecret:
+    name: ""
+    key: password
+  # Explicit opt-in for destructive endpoints (upload, server stop,
+  # config apply, backup restore, world config PUT) when NO password is
+  # configured. Intended only for LAN-only / firewalled deployments.
+  # With `password` (or `passwordSecret.name`) set, destructive is
+  # always enabled regardless — anyone who can auth IS the admin.
+  enableAdminWithoutPassword: false
+  # Set false to stop the Python server from serving index.html / app.css
+  # / app.js — useful when an external nginx (ingress or a sidecar) owns
+  # the static assets + auth and only reverse-proxies /api/* here.
+  # To bundle the static assets into a ConfigMap for nginx, run once
+  # outside Helm (assets are under image/ui/):
+  #   kubectl -n games create configmap windrose-ui-assets \
+  #     --from-file=index.html=./image/ui/index.html \
+  #     --from-file=app.css=./image/ui/app.css \
+  #     --from-file=app.js=./image/ui/app.js
+  # and volumeMount that ConfigMap where your nginx serves from.
+  serveStatic: true
+  # Webhook notifications — Discord + generic JSON. Events are posted
+  # best-effort from a background thread that polls game state every
+  # webhooks.pollSeconds. Empty URLs disable delivery.
+  #
+  # Supported events: server.online, server.offline, player.join,
+  # player.leave, config.applied, backup.created, backup.restored.
+  webhooks:
+    # Comma-separated. Defaults to the online/offline + join/leave set.
+    events: "server.online,server.offline,player.join,player.leave"
+    pollSeconds: 15
+    timeout: 5
+    # Generic JSON POST target. Accepts any endpoint that can take an
+    # application/json body with {event, timestamp, ...event fields}.
+    url: ""
+    urlSecret:
+      name: ""
+      key: webhook-url
+    # Discord webhook URL. Sent as {embeds:[{title,description,color,footer}]}.
+    discordUrl: ""
+    discordUrlSecret:
+      name: ""
+      key: discord-webhook-url
+
+persistence:
+  existingClaim: ""
+  size: 20Gi
+  accessMode: ReadWriteOnce
+  storageClassName: ""
+  subPath: steam-root
+
+# hostNetwork so Windrose's UPnP / NAT-punched UDP bindings are reachable at
+# the node's real interface.
+hostNetwork: true
+
+# Windrose's gRPC backend hostnames resolve via public DNS today. Add
+# entries here only if you need to pin them for defense-in-depth (offline
+# clusters, restricted DNS, etc.). For evicting a misbehaving gateway
+# region, use blackholeRegions below instead of mixing concerns here.
+hostAliases: []
+#   - ip: "3.36.19.254"
+#     hostnames:
+#       - r5coopapigateway-kr-release.windrose.support
+
+# List of Windrose gateway regions to evict from the game's ping pool by
+# pointing their hostname at 192.0.2.1 (TEST-NET-1, guaranteed unreachable).
+# The game pings kr/eu/ru on startup and each subsystem (HTTP auth, gRPC
+# GsStream, etc.) locks onto the lowest-latency reachable one independently.
+# When a region's backend flakes (observed 2026-04-17: KR gateway 502'd the
+# gRPC stream and fatal-asserted the dedicated server), listing it here
+# forces the game onto another region. Revert once the region recovers.
+# Valid values: "kr", "eu", "ru". (There is no "us" gateway — only Coturn
+# has a US presence at coturn-us.windrose.support.)
+blackholeRegions: []
+#   - kr
+
+# Pin to a specific node if your PVC uses node-local storage (e.g.
+# local-path-provisioner). Leave empty ({}) to let kube-scheduler place
+# the pod freely when persistence is on a network-attached storage class.
+nodeSelector: {}
+#   kubernetes.io/hostname: worker-01
+
+service:
+  # ClusterIP; reach the UI via Ingress or port-forward.
+  type: ClusterIP
+  port: 28080
+  # Keep the UI reachable while the game container restarts.
+  publishNotReadyAddresses: true
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - windrose.local
+  annotations:
+    # WindowsServer uploads are ~1 GiB compressed, ~3 GiB uncompressed.
+    # Generous cap so next year's patches don't wedge.
+    nginx.ingress.kubernetes.io/proxy-body-size: "8g"
+    # Long timeouts handle slow upstream links when operators upload over
+    # residential connections.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Stream the upload body straight to the sidecar instead of buffering
+    # it to the ingress node's disk first. Without this, a 3 GiB upload
+    # fills /tmp on the ingress pod before any byte reaches windrose-ui.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # Same for the response side — saves download is a streaming tarball.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  tls: []
+
+xvfb:
+  # A dedicated display server container. Keeps the game container's PID-1
+  # shell from racing bash job-control with Xvfb's lifecycle (the symptom was
+  # Proton dying in ~3s with any sibling `&` job in the same shell).
+  enabled: true
+  # X display number. Under hostNetwork:true all pods on the same node
+  # share the host net namespace, and Xvfb's abstract unix socket
+  # (@/tmp/.X11-unix/X<N>) is scoped to that namespace — two pods using
+  # display :99 collide and one crashloops. Canary releases should pick
+  # a different number (:98, :97, ...).
+  display: 99
+
+serverConfig:
+  # env:     let the game generate ServerDescription.json; patch known keys on restart
+  # managed: render checked-in JSON from values on every start, merge password from Secret
+  # mutable: require a pre-existing JSON on the PVC and leave it untouched
+  mode: env
+  launchStrategy: shipping
+  # Where the WindowsServer binary comes from.
+  #   steamcmd — anonymous `steamcmd +app_update 4129620` on every boot;
+  #              auto-patches to latest, no BYO required.
+  #   files    — operator populates /home/steam/windrose/WindowsServer/
+  #              themselves via the UI upload or kubectl cp.
+  # Identity (R5/ServerDescription.json) and save (R5/Saved/) are
+  # preserved across SteamCMD updates — the entrypoint stashes them
+  # before +app_update and restores after.
+  source: steamcmd
+  # Appended after the required `-log` on the game binary's command line.
+  # Default caps the engine tick to 30 FPS. Without this, idle (no
+  # clients) burns whole cores because the main loop has no NetDriver
+  # pacing it. With a client the cap is redundant (NetServerMaxTickRate
+  # already throttles to 30Hz) but also harmless. Set to "" to disable
+  # or override with e.g. "-FPS=60 -ExecCmds=t.MaxFPS 60".
+  launchArgs: "-FPS=30"
+  # Applied in env mode.
+  serverName: "Windrose Server"
+  inviteCode: ""
+  isPasswordProtected: false
+  maxPlayerCount: 4
+  # --- p2pProxyAddress -------------------------------------------------
+  # What: the IP the game server advertises to Windrose's backend as its
+  # ICE "host" candidate — i.e. the address every connecting client tries
+  # FIRST before falling back to srflx (STUN-discovered WAN IP) or Coturn
+  # relay. Must be a real reachable IP. 0.0.0.0 silently breaks connect
+  # because the Windows client rejects the wildcard (WSAEFAULT 1214) and
+  # the UE consent-check times out after ~10s → back to main menu.
+  #
+  # Default: empty ("") here. The entrypoint auto-detects via
+  # UDP-connect(8.8.8.8:53) + getsockname — returns the IP the host
+  # routes out of, which is the LAN-facing interface 99% of the time.
+  # Works identically on k8s (hostNetwork:true), compose (network_mode:
+  # host), and bare-Linux. Doesn't depend on kubelet's InternalIP (which
+  # is often an overlay IP that LAN clients can't reach).
+  #
+  # When to override with a literal IP:
+  #   * Multi-homed host where auto-detect picks the wrong interface
+  #     (e.g. the node has a VPN/WireGuard primary route ahead of the
+  #     LAN NIC you want clients to hit).
+  #   * WAN-first deployment where you want the advertised host
+  #     candidate to be your public IP (most operators don't need this
+  #     — srflx already handles WAN fine via STUN).
+  #   * Air-gapped / firewalled networks where 8.8.8.8:53 isn't
+  #     reachable → auto-detect falls back to 0.0.0.0.
+  #
+  # How to check what auto-detect would pick:
+  #   python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8",53)); print(s.getsockname()[0])'
+  # Run it on the host (or in the game container under hostNetwork:true)
+  # — if the printed value matches what clients should hit, leave empty.
+  # ---------------------------------------------------------------------
+  p2pProxyAddress: ""
+  passwordSecret:
+    name: ""
+    key: password
+  # Applied in managed mode only.
+  inlineJson:
+    Version: 1
+    ServerDescription_Persistent:
+      InviteCode: ""
+      IsPasswordProtected: false
+      Password: "ignored-use-secret"
+      WorldIslandId: ""
+      MaxPlayerCount: 4
+      P2pProxyAddress: "0.0.0.0"
+
+worldConfig:
+  islandId: default-world
+  name: Default Windrose World
+  presetType: Medium
+
+protonUseXalia: "0"
+disableSentry: "1"
+filesWaitTimeoutSeconds: "0"
+
+resources:
+  game:
+    # Official guide: ~8G for 2p, ~12G for 4p, ~16G for 10p.
+    requests:
+      cpu: 2000m
+      memory: 4Gi
+    limits:
+      memory: 16Gi
+      # Strongly recommended: uncomment a CPU limit. Windrose has an
+      # upstream bug where an empty dedicated server spins the main loop
+      # unpaced and burns ~2 full cores (community-confirmed, devs aware,
+      # see memory/windrose_idle_cpu_known_bug.md). A cgroup limit is
+      # currently the only knob that bounds the idle spin — we tried
+      # -FPS=30 launch arg, bUseFixedFrameRate, bSmoothFrameRate,
+      # t.MaxFPS, NetServerMaxTickRate; none of them throttle the UE
+      # main loop when no client is connected.
+      #
+      # Sizing (measured 2026-04-17 on AMD Ryzen 9 9955HX @ 4.7 GHz,
+      # x86-64, hostNetwork:true, 1 map, defaults):
+      #   0 players: wants 2 cores; gets capped to whatever you set
+      #   1 player:  ~125 mcpu (NetDriver paces, game genuinely low)
+      #   2-3 players: ~200 mcpu (sublinear; shared simulation amortizes)
+      # Expect ~250-300 mcpu for 4 players, ~400-500 mcpu for 10. Scale
+      # up proportionally on slower CPUs (halve GHz ≈ double mcpu).
+      # Recommended caps (also adjust requests.cpu above to match/less):
+      #   1 player (solo):    300m
+      #   2-4 players:        500m
+      #   10 players:         1000m
+      #
+      # Throttle is real (nr_throttled is high while empty) but harmless
+      # — the game's cycles during idle are non-productive busy-spin.
+      # With a client connected, actual usage stays well below the cap
+      # so gameplay isn't throttled.
+      # cpu: 500m
+  xvfb:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      memory: 256Mi
+  ui:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+securityContext:
+  runAsUser: 10000
+  runAsGroup: 10000
+  fsGroup: 10000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL

@@ -1,0 +1,14 @@
+{
+  "Version": 1,
+  "WorldDescription": {
+    "IslandId": "",
+    "WorldName": "Default Windrose World",
+    "CreationTime": 0,
+    "WorldPresetType": "Medium",
+    "WorldSettings": {
+      "BoolParameters": {},
+      "FloatParameters": {},
+      "TagParameters": {}
+    }
+  }
+}

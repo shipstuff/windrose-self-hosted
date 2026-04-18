@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: windrose
+  namespace: games
+spec:
+  # ClusterIP; reach the UI via the Ingress (windrose.local) or port-forward.
+  # Game UDP traffic bypasses this service entirely (hostNetwork: true).
+  type: ClusterIP
+  selector:
+    app: windrose
+  # Keep the UI reachable even when the game container is restarting — the UI
+  # sidecar is most useful during outages.
+  publishNotReadyAddresses: true
+  ports:
+    - name: ui
+      protocol: TCP
+      port: 28080
+      targetPort: ui

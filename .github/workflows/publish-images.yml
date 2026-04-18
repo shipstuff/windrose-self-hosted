@@ -1,0 +1,92 @@
+name: Publish Images
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: windrose-server
+            context: ./image
+            file: ./image/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: prep
+        env:
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE_NAME: ${{ matrix.image_name }}
+        run: |
+          set -euo pipefail
+
+          images="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+          dockerhub_enabled=false
+
+          if [[ -n "${DOCKERHUB_USERNAME}" && -n "${DOCKERHUB_TOKEN}" ]]; then
+            dockerhub_namespace="${DOCKERHUB_NAMESPACE:-${DOCKERHUB_USERNAME}}"
+            images="${images}"$'\n'"docker.io/${dockerhub_namespace}/${IMAGE_NAME}"
+            dockerhub_enabled=true
+          fi
+
+          echo "dockerhub_enabled=${dockerhub_enabled}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "images<<EOF"
+            printf '%s\n' "${images}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && steps.prep.outputs.dockerhub_enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.prep.outputs.images }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=sha-
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

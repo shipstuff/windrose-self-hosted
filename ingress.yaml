@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: windrose
+  namespace: games
+  annotations:
+    # WindowsServer uploads are ~1 GiB compressed, ~3 GiB uncompressed;
+    # 8g is the generous cap for next year's patches. `kubectl cp` is
+    # still a fine alternative — it streams via the k8s API and has no
+    # practical size limit we've hit.
+    nginx.ingress.kubernetes.io/proxy-body-size: "8g"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Stream the upload body to the sidecar instead of buffering it to
+    # the ingress node's disk first. Without this a 3 GiB upload fills
+    # /tmp on the ingress before any byte reaches windrose-ui.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # Same for the response side — saves download is a streaming tarball.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    # Replace the host with whatever DNS name maps to your cluster /
+    # ingress controller on your LAN. Add more entries if you front the
+    # UI under multiple names.
+    - host: windrose.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: windrose
+                port:
+                  number: 28080

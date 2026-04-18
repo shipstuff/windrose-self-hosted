@@ -1,0 +1,6 @@
+apiVersion: v2
+name: windrose
+description: Windrose dedicated server with self-service file import and invite-code UI
+type: application
+version: 0.1.0
+appVersion: "latest"

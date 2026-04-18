@@ -1,0 +1,213 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: windrose
+  namespace: games
+  labels:
+    app: windrose
+spec:
+  serviceName: windrose
+  replicas: 1
+  selector:
+    matchLabels:
+      app: windrose
+  template:
+    metadata:
+      labels:
+        app: windrose
+    spec:
+      terminationGracePeriodSeconds: 45
+      # All containers share a PID namespace so the UI sidecar can see the
+      # game's wine processes.
+      shareProcessNamespace: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Pin to a specific node if your PVC uses node-local storage
+      # (e.g. local-path-provisioner). Remove the nodeSelector block
+      # entirely if persistence is network-attached.
+      nodeSelector:
+        kubernetes.io/hostname: worker-01
+      # Two use cases for hostAliases here; uncomment either or both.
+      #
+      # 1) Region blackhole. The game pings kr/eu/ru on startup and each
+      #    subsystem locks onto the lowest-latency reachable one. If one
+      #    region's Windrose backend flakes (observed 2026-04-17: KR gRPC
+      #    was 502'ing and fatal-asserted the dedicated server), point
+      #    that region's hostname at 192.0.2.1 so pings fail and the game
+      #    picks another region. Revert when the region recovers.
+      # hostAliases:
+      #   - ip: "192.0.2.1"
+      #     hostnames:
+      #       - r5coopapigateway-kr-release.windrose.support
+      #
+      # 2) Real-IP pin for offline / restricted-DNS environments.
+      # hostAliases:
+      #   - ip: "3.66.107.109"
+      #     hostnames:
+      #       - r5coopapigateway-eu-release.windrose.support
+      securityContext:
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+      containers:
+        - name: windrose
+          image: registry.local:30500/games/windrose-server:latest
+          imagePullPolicy: Always
+          env:
+            - name: SERVER_NAME
+              value: "Windrose Server"
+            - name: MAX_PLAYER_COUNT
+              value: "4"
+            - name: WORLD_ISLAND_ID
+              value: "default-world"
+            - name: WORLD_NAME
+              value: "Default Windrose World"
+            - name: WORLD_PRESET_TYPE
+              value: "Medium"
+            - name: IS_PASSWORD_PROTECTED
+              value: "false"
+            - name: SERVER_PASSWORD
+              value: ""
+            # P2P_PROXY_ADDRESS intentionally unset. The entrypoint
+            # auto-detects the host's LAN-facing IP via a UDP-connect
+            # getsockname trick. Downward API status.hostIP often returns
+            # an overlay IP that LAN clients can't reach. Set this env
+            # explicitly here if auto-detect picks the wrong interface.
+            - name: WINDROSE_CONFIG_MODE
+              value: "env"
+            - name: WINDROSE_LAUNCH_STRATEGY
+              value: "shipping"
+            - name: FILES_WAIT_TIMEOUT_SECONDS
+              value: "0"
+            - name: PROTON_USE_XALIA
+              value: "0"
+            - name: DISABLE_SENTRY
+              value: "1"
+            - name: DISPLAY
+              value: ":99"
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "4Gi"
+            limits:
+              memory: "16Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /home/steam
+              subPath: steam-root
+            - name: x11-socket
+              mountPath: /tmp/.X11-unix
+        - name: xvfb
+          image: registry.local:30500/games/windrose-server:latest
+          imagePullPolicy: Always
+          # Purely an X display server. Lives in its own container so its
+          # lifecycle and signal space can't interfere with Proton's. Wrapped
+          # in a trap-forwarding shell so kubelet's SIGTERM reaches Xvfb on
+          # shutdown — AppArmor's containerd profile silently drops signals
+          # targeted at PID 1 from a preStop hook.
+          command:
+            - sh
+            - -c
+            - |
+              Xvfb :99 -screen 0 1024x768x24 -nolisten tcp &
+              child=$!
+              trap 'kill -TERM "$child" 2>/dev/null; wait "$child"' TERM INT
+              wait "$child"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              memory: "256Mi"
+          volumeMounts:
+            - name: x11-socket
+              mountPath: /tmp/.X11-unix
+        - name: windrose-ui
+          # Single image — same as the game container. The stdlib Python
+          # admin console is baked at /opt/windrose-ui/ and invoked via
+          # command override. Drops the old separate windrose-ui image.
+          image: registry.local:30500/games/windrose-server:latest
+          imagePullPolicy: Always
+          command: ["python3", "/opt/windrose-ui/server.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+              # UI needs CAP_KILL to signal the game process in the
+              # sibling container (POST /api/server/stop under
+              # shareProcessNamespace:true).
+              add: [KILL]
+          env:
+            - name: UI_BIND
+              value: "0.0.0.0"
+            - name: UI_PORT
+              value: "28080"
+            # - name: UI_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: windrose-ui-password
+            #       key: password
+            # Explicit opt-in for destructive admin actions when no password
+            # is configured. Leave "false" unless LAN-only + operator accepts
+            # that anyone reachable can wipe the server.
+            - name: UI_ENABLE_ADMIN_WITHOUT_PASSWORD
+              value: "false"
+            # Optional Discord / generic webhook notifications. The UI's
+            # background EventDetector polls game state every
+            # WINDROSE_WEBHOOK_POLL_SECONDS and POSTs events (online/offline,
+            # player.join/leave, backup.created/restored, config.applied).
+            # Leave URLs empty to disable; otherwise either inline or via
+            # secretKeyRef — both are consumed verbatim.
+            - name: WINDROSE_WEBHOOK_EVENTS
+              value: "server.online,server.offline,player.join,player.leave"
+            - name: WINDROSE_WEBHOOK_POLL_SECONDS
+              value: "15"
+            - name: WINDROSE_WEBHOOK_TIMEOUT
+              value: "5"
+            # - name: WINDROSE_WEBHOOK_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: windrose-webhooks
+            #       key: webhook-url
+            # - name: WINDROSE_DISCORD_WEBHOOK_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: windrose-webhooks
+            #       key: discord-webhook-url
+            # Game container resource limits, surfaced for the UI's
+            # "CPU/mem % of cap" display. When a limit isn't set, the
+            # Downward API returns the node's allocatable amount — which
+            # becomes the "host" fallback the UI shows as the denominator.
+            - name: WINDROSE_GAME_CPU_LIMIT_MCPU
+              valueFrom:
+                resourceFieldRef:
+                  containerName: windrose
+                  resource: limits.cpu
+                  divisor: 1m
+            - name: WINDROSE_GAME_MEM_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: windrose
+                  resource: limits.memory
+                  divisor: "1"
+          ports:
+            - name: ui
+              containerPort: 28080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              memory: "128Mi"
+          volumeMounts:
+            - name: data
+              mountPath: /home/steam
+              subPath: steam-root
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: windrose-data
+        - name: x11-socket
+          emptyDir: {}

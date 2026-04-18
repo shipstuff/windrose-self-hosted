@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.pid
+*.swp
+.pytest_cache/
+windrose-data/
+steamcmd/
+*.tgz
+*.tar.gz
+WindowsServer/
+
+# Local Helm value overrides — operator-specific; never check in.
+values-local*.yaml
+values-*local*.yaml

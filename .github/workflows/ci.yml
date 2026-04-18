@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck -x -S warning \
+            image/entrypoint.sh \
+            image/ui/cgi-bin/*.sh \
+            tools/pack-windowsserver.sh
+
+  yaml-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install yamllint
+      - name: yamllint
+        run: |
+          yamllint -d '{extends: default, rules: {line-length: {max: 200}, truthy: disable, indentation: {spaces: 2, check-multi-line-strings: false}, document-start: disable, braces: disable, brackets: disable, comments: disable}}' \
+            namespace.yaml pvc.yaml statefulset.yaml service.yaml docker-compose.yaml kustomization.yaml
+
+  json-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate example JSON
+        run: |
+          python3 -c "import json,sys; [json.load(open(f)) for f in ['image/ServerDescription_example.json','image/WorldDescription_example.json']]"
+
+  kustomize-render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kustomize
+        run: |
+          curl -sqL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+      - run: kustomize build . >/dev/null
+
+  helm-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Render chart
+        run: |
+          helm lint ./helm/windrose
+          helm template windrose ./helm/windrose >/dev/null
+          helm template windrose ./helm/windrose --set serverConfig.mode=managed >/dev/null
+          helm template windrose ./helm/windrose --set serverConfig.mode=mutable >/dev/null

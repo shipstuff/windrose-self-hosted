@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Windrose Self-Hosted Admin Console</title>
+    <link rel="stylesheet" href="app.css">
+  </head>
+  <body>
+    <div class="header-row">
+      <h1>Windrose Self-Hosted Admin Console <span id="destructiveTag" class="tag locked hidden">read-only</span></h1>
+      <div id="authBox" class="auth-box">
+        <span id="authState" class="muted">not signed in</span>
+        <button id="signInBtn" type="button">Sign in</button>
+        <button id="signOutBtn" type="button" class="hidden">Sign out</button>
+      </div>
+    </div>
+
+    <div id="signInCard" class="card hidden">
+      <h2>Sign in</h2>
+      <p class="muted">Admin features (config editor, backups, world edits, manual upload, stop server) unlock after a successful sign-in. Leave the username blank; only the password is checked.</p>
+      <div class="form-grid">
+        <label for="signInPassword">Password</label>
+        <div class="field">
+          <input id="signInPassword" type="password" autocomplete="current-password">
+        </div>
+      </div>
+      <div class="row">
+        <button id="signInSubmit" type="button">Sign in</button>
+        <button id="signInCancel" type="button">Cancel</button>
+      </div>
+      <div id="signInError" class="warn-inline row hidden"></div>
+    </div>
+    <div id="adminBanner" class="admin-banner">
+      <strong id="adminBannerLead">⚠ Admin-only.</strong> <span id="adminBannerText">Checking auth state…</span>
+    </div>
+
+    <!-- Invite — top priority once available -->
+    <div id="infoCard" class="card hidden">
+      <h2>Invite</h2>
+      <p>Share this invite code with players. They enter it in the Windrose client to join.</p>
+      <div class="row">
+        <span id="inviteCode" class="invite-code">...</span>
+        <button id="copyInviteBtn" type="button">Copy</button>
+      </div>
+      <div class="row muted" id="passwordNote"></div>
+    </div>
+
+    <!-- Server stats + players -->
+    <div class="card">
+      <h2>Server Status</h2>
+      <dl class="kv">
+        <dt>Server name</dt><dd id="kvServerName">-</dd>
+        <dt>WindowsServer files</dt><dd id="kvFiles">-</dd>
+        <dt>Server process</dt><dd id="kvServer">-</dd>
+        <dt>Uptime</dt><dd id="kvUptime">-</dd>
+        <dt>Backend region</dt><dd id="kvBackendRegion">-</dd>
+        <dt>Active world</dt><dd id="kvWorldId">-</dd>
+        <dt>Save GameVersion</dt><dd id="kvSaveVersion">-</dd>
+        <dt>Worlds on disk</dt><dd id="kvWorldCount">-</dd>
+        <dt>Players</dt><dd id="kvPlayers">-</dd>
+      </dl>
+      <div class="row">
+        <button id="refreshBtn" type="button">Refresh</button>
+        <button id="downloadSavesBtn" type="button">Download saves (.tar.gz)</button>
+        <button id="stopServerBtn" class="danger" type="button">Stop server</button>
+      </div>
+    </div>
+
+    <div id="playersCard" class="card hidden">
+      <h2>Players</h2>
+      <div id="playersEmpty" class="empty-note hidden">No one is currently connected.</div>
+      <table id="playersTable">
+        <thead><tr><th>#</th><th>Name</th><th>State</th><th>In game</th><th>AccountId</th></tr></thead>
+        <tbody id="playersBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card admin-only">
+      <h2>Worlds</h2>
+      <div id="worldsEmpty" class="empty-note hidden">No worlds found on disk.</div>
+      <table id="worldsTable">
+        <thead><tr><th>Island ID</th><th>Name</th><th>Preset</th><th>GameVersion</th><th></th></tr></thead>
+        <tbody id="worldsBody"></tbody>
+      </table>
+      <div class="row">
+        <input id="worldUploadFile" type="file" accept=".tar,.tgz,.gz,.zip" class="hidden">
+        <button id="worldUploadBtn" class="danger">Upload world into slot…</button>
+        <span class="muted">Stages a world tarball into <code>R5/Saved/.../Worlds/&lt;id&gt;/</code>; requires a server restart so the game releases its RocksDB handles.</span>
+      </div>
+    </div>
+
+    <!-- Resources -->
+    <div class="card">
+      <h2>Resource Usage</h2>
+      <dl class="kv">
+        <dt>CPU</dt><dd id="kvCpu">-</dd>
+        <dt>Memory (RSS)</dt><dd id="kvMem">-</dd>
+      </dl>
+      <div class="muted row">Usage is the game process's CPU share / RSS. Cap is the container limit (chart value) or the host's available CPU/RAM when unbounded.</div>
+    </div>
+
+    <!-- Server config — form by default, raw JSON on demand -->
+    <div class="card admin-only">
+      <h2>Server Config <span id="stagedTag" class="tag hidden">pending changes</span></h2>
+      <p class="muted">Edit fields then Stage — changes apply on next server restart. Identity (PersistentServerId) and world data are preserved.</p>
+      <div id="configDiffBox" class="hidden">
+        <p class="muted row"><strong>Staged vs Live diff:</strong> lines added in green, removed in red.</p>
+        <div id="configDiff" class="diff"></div>
+      </div>
+      <div class="form-grid">
+        <label for="fServerName">Server name</label>
+        <div class="field"><input id="fServerName" type="text" placeholder="My Windrose"></div>
+
+        <label for="fMaxPlayers">Max players</label>
+        <div class="field"><input id="fMaxPlayers" type="number" min="1" max="10" step="1"></div>
+
+        <label for="fIsProtected">Password protected</label>
+        <div class="field"><input id="fIsProtected" type="checkbox"></div>
+
+        <label for="fPassword">Password</label>
+        <div class="field"><input id="fPassword" type="password" placeholder="(leave blank to keep)"></div>
+
+        <label for="fWorldId">Active world</label>
+        <div class="field"><select id="fWorldId"></select></div>
+      </div>
+
+      <details class="row">
+        <summary>Advanced</summary>
+        <div class="form-grid row">
+          <label for="fP2pAddr">P2pProxyAddress</label>
+          <div class="field"><input id="fP2pAddr" type="text" placeholder="auto-detected if empty"></div>
+
+          <label>PersistentServerId</label>
+          <div class="field muted"><code id="fPSID">-</code> <span class="muted">read-only — editing would sever the backend island binding</span></div>
+
+          <label>InviteCode</label>
+          <div class="field muted"><code id="fInvite">-</code> <span class="muted">read-only — minted by the backend</span></div>
+        </div>
+      </details>
+
+      <details class="row" id="rawJsonWrapper">
+        <summary>Raw JSON (advanced)</summary>
+        <p class="muted">Two-way sync: typing here updates the form fields live (and vice versa). Server validates schema on stage. Invalid JSON just stops the sync until you fix it.</p>
+        <textarea id="configEditor" spellcheck="false"></textarea>
+        <div id="configEditorErrors" class="warn-inline row hidden"></div>
+      </details>
+
+      <div class="row">
+        <button id="configSaveBtn" class="danger">Stage changes</button>
+        <button id="configApplyBtn" class="danger">Apply + restart</button>
+        <button id="configRevertBtn" type="button">Discard staged</button>
+      </div>
+    </div>
+
+    <!-- Per-world editor (appears when a world row's Edit button is clicked) -->
+    <div id="worldEditorCard" class="card admin-only hidden">
+      <h2>Edit World <span id="worldEditorId" class="tag"></span></h2>
+      <p class="muted" id="worldEditorBlurb">Editing a world's <code>WorldDescription.json</code> while the game holds the RocksDB lock is unsafe — stop the server first or edit a non-active world.</p>
+      <div class="form-grid">
+        <label for="fwName">World name</label>
+        <div class="field"><input id="fwName" type="text"></div>
+
+        <label for="fwPreset">Preset</label>
+        <div class="field">
+          <select id="fwPreset">
+            <option>Easy</option><option>Medium</option><option>Hard</option><option>Custom</option>
+          </select>
+        </div>
+
+        <label>Mob health ×</label>
+        <div class="field"><input id="fwMobHealth" type="number" step="0.1" min="0.2" max="5"></div>
+
+        <label>Mob damage ×</label>
+        <div class="field"><input id="fwMobDamage" type="number" step="0.1" min="0.2" max="5"></div>
+
+        <label>Ship health ×</label>
+        <div class="field"><input id="fwShipHealth" type="number" step="0.1" min="0.4" max="5"></div>
+
+        <label>Ship damage ×</label>
+        <div class="field"><input id="fwShipDamage" type="number" step="0.1" min="0.2" max="2.5"></div>
+
+        <label>Boarding difficulty ×</label>
+        <div class="field"><input id="fwBoarding" type="number" step="0.1" min="0.2" max="5"></div>
+
+        <label>Shared quests (co-op)</label>
+        <div class="field"><input id="fwCoopQuests" type="checkbox"></div>
+
+        <label>Immersive exploration</label>
+        <div class="field"><input id="fwEasyExplore" type="checkbox"></div>
+      </div>
+      <div class="row">
+        <button id="worldSaveBtn" class="danger">Save world</button>
+        <button id="worldCloseBtn" type="button">Close</button>
+      </div>
+      <details class="row">
+        <summary>Raw JSON</summary>
+        <textarea id="worldEditorJson" spellcheck="false"></textarea>
+      </details>
+    </div>
+
+    <!-- Backups -->
+    <div class="card admin-only">
+      <h2>Backups</h2>
+      <p class="muted">Snapshots of <code>R5/Saved/</code> + identity files under <code>/home/steam/backups/</code>. Oldest pruned automatically.</p>
+      <div id="backupsEmpty" class="empty-note hidden">No backups yet.</div>
+      <table id="backupsTable">
+        <thead><tr><th>ID (UTC)</th><th>Size</th><th></th></tr></thead>
+        <tbody id="backupsBody"></tbody>
+      </table>
+      <div class="row">
+        <button id="backupCreateBtn" class="danger">Create backup now</button>
+      </div>
+    </div>
+
+    <!-- Manual update — advanced, collapsed by default -->
+    <details class="card admin-only" id="updateCard">
+      <summary><h2><span id="importTitle">Manual WindowsServer Update</span></h2></summary>
+      <p id="importBlurb" class="muted">Upload a custom / modded <code>WindowsServer</code> tarball to replace the stock binary SteamCMD pulls from Valve. Useful for running community mods, pinning a specific build, or staging a pre-release binary. The stock online path (<code>serverConfig.source: steamcmd</code>) refreshes from app id 4129620 on every restart — switch to <code>source: files</code> in your values if you want your upload to stick across reboots.</p>
+      <p class="muted">Pack command (WSL): <code>tar -czf windrose-server.tgz -C "/mnt/c/Program Files (x86)/Steam/steamapps/common/Windrose/R5/Builds" WindowsServer</code></p>
+      <p class="muted">Uploads preserve <code>R5/Saved/</code>, <code>ServerDescription.json</code>, and <code>WorldDescription.json</code>. A timestamped backup snapshot is written automatically.</p>
+      <div class="row"><input id="archiveFile" type="file" accept=".tar,.tgz,.gz,.zip,application/gzip,application/x-tar,application/zip"></div>
+      <div class="row"><button id="uploadBtn" class="danger">Upload</button></div>
+      <div class="row muted" id="restartHint"></div>
+    </details>
+
+    <div class="card">
+      <h2>Log</h2>
+      <div id="status">Loading status...</div>
+    </div>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

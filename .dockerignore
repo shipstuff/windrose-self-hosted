@@ -1,0 +1,13 @@
+.git
+.github
+**/__pycache__/
+**/*.py[cod]
+.env
+.env.*
+*.log
+*.pid
+*.swp
+*.tgz
+*.tar.gz
+WindowsServer/
+PERF_BASELINE.md

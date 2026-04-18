@@ -1,0 +1,81 @@
+services:
+  windrose:
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:latest}
+    build:
+      context: ./image
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Host networking keeps wine's ephemeral UDP ports reachable at the
+    # docker host's IP, and makes ${P2P_PROXY_ADDRESS} route correctly.
+    network_mode: host
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-Windrose Server}
+      INVITE_CODE: ${INVITE_CODE:-}
+      IS_PASSWORD_PROTECTED: ${IS_PASSWORD_PROTECTED:-false}
+      SERVER_PASSWORD: ${SERVER_PASSWORD:-}
+      MAX_PLAYER_COUNT: ${MAX_PLAYER_COUNT:-4}
+      WORLD_ISLAND_ID: ${WORLD_ISLAND_ID:-default-world}
+      WORLD_NAME: ${WORLD_NAME:-Default Windrose World}
+      WORLD_PRESET_TYPE: ${WORLD_PRESET_TYPE:-Medium}
+      # Leave unset: the entrypoint auto-detects the host's LAN-facing IP
+      # via UDP-connect + getsockname. Set to a literal IP only if the
+      # docker host is multi-homed and auto-detect picks the wrong one.
+      # 0.0.0.0 breaks client-connect — the game advertises it verbatim as
+      # its ICE host candidate and Windows clients bounce to the main menu.
+      P2P_PROXY_ADDRESS: ${P2P_PROXY_ADDRESS:-}
+      WINDROSE_CONFIG_MODE: ${WINDROSE_CONFIG_MODE:-env}
+      WINDROSE_LAUNCH_STRATEGY: ${WINDROSE_LAUNCH_STRATEGY:-shipping}
+      FILES_WAIT_TIMEOUT_SECONDS: ${FILES_WAIT_TIMEOUT_SECONDS:-0}
+      PROTON_USE_XALIA: ${PROTON_USE_XALIA:-0}
+      DISABLE_SENTRY: ${DISABLE_SENTRY:-1}
+      DISPLAY: ":99"
+    volumes:
+      - windrose-data:/home/steam
+      - x11-socket:/tmp/.X11-unix
+    depends_on:
+      - xvfb
+
+  xvfb:
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:latest}
+    restart: unless-stopped
+    # Dedicated X display server. Lives in its own container so its lifecycle
+    # and signal space can't interfere with Proton's (a backgrounded Xvfb in
+    # the same bash as Proton kills Proton in ~3 s via SIGCHLD racing).
+    command: ["Xvfb", ":99", "-screen", "0", "1024x768x24", "-nolisten", "tcp"]
+    volumes:
+      - x11-socket:/tmp/.X11-unix
+
+  windrose-ui:
+    # Same image as the game container. Drops the old separate ui image;
+    # the Python admin console is baked at /opt/windrose-ui/server.py.
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:latest}
+    restart: unless-stopped
+    command: ["python3", "/opt/windrose-ui/server.py"]
+    environment:
+      UI_BIND: ${UI_BIND:-127.0.0.1}
+      UI_PORT: ${UI_PORT:-28080}
+      UI_PASSWORD: ${UI_PASSWORD:-}
+      # Opt-in: allow destructive actions when no password is set (LAN-only).
+      # With UI_PASSWORD set, destructive is always allowed.
+      UI_ENABLE_ADMIN_WITHOUT_PASSWORD: ${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}
+      # Optional Discord / generic JSON webhook notifications. Background
+      # thread polls game state every WINDROSE_WEBHOOK_POLL_SECONDS and
+      # fires events (server.online/offline, player.join/leave, plus
+      # backup.created, backup.restored, config.applied). Empty URLs
+      # disable delivery.
+      WINDROSE_WEBHOOK_EVENTS: ${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave}
+      WINDROSE_WEBHOOK_POLL_SECONDS: ${WINDROSE_WEBHOOK_POLL_SECONDS:-15}
+      WINDROSE_WEBHOOK_TIMEOUT: ${WINDROSE_WEBHOOK_TIMEOUT:-5}
+      WINDROSE_WEBHOOK_URL: ${WINDROSE_WEBHOOK_URL:-}
+      WINDROSE_DISCORD_WEBHOOK_URL: ${WINDROSE_DISCORD_WEBHOOK_URL:-}
+    # UI doesn't need host networking; publish to localhost only by default
+    # so the upload endpoint isn't exposed to the LAN unless the operator
+    # opts in by setting UI_BIND=0.0.0.0 and publishing the port.
+    ports:
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-28080}:${UI_PORT:-28080}"
+    volumes:
+      - windrose-data:/home/steam
+
+volumes:
+  windrose-data:
+  x11-socket:
