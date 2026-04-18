@@ -211,6 +211,10 @@ function sourceSuffix(src) {
 }
 function escapeHtml(s) { return (s||"").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
 function revealable(full, shortStart = 6, shortEnd = 4) {
+  // Public /api/status strips accountId from players[], so a connected
+  // player on an unauth'd load arrives here as undefined. Render a
+  // dash and bail rather than blowing up the whole status render.
+  if (full == null || full === "") return "-";
   const short = full.length > shortStart + shortEnd + 1 ? `${full.slice(0, shortStart)}…${full.slice(-shortEnd)}` : full;
   const safeFull = escapeHtml(full), safeShort = escapeHtml(short);
   return `<span class="reveal">
