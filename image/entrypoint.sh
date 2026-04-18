@@ -19,6 +19,13 @@ timestamp() {
 : "${STEAM_SDK32_PATH:=${HOME}/.steam/sdk32}"
 : "${STEAM_COMPAT_CLIENT_INSTALL_PATH:=${STEAMCMD_PATH}}"
 : "${STEAM_COMPAT_DATA_PATH:=${STEAMCMD_PATH}/steamapps/compatdata/${STEAM_APP_ID}}"
+# Proton is exec'd at the bottom of this script; it reads these from
+# its environment, not from its args. `: "${X:=val}"` only sets in the
+# current shell's local variables and does not export to children. The
+# Dockerfile ENV directive handles this implicitly, but systemd's
+# EnvironmentFile / the bare-linux installer don't — so export here.
+export STEAM_COMPAT_CLIENT_INSTALL_PATH STEAM_COMPAT_DATA_PATH STEAMCMD_PATH \
+       STEAM_SDK64_PATH STEAM_SDK32_PATH WINDROSE_SERVER_DIR HOME
 
 : "${SERVER_NAME:=Windrose Server}"
 : "${INVITE_CODE:=}"
@@ -138,13 +145,16 @@ install_via_steamcmd() {
 
   echo "$(timestamp) INFO: SteamCMD +app_update ${app_id} ${validate_arg:-(no-validate)}"
   mkdir -p "${WINDROSE_SERVER_DIR}"
-  # NB: +login MUST come before +force_install_dir and +app_update.
-  # Steam doesn't error on the order but the app_update evaluation
-  # "Missing configuration" hits when login context isn't yet active.
+  # Arg order matters: +force_install_dir MUST precede +login anonymous.
+  # Valve's client literally prints "Please use force_install_dir before
+  # logon!" and fails app_update with "Missing configuration" otherwise.
+  # (Caught on an Ubuntu 24.04 bare-Linux install where the order-invert
+  # was a hard failure; Debian-13-in-container happens to tolerate the
+  # wrong order sometimes but don't count on it.)
   local rc=0
   "${STEAMCMD_PATH}/steamcmd.sh" \
-    +login anonymous \
     +force_install_dir "${WINDROSE_SERVER_DIR}" \
+    +login anonymous \
     +app_update "${app_id}" ${validate_arg} \
     +quit || rc=$?
 

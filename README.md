@@ -23,8 +23,7 @@ Other Windrose dockerizations exist — this one leans on patterns we already op
 - [Install On Kubernetes With Helm (primary)](#install-on-kubernetes-with-helm)
 - [Install On Kubernetes With Plain Manifests Or Kustomize](#install-on-kubernetes-with-plain-manifests-or-kustomize)
 - [Install With Docker Compose](#install-with-docker-compose)
-
-A bare-Linux `systemd --user` path is planned ([`bare-linux/README.md`](bare-linux/README.md)).
+- [Install On Bare Linux (systemd)](bare-linux/README.md) — three system services (game + Xvfb + UI), validated on Ubuntu 24.04.
 
 ## Published Images And Helm Chart
 
@@ -500,7 +499,7 @@ Everything below this line is for agents and humans editing this repo. Regular o
 - `helm/windrose/`: Helm chart mirroring the plain manifests. Keep values, templates, and this README in sync.
 - `tools/pack-windowsserver.sh`: operator helper to tar `WindowsServer/` from a Steam install, locating it via `libraryfolders.vdf`.
 - `tools/services/api/`: stub for the deferred live-stats API (no Windrose query port exists; would be log-tail-based).
-- `bare-linux/`: stub for deferred systemd install path.
+- `bare-linux/`: bare-Linux systemd install — `install.sh` lays down three system services (game + xvfb + UI) on Ubuntu 22.04+ / Debian 12+.
 - `.github/workflows/`: CI (shellcheck, yamllint, kustomize render, helm template/lint), image publish, chart publish.
 
 ## Deployment Surfaces
