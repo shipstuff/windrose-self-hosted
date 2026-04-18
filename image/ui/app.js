@@ -3,6 +3,7 @@ const adminBanner     = document.getElementById("adminBanner");
 const adminBannerLead = document.getElementById("adminBannerLead");
 const adminBannerText = document.getElementById("adminBannerText");
 const destructiveTag = document.getElementById("destructiveTag");
+const appTitle        = document.getElementById("appTitle");
 const authBox        = document.getElementById("authBox");
 const authState      = document.getElementById("authState");
 const signInBtn      = document.getElementById("signInBtn");
@@ -480,21 +481,36 @@ function applyStatus(data) {
   });
   stagedTag.classList.toggle("hidden", !data.stagedConfigPending);
 
-  // Adaptive admin banner — four states.
+  // H1 flips between a neutral "Status" title in the public view and
+  // the full "Admin Console" label once signed in — so anons see a
+  // status dashboard rather than an admin console they can't use.
+  appTitle.textContent = showAdmin
+    ? "Windrose Self-Hosted Admin Console"
+    : "Windrose Self-Hosted";
+
+  // Adaptive admin banner. Only surfaces when the state actually
+  // warrants an operator warning — a plain "not-signed-in yet" page
+  // doesn't need one (the sign-in button is right there).
   adminBanner.classList.remove("danger", "info");
   if (authed) {
-    // Authed implies destructive allowed (new semantics — we removed the
-    // "auth'd but read-only" tri-state case).
+    adminBanner.classList.remove("hidden");
     adminBannerLead.textContent = "⚠ Admin-only.";
     adminBannerText.innerHTML = "Signed in. Destructive actions (restart, upload, backup restore, world edits) are enabled.";
-  } else if (!destructive) {
+  } else if (!authNeeded && !destructive) {
+    // Auth disabled + destructive disabled: read-only admin console.
+    adminBanner.classList.remove("hidden");
     adminBannerLead.textContent = "⚠ Admin-only (read-only).";
     adminBannerText.innerHTML = "No auth configured. Destructive actions are disabled. If this host is LAN-only you can leave it; otherwise set <code>UI_PASSWORD</code> (or front this with nginx basic-auth).";
-  } else {
-    // no auth + destructive = enableAdminWithoutPassword was set explicitly.
+  } else if (!authNeeded && destructive) {
+    // enableAdminWithoutPassword explicitly set — loud DANGER warning.
+    adminBanner.classList.remove("hidden");
     adminBanner.classList.add("danger");
     adminBannerLead.textContent = "🛑 DANGER — open + writable.";
     adminBannerText.innerHTML = "No auth is configured but destructive endpoints are enabled via <code>enableAdminWithoutPassword=true</code>. Anyone who can reach this URL can wipe the server. Set <code>UI_PASSWORD</code> (or front this with nginx basic-auth) unless this is a firewalled LAN-only host.";
+  } else {
+    // Public view with auth required (authNeeded && !authed) — user just
+    // needs to click Sign in. No operator warning warranted.
+    adminBanner.classList.add("hidden");
   }
 
   // Update card (collapsed by default) — tweak blurb based on state.

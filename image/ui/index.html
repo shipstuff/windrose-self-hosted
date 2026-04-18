@@ -8,7 +8,7 @@
   </head>
   <body>
     <div class="header-row">
-      <h1>Windrose Self-Hosted Admin Console <span id="destructiveTag" class="tag locked hidden">read-only</span></h1>
+      <h1><span id="appTitle">Windrose Self-Hosted</span> <span id="destructiveTag" class="tag locked hidden">read-only</span></h1>
       <div id="authBox" class="auth-box">
         <span id="authState" class="muted">not signed in</span>
         <button id="signInBtn" type="button">Sign in</button>
@@ -62,8 +62,8 @@
       </dl>
       <div class="row">
         <button id="refreshBtn" type="button">Refresh</button>
-        <button id="downloadSavesBtn" type="button">Download saves (.tar.gz)</button>
-        <button id="stopServerBtn" class="danger" type="button">Stop server</button>
+        <button id="downloadSavesBtn" class="admin-only" type="button">Download saves (.tar.gz)</button>
+        <button id="stopServerBtn" class="danger admin-only" type="button">Stop server</button>
       </div>
     </div>
 
