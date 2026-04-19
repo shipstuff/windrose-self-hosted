@@ -20,10 +20,23 @@ Other Windrose dockerizations exist — this one leans on patterns we already op
 
 ## Choose An Install Path
 
-- [Install On Kubernetes With Helm (primary)](#install-on-kubernetes-with-helm)
-- [Install On Kubernetes With Plain Manifests Or Kustomize](#install-on-kubernetes-with-plain-manifests-or-kustomize)
-- [Install With Docker Compose](#install-with-docker-compose)
-- [Install On Bare Linux (systemd)](bare-linux/README.md) — three system services (game + Xvfb + UI), validated on Ubuntu 24.04.
+- **[Kubernetes / Helm](helm/windrose/README.md)** — primary path. `helm upgrade --install windrose ./helm/windrose -n games --create-namespace`. Full override + Secret + config-mode guide in the chart's README.
+- **Kubernetes / plain manifests**: `kubectl apply -k .` — renders the same StatefulSet + PVC + Service + Ingress as the chart. See below.
+- **[Docker Compose](docker-compose.yaml)**: `docker compose up -d`. Env overrides via a sibling `.env` file.
+- **[Bare Linux (systemd)](bare-linux/README.md)** — `sudo ./bare-linux/install.sh`. Three system services running as non-root `steam`, UI on loopback by default.
+
+## Admin UI
+
+The admin console is a stdlib-only Python HTTP server baked into the same container as the game. It handles the invite-code display, server/players/resource status, config editor with staged-changes diffing, per-world editor, backups, manual `WindowsServer` upload, and Discord/generic webhook dispatch. Authentication is optional HTTP basic auth (`UI_PASSWORD`); destructive routes are gated behind that password plus an `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` opt-in for LAN-only deploys.
+
+<!-- Screenshots: add under docs/screenshots/ when a real deployment is handy.
+     Suggested: the invite card, the server config stage/diff view,
+     the worlds card with per-row editor, the backups table. Reference
+     them here as:
+     ![Invite card](docs/screenshots/invite.png)
+     ![Server config diff](docs/screenshots/config-diff.png)
+-->
+
 
 ## Published Images And Helm Chart
 
@@ -88,56 +101,10 @@ helm upgrade --install windrose ./helm/windrose \
   --namespace games --create-namespace
 ```
 
-Install the published OCI chart instead (once released):
-
-```bash
-helm upgrade --install windrose oci://ghcr.io/shipstuff/charts/windrose \
-  --version 0.1.0 \
-  --namespace games --create-namespace
-```
-
-Typical overrides:
-
-```bash
-helm upgrade --install windrose ./helm/windrose \
-  --namespace games --create-namespace \
-  --set serverConfig.serverName="Salty Seas" \
-  --set serverConfig.maxPlayerCount=4 \
-  --set worldConfig.islandId=saltyseas \
-  --set worldConfig.presetType=Hard
-```
-
-Password-protect with a Secret:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: windrose-password
-  namespace: games
-stringData:
-  password: "replace-me"
-```
-
-```bash
-helm upgrade --install windrose ./helm/windrose \
-  --namespace games --create-namespace \
-  --set serverConfig.isPasswordProtected=true \
-  --set serverConfig.passwordSecret.name=windrose-password
-```
-
-Three config-ownership modes, mirroring the Enshrouded chart:
-
-- `serverConfig.mode=env` (default) — seed the example `ServerDescription.json`, patch known keys from env on every start.
-- `serverConfig.mode=managed` — render `serverConfig.inlineJson` into a ConfigMap, merge `Password` from the optional Secret.
-- `serverConfig.mode=mutable` — require a pre-existing `ServerDescription.json` on the PVC and leave it alone.
-
-Override `P2pProxyAddress` if auto-detect picks the wrong interface (multi-homed hosts, WAN-first deployments):
-
-```bash
-helm upgrade windrose ./helm/windrose --reuse-values \
-  --set serverConfig.p2pProxyAddress=203.0.113.7
-```
+See [`helm/windrose/README.md`](helm/windrose/README.md) for typical
+overrides, password-protection via Secret, the three
+`serverConfig.mode` behaviors (`env` / `managed` / `mutable`),
+webhook wiring, and the game-patch update flow.
 
 ## Install On Kubernetes With Plain Manifests Or Kustomize
 
@@ -145,41 +112,39 @@ helm upgrade windrose ./helm/windrose --reuse-values \
 kubectl apply -k .
 ```
 
-Creates the `games` namespace, a 20 GiB PVC, the StatefulSet (`hostNetwork: true`, `nodeSelector: kubernetes.io/hostname: worker-01` as an example — edit to match your node, or drop the selector if persistence is on network storage), a ClusterIP Service for the UI (`publishNotReadyAddresses: true` so the UI stays reachable during game restarts), and an nginx Ingress for `windrose.local`.
-
-After the pod is running and WindowsServer is uploaded (Step 0), open `http://windrose.local` — the Invite card shows the six-character code.
-
-Raw access without the Ingress:
-
-```bash
-kubectl -n games port-forward svc/windrose 28080:28080
-```
+Renders the same StatefulSet + PVC + Service + Ingress as the Helm
+chart. Edit `statefulset.yaml`'s `nodeSelector` to match your node
+(or drop it for network storage). Hostname defaults to
+`windrose.local` on the Ingress. Port-forward without Ingress:
+`kubectl -n games port-forward svc/windrose 28080:28080`.
 
 ## Install With Docker Compose
-
-Optional `.env` for common overrides (auto-detect handles `P2P_PROXY_ADDRESS` on its own unless you're multi-homed or need a specific IP):
-
-```ini
-SERVER_NAME=My Windrose
-MAX_PLAYER_COUNT=4
-WORLD_ISLAND_ID=my-island
-# P2P_PROXY_ADDRESS=192.168.1.100  # override if auto-detect picks the wrong interface
-# UI_BIND=0.0.0.0                  # uncomment to expose UI on LAN
-```
-
-Then:
 
 ```bash
 docker compose up -d
 ```
 
-Build locally instead of pulling:
+Or build locally: `docker compose up -d --build`.
 
-```bash
-docker compose up -d --build
-```
+Override runtime env vars via a sibling `.env` file — common ones are
+`SERVER_NAME`, `MAX_PLAYER_COUNT`, `P2P_PROXY_ADDRESS` (only if
+auto-detect picks the wrong interface), `UI_BIND` / `UI_PASSWORD` to
+expose the admin console. See [`docker-compose.yaml`](docker-compose.yaml)
+for the full env list; it's commented inline.
 
 All three containers come up: `windrose` (game, `network_mode: host`), `xvfb` (display server), `windrose-ui` (UI on `127.0.0.1:28080` by default).
+
+## Install On Bare Linux
+
+```bash
+sudo ./bare-linux/install.sh
+```
+
+Three systemd system services (game + Xvfb + admin UI), running as a
+non-root `steam` user. UI binds to `127.0.0.1` by default; override
+with `UI_BIND=0.0.0.0 UI_PASSWORD=…` at install time. See
+[`bare-linux/README.md`](bare-linux/README.md) for sizing, swap recipe,
+and the pre-loaded-world workflow (recommended for small VPSes).
 
 ## Configure Server Runtime
 
@@ -245,46 +210,6 @@ kubectl -n games delete pod windrose-0
 
 The endpoint accepts `.tar.gz` / `.tar` / `.zip`, auto-detects format by magic bytes first + filename second. Response is plain-text and ends with the backup path for rollback. Restart orchestration from the UI/API is a planned TODO — today the restart is the one remaining manual step.
 
-### Fallback: kubectl cp
-
-Faster on LAN, but **requires you to preserve `ServerDescription.json` manually** or your save gets orphaned. Use this recipe exactly:
-
-```bash
-# Back up identity + save to a safe path outside WindowsServer/.
-kubectl -n games exec windrose-0 -c windrose-ui -- sh -c '
-  ts=$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p /home/steam/backups/$ts
-  cp -a /home/steam/windrose/WindowsServer/R5/Saved              /home/steam/backups/$ts/
-  cp -a /home/steam/windrose/WindowsServer/R5/ServerDescription.json /home/steam/backups/$ts/ 2>/dev/null || true
-  cp -a /home/steam/windrose/WindowsServer/R5/WorldDescription.json  /home/steam/backups/$ts/ 2>/dev/null || true
-  echo "$ts" > /home/steam/backups/latest
-'
-
-# Scale down, clear, scale up into file-wait state.
-kubectl -n games scale statefulset/windrose --replicas=0
-kubectl -n games scale statefulset/windrose --replicas=1
-kubectl -n games wait --for=condition=Ready pod/windrose-0 --timeout=5m
-kubectl -n games exec windrose-0 -c windrose-ui -- sh -c '
-  rm -rf /home/steam/windrose/WindowsServer
-  mkdir -p /home/steam/windrose/WindowsServer
-'
-
-# Copy fresh files straight in (empty target → no nesting).
-kubectl -n games cp \
-  "/mnt/c/Program Files (x86)/Steam/steamapps/common/Windrose/R5/Builds/WindowsServer/." \
-  windrose-0:/home/steam/windrose/WindowsServer \
-  -c windrose-ui
-
-# Restore save + identity on top of the fresh tree.
-kubectl -n games exec windrose-0 -c windrose-ui -- sh -c '
-  ts=$(cat /home/steam/backups/latest)
-  mkdir -p /home/steam/windrose/WindowsServer/R5
-  cp -a /home/steam/backups/$ts/Saved              /home/steam/windrose/WindowsServer/R5/
-  cp -a /home/steam/backups/$ts/ServerDescription.json /home/steam/windrose/WindowsServer/R5/ 2>/dev/null || true
-  cp -a /home/steam/backups/$ts/WorldDescription.json  /home/steam/windrose/WindowsServer/R5/ 2>/dev/null || true
-'
-```
-
 ### Why identity matters
 
 The game stores its `PersistentServerId` in `ServerDescription.json`. On registration, Windrose's backend looks up the island keyed off PSID — your save's `WorldIslandId` is tied to the PSID that originally owned it. If you nuke `ServerDescription.json` as part of an update, the game mints a fresh PSID on next boot, the backend hands you a brand-new island, and your old save sits on disk untied to any server the backend knows about. See `memory/windrose_island_identity.md`.
@@ -329,45 +254,11 @@ Two targets are supported and fire in parallel when both are set:
 - `WINDROSE_WEBHOOK_URL` — generic `application/json` POST. Body is `{"event": "…", "timestamp": "…", …event-specific fields}`.
 - `WINDROSE_DISCORD_WEBHOOK_URL` — formatted as a Discord embed with a color-coded title and a one-line description.
 
-### Helm
+### Wiring the URLs
 
-Inline URLs are fine for private clusters. For anything shared, drop them into a Secret and point Helm at it:
-
-```bash
-kubectl -n games create secret generic windrose-webhooks \
-  --from-literal=discord-webhook-url='https://discord.com/api/webhooks/…'
-```
-
-```yaml
-# values-local.yaml
-ui:
-  webhooks:
-    events: "server.online,server.offline,player.join,player.leave,backup.created"
-    pollSeconds: 15
-    timeout: 5
-    discordUrlSecret:
-      name: windrose-webhooks
-      key: discord-webhook-url
-    # Or inline (not recommended for real deployments):
-    # discordUrl: "https://discord.com/api/webhooks/…"
-    # url: "https://my-listener.example.com/windrose"
-```
-
-`urlSecret` / `discordUrlSecret` take precedence over the inline `url` / `discordUrl` values when both are set.
-
-### Plain Manifests
-
-The stock `statefulset.yaml` ships commented `secretKeyRef` blocks for `WINDROSE_WEBHOOK_URL` and `WINDROSE_DISCORD_WEBHOOK_URL`. Uncomment either (or both), create the Secret, and apply.
-
-### Docker Compose
-
-Set the env vars on the host or in a `.env` next to `docker-compose.yaml`:
-
-```bash
-WINDROSE_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/… \
-WINDROSE_WEBHOOK_EVENTS=server.online,server.offline,player.join,player.leave,backup.created \
-docker compose up -d
-```
+- **Helm**: `ui.webhooks.*` in `values.yaml`. Secret-backed via `urlSecret` / `discordUrlSecret` (recommended) or inline `url` / `discordUrl`. Full recipe in [`helm/windrose/README.md § Webhook Notifications`](helm/windrose/README.md#webhook-notifications-discord--generic).
+- **Plain Kubernetes**: `statefulset.yaml` ships commented `secretKeyRef` blocks for `WINDROSE_WEBHOOK_URL` and `WINDROSE_DISCORD_WEBHOOK_URL`. Uncomment + create the Secret + re-apply.
+- **Docker Compose / bare-Linux**: set `WINDROSE_DISCORD_WEBHOOK_URL` / `WINDROSE_WEBHOOK_URL` via `.env` file or the systemd env file.
 
 ### Verifying Delivery
 
