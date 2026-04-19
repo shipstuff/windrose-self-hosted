@@ -85,11 +85,6 @@ spec:
               value: {{ .Values.worldConfig.presetType | quote }}
             - name: PROTON_USE_XALIA
               value: {{ .Values.protonUseXalia | quote }}
-            {{- if .Values.wineCpuTopology }}
-            # Idle-CPU bug mitigation — see values.yaml's wineCpuTopology comment.
-            - name: WINE_CPU_TOPOLOGY
-              value: {{ .Values.wineCpuTopology | quote }}
-            {{- end }}
             - name: DISABLE_SENTRY
               value: {{ .Values.disableSentry | quote }}
             - name: FILES_WAIT_TIMEOUT_SECONDS

@@ -232,16 +232,6 @@ protonUseXalia: "0"
 disableSentry: "1"
 filesWaitTimeoutSeconds: "0"
 
-# Idle-CPU bug mitigation. The upstream dedicated-server has two busy-spin
-# GameThreads that eat ~1.82 cores before any player connects. Setting this
-# to "1:0" tells Wine to advertise a single-core topology to the Windows
-# process; the spin collapses to ~99% of one core (measured 2026-04-18) and
-# the other core(s) stay free for the P2P handshake burst. Pure win for
-# ≤2 vCPU hosts where there's no headroom; on ≥3 vCPU hosts leave it empty
-# so the game can use extra compute during world-stream / multi-player ticks.
-# See memory/windrose_idle_cpu_known_bug.md.
-wineCpuTopology: ""
-
 resources:
   game:
     # Official guide: ~8G for 2p, ~12G for 4p, ~16G for 10p.

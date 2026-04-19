@@ -10,53 +10,31 @@ anywhere the [`image/Dockerfile`](../image/Dockerfile) deps are available.
 An upstream idle-CPU bug in the dedicated server (UE5 task-worker
 busy-spin, tracked on the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/))
 eats ~1.82 cores before any player is connected. Until that's fixed
-upstream, the box needs real headroom above it. Concretely (validated
-on DigitalOcean droplets 2026-04-18):
+upstream, the box needs real headroom above it. Validated on
+DigitalOcean droplets 2026-04-18/19:
 
 | Box                | Verdict                                                                 |
 | ------------------ | ----------------------------------------------------------------------- |
-| 1 vCPU / any RAM   | **Unplayable.** Even with the mitigation below, there's no second core for the handshake. May become viable if the upstream bug is patched. |
+| 1 vCPU / any RAM   | **Unplayable.** Idle bug pegs the single core; nothing left for the P2P handshake. Client sits in `UePreloginVerified`, Coturn resets after ~180 s, user bounces to menu. |
 | 2 vCPU / 2 GB      | **Unplayable (RAM-bound).** Boots and idles clean for ~9 min, then a delayed ~500 MiB allocation blows past available RAM; the kernel locks up on page reclamation. |
-| 2 vCPU / 4 GB      | **Works**, as long as `WINE_CPU_TOPOLOGY=1:0` is set (install.sh auto-enables it on ≤2 vCPU). |
-| ≥3 vCPU / 4 GB     | **Comfortable.** Mitigation not needed; leave `WINE_CPU_TOPOLOGY` empty so the game can use extra compute during peaks. |
+| 2 vCPU / 4 GB      | **Works, slow first-connect.** The idle bug + terrain generation on a fresh world compete for the 2 cores; handshake datagrams drain slowly and the first connect can take a while. Retries are fine once the world is warm. On slower shared vCPUs, the first connect occasionally races Coturn's ~180 s timeout — a pre-generated / imported save skips the spike entirely. |
+| ≥3 vCPU / 4 GB     | **Comfortable.** Real headroom above the idle bug; fresh-world first-connects complete cleanly. |
 
-Two distinct floors: **CPU ≥ 2 vCPU *with* the mitigation** (because
-the upstream idle-CPU bug otherwise eats ~1.82 cores), **and**
-**RAM ≥ 4 GB** (because there's a delayed working-set step-up ~9 min
-into steady state that 2 GB hosts can't absorb, swap or no swap).
+Two distinct floors:
+- **CPU ≥ 2 vCPU** — the idle bug burns ~1.82 cores on dispatch that has
+  no network peer to pace against, so 1 vCPU has nothing left for the
+  handshake burst. The bug is not reachable from Engine.ini /
+  ConsoleVariables.ini / launch args / Proton env vars; the Shipping
+  binary is stripped enough that most of the relevant CVars aren't even
+  compiled in. See `memory/windrose_idle_cpu_known_bug.md` for the
+  exhaustive negative-result list.
+- **RAM ≥ 4 GB** — 2 GB boxes survive only until a delayed working-set
+  step-up ~9 min into steady state. Swap doesn't save them.
 
-### The idle-CPU mitigation (auto-enabled on ≤2 vCPU)
-
-Windrose's dedicated server has an upstream bug: two threads named
-`GameThread` busy-spin in userspace — zero syscalls for 5+ seconds
-at a time — burning ~1.82 cores before any player connects. It's
-not reachable from Engine.ini / ConsoleVariables.ini / launch args;
-the Shipping build doesn't even ship with the relevant CVars
-compiled in. See `memory/windrose_idle_cpu_known_bug.md` for the
-exhaustive list of things that don't work.
-
-**What *does* work** is telling Wine to report a single-core CPU
-topology to the Windows process: `WINE_CPU_TOPOLOGY=1:0`. The spin
-collapses to ~99% of one core instead of pegging two, and the other
-core stays free for the P2P handshake burst. Measured effect:
-
-- Idle host load: 195% → **99%**
-- UI-sidecar latency p95: 36 ms → **14 ms**
-
-`install.sh` writes `WINE_CPU_TOPOLOGY=1:0` into
-`/etc/windrose/windrose.env` when it detects `nproc ≤ 2`, and leaves
-it empty otherwise. Override either way with an explicit env var at
-install time:
-
-```bash
-sudo WINE_CPU_TOPOLOGY=1:0 ./bare-linux/install.sh   # force-on
-sudo WINE_CPU_TOPOLOGY=""  ./bare-linux/install.sh   # force-off
-```
-
-Memory sizing is less scary than the 2.7 GiB RSS number suggests —
-most of it is cold pages that park to swap happily (see § Swap and
-`memory_footprint_cold_pages.md`) — but the 9-minute step-up still
-sets the RAM floor above 2 GB regardless of how generous your swap is.
+Memory sizing looks scarier than it is — the game's 2.7 GiB RSS is
+mostly cold memory-mapped paks that park to swap harmlessly (see § Swap
+and `memory_footprint_cold_pages.md`) — but the 9-minute step-up still
+sets the RAM floor above 2 GB regardless of how much swap you provision.
 
 ## Quick Install
 
