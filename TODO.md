@@ -52,6 +52,35 @@ Small, coherent UX follow-ups on top of the current admin console.
   apply order matters. Low-probability corner case but worth a validation
   pass.
 
+## `install.sh --update` + version-pinned UI bundles
+
+Today's bare-linux flow re-copies UI assets from whatever local
+checkout install.sh is run from — so operators running an older
+`windrose-src-test/` directory reinstall old UI files even when
+the repo has new ones. Discovered 2026-04-19 when the canary's
+admin console didn't pick up dark mode until we scp'd fresh assets
+by hand.
+
+Plan:
+1. **Tagged artifact bundle.** On every `v*` tag, CI builds a
+   `windrose-ui-<version>.tar.gz` (just `image/ui/*` + `image/entrypoint.sh`
+   + `image/*_example.json`) and attaches it as a GitHub release
+   asset (or publishes as a GHCR OCI artifact alongside the chart).
+2. **`install.sh --update [<version>]` flag.** Downloads the tagged
+   bundle to a temp dir, invokes the normal install flow pointed at
+   that dir, reuses the merge-semantics we already have so env +
+   services survive. Default version = latest release tag (queried
+   via `gh release view --json tagName` or a plain redirect URL).
+   `install.sh --update v0.1.3` pins a specific tag.
+3. **Version pin in `/etc/windrose/windrose.env`** (`WINDROSE_INSTALLED_VERSION=`)
+   so `systemctl status` / `journalctl` context makes it obvious what
+   version is live.
+4. **`bare-linux/README.md § Updating`** section explaining the
+   upgrade flow, the tag-pinning option, and the rollback path
+   (re-run with the previous tag).
+
+Until this lands, the workflow is `cd <checkout> && git pull && sudo ./bare-linux/install.sh`.
+
 ## Watchdog for backend-stuck state
 
 Observed 2026-04-17: Windrose's backend returned transient 503 / severed
