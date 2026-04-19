@@ -151,27 +151,82 @@ ln -snf "${WINDROSE_INSTALL_DIR}/image/ui" /opt/windrose-ui
 install -d -m 1777 /tmp/.X11-unix
 
 # --- Env file ---------------------------------------------------------
-# Never clobber an existing env file — operators edit /etc/windrose/windrose.env
-# directly for things the installer doesn't know about (WINDROSE_CONFIG_MODE,
-# BLACKHOLE_REGIONS, custom launch args, rotated passwords). Re-running
-# install.sh used to silently overwrite the whole file and wipe those
-# customizations — we learned that the hard way 2026-04-19 when re-running
-# install.sh on the canary to test webhook env-var pass-through reset
-# WINDROSE_CONFIG_MODE=mutable back to default env, which then started
-# stamping WORLD_NAME from env on every restart.
+# Precedence when re-running install.sh:
+#   1. explicit CLI env  (sudo UI_PASSWORD=xyz ./install.sh)            wins
+#   2. existing env-file value at /etc/windrose/windrose.env            next
+#   3. install.sh default (baked below)                                 last
+# Keys install.sh doesn't manage (operator additions like
+# WINDROSE_CONFIG_MODE=mutable, custom SERVER_LAUNCH_ARGS, etc.) are
+# preserved verbatim and appended under an "Operator additions" block
+# at the bottom of the regenerated file. Makes the script idempotent:
+# re-running with no CLI overrides produces the same file and loses
+# zero customization.
+#
+# (Learned the hard way 2026-04-19: I'd set WINDROSE_CONFIG_MODE=mutable
+# on the canary by hand, then a later `bash install.sh` to test a
+# different knob blew it away. Entrypoint fell back to env-mode and
+# started re-stamping WORLD_NAME on every boot.)
 install -d -o root -g "${WINDROSE_GROUP}" -m 0750 "${WINDROSE_ENV_DIR}"
-if [ -f "${WINDROSE_ENV_FILE}" ]; then
-  warn "${WINDROSE_ENV_FILE} already exists — preserving as-is."
-  warn "If you want to reset with the latest installer defaults, rm the file first and re-run install.sh."
-  # Skip env-file writing entirely. Services are (re)started below — the
-  # existing env values take effect on that restart.
-else
+
+# Whitespace-separated list of every key install.sh generates below.
+# Anything else found in an existing env file is kept verbatim.
+_MANAGED_KEYS=" \
+  HOME WINDROSE_PATH STEAMCMD_PATH STEAM_SDK64_PATH STEAM_SDK32_PATH \
+  DISPLAY WINDROSE_SERVER_SOURCE SERVER_NAME MAX_PLAYER_COUNT \
+  IS_PASSWORD_PROTECTED SERVER_PASSWORD WORLD_ISLAND_ID WORLD_NAME \
+  WORLD_PRESET_TYPE P2P_PROXY_ADDRESS DISABLE_SENTRY PROTON_USE_XALIA \
+  FILES_WAIT_TIMEOUT_SECONDS UI_BIND UI_PORT UI_PASSWORD \
+  UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
+  WINDROSE_DISCORD_WEBHOOK_URL WINDROSE_WEBHOOK_URL \
+  WINDROSE_WEBHOOK_EVENTS WINDROSE_WEBHOOK_POLL_SECONDS \
+  WINDROSE_WEBHOOK_TIMEOUT \
+"
+
+PRESERVED_EXTRAS=""
+_preserved_order=()
+declare -A _preserved_map=()
+if [ "${WINDROSE_RESET:-0}" = "1" ] && [ -f "${WINDROSE_ENV_FILE}" ]; then
+  warn "WINDROSE_RESET=1 — discarding existing ${WINDROSE_ENV_FILE}"
+  warn "(a timestamped backup is still written under the env dir)"
+  cp -p "${WINDROSE_ENV_FILE}" "${WINDROSE_ENV_FILE}.reset-bak-$(date +%s)"
+elif [ -f "${WINDROSE_ENV_FILE}" ]; then
+  log "merging with existing ${WINDROSE_ENV_FILE}"
+  while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+    # Skip blanks + comments + any line that isn't a plain KEY=value.
+    [ -z "$_k" ] && continue
+    case "$_k" in \#*|*[[:space:]]*) continue ;; esac
+
+    # Managed key? Only populate the shell var if the operator DIDN'T
+    # already set it on the command line — that's how CLI wins.
+    case " ${_MANAGED_KEYS} " in
+      *" $_k "*)
+        if [ -z "${!_k+x}" ]; then
+          printf -v "$_k" '%s' "$_v"
+        fi
+        ;;
+      *)
+        # Unknown/operator-added key — dedupe by key (last-wins),
+        # preserve first-seen order.
+        if [ -z "${_preserved_map[$_k]+x}" ]; then
+          _preserved_order+=("$_k")
+        fi
+        _preserved_map[$_k]="$_v"
+        ;;
+    esac
+  done < "${WINDROSE_ENV_FILE}"
+  # Flatten the dedupe'd extras into the string the write step appends.
+  for _k in "${_preserved_order[@]}"; do
+    PRESERVED_EXTRAS="${PRESERVED_EXTRAS}${_k}=${_preserved_map[$_k]}"$'\n'
+  done
+fi
+
 log "writing env file ${WINDROSE_ENV_FILE}"
 tmp_env="$(mktemp)"
 cat > "${tmp_env}" <<EOF
 # Written by bare-linux/install.sh. Edit freely; windrose-game restart
 # picks up changes. Any WINDROSE_* / UI_* / SERVER_* / WORLD_* env var
-# the entrypoint understands is valid here.
+# the entrypoint understands is valid here — additions land under the
+# "Operator additions" section at the bottom and survive re-installs.
 HOME=${WINDROSE_HOME}
 WINDROSE_PATH=${WINDROSE_HOME}/windrose
 STEAMCMD_PATH=${WINDROSE_HOME}/steamcmd
@@ -211,9 +266,20 @@ WINDROSE_WEBHOOK_EVENTS=${WINDROSE_WEBHOOK_EVENTS}
 WINDROSE_WEBHOOK_POLL_SECONDS=${WINDROSE_WEBHOOK_POLL_SECONDS}
 WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT}
 EOF
+
+# Preserve operator-added keys (anything NOT in _MANAGED_KEYS that
+# was in the existing env file) under a trailing section. PRESERVED_EXTRAS
+# already ends with a newline from the merge loop so we append it raw
+# rather than via a second here-doc.
+if [ -n "${PRESERVED_EXTRAS}" ]; then
+  {
+    printf '\n# --- Operator additions (preserved across install.sh runs) ---\n'
+    printf '%s' "${PRESERVED_EXTRAS}"
+  } >> "${tmp_env}"
+fi
+
 install -m 0640 -o root -g "${WINDROSE_GROUP}" "${tmp_env}" "${WINDROSE_ENV_FILE}"
 rm -f "${tmp_env}"
-fi
 
 # --- Service units ----------------------------------------------------
 write_unit() {
