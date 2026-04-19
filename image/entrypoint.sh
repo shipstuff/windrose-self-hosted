@@ -226,6 +226,70 @@ maybe_disable_sentry() {
   fi
 }
 
+# Optional: patch the shipping EXE to throttle the idle-spin loop in
+# `boost::asio::detail::socket_select_interrupter::reset()`. Without this,
+# two game threads burn ~91% CPU each when no player is connected (pure
+# userspace busy-loop on an Asio socket-pair drain; confirmed via
+# strace showing 0 syscalls in 3 s on either thread). The patch injects
+# a `Sleep(1)` call at the loop-continue tail — each iteration now
+# yields to the kernel via pselect6, cutting idle CPU from ~200% to ~5%
+# on the canary. Patch is idempotent (script rejects already-patched
+# binary), isolated to 43 bytes (5 at the site + 38 in CC padding),
+# and reverts cleanly via `--revert`. See
+# `tools/patch-idle-cpu.py` for the derivation + rollback path.
+#
+# Off by default — operator opts in by setting WINDROSE_PATCH_IDLE_CPU=1.
+# When ON, failure to patch (wrong build md5, missing python3) is a
+# warning, not a fatal: we'd rather boot with a busy server than not
+# boot at all.
+maybe_patch_idle_cpu() {
+  : "${WINDROSE_PATCH_IDLE_CPU:=0}"
+  if [ "${WINDROSE_PATCH_IDLE_CPU}" != "1" ]; then
+    return 0
+  fi
+  local exe="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
+  # In-image location (installed by Dockerfile to /usr/local/bin).
+  local script="/usr/local/bin/patch-idle-cpu.py"
+  if [ ! -f "${script}" ]; then
+    # Fall back to tools/ in the repo — useful for bare-Linux installs
+    # where the operator ran the installer from a repo checkout.
+    script="$(dirname "$0")/patch-idle-cpu.py"
+  fi
+  if [ ! -f "${script}" ]; then
+    script="$(dirname "$0")/../tools/patch-idle-cpu.py"
+  fi
+  if [ ! -f "${exe}" ]; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but ${exe} is missing"
+    return 0
+  fi
+  if [ ! -f "${script}" ]; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but patch-idle-cpu.py not found in image"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but python3 not available"
+    return 0
+  fi
+  # Is it already patched? The script rejects a second apply, so test
+  # by checking md5 against both known states — cheaper than dry-run.
+  local current_md5
+  current_md5="$(md5sum "${exe}" | awk '{print $1}')"
+  local original_md5="61e320a6a45f4ac539f2c5d0f7b7ff2c"
+  local patched_md5="b1796533f22603ad2f2da021033e3f9f"
+  if [ "${current_md5}" = "${patched_md5}" ]; then
+    echo "$(timestamp) INFO: Idle-CPU patch already applied (md5 matches patched build); skipping"
+    return 0
+  fi
+  if [ "${current_md5}" != "${original_md5}" ]; then
+    echo "$(timestamp) WARNING: Shipping EXE md5 (${current_md5}) doesn't match the build this patch was derived against (${original_md5}). Skipping patch — re-derive offsets for the new build before re-enabling."
+    return 0
+  fi
+  echo "$(timestamp) INFO: Applying idle-CPU patch via ${script} (drops idle CPU from ~200% to ~5%)"
+  if ! python3 "${script}" "${exe}"; then
+    echo "$(timestamp) WARNING: Idle-CPU patch failed; binary left unmodified"
+  fi
+}
+
 detect_save_version() {
   local root="${WINDROSE_SAVE_ROOT}"
   [ -d "${root}" ] || { echo ""; return; }
@@ -395,6 +459,7 @@ migrate_saves_on_version_change
 ensure_world_layout
 reconcile_server_config
 maybe_disable_sentry
+maybe_patch_idle_cpu
 
 # Seed Engine.ini with the project default net tick rate on first
 # boot only. Windrose uses UR5NetDriver, not stock UIpNetDriver, so

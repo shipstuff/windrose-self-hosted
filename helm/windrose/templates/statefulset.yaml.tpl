@@ -87,6 +87,8 @@ spec:
               value: {{ .Values.protonUseXalia | quote }}
             - name: DISABLE_SENTRY
               value: {{ .Values.disableSentry | quote }}
+            - name: WINDROSE_PATCH_IDLE_CPU
+              value: {{ .Values.patchIdleCpu | default 0 | quote }}
             - name: FILES_WAIT_TIMEOUT_SECONDS
               value: {{ .Values.filesWaitTimeoutSeconds | quote }}
             - name: SERVER_LAUNCH_ARGS

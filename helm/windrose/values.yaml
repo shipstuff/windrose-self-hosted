@@ -230,6 +230,16 @@ worldConfig:
 
 protonUseXalia: "0"
 disableSentry: "1"
+# Binary-patch the shipping EXE at boot to throttle the idle-CPU busy-
+# loop (boost::asio socket_select_interrupter::reset spinning under
+# Wine). When set to "1", the entrypoint runs `patch-idle-cpu.py`
+# against the game binary before launch. Drops idle CPU from ~200% to
+# ~5%. Safe to leave off for a conservative default — the patch is
+# tied to a specific build md5 and is a no-op on unknown builds, but
+# operators might still prefer to review the script (in
+# tools/patch-idle-cpu.py) before enabling. See the same file for the
+# reverse-engineering rationale and rollback (--revert).
+patchIdleCpu: "0"
 filesWaitTimeoutSeconds: "0"
 
 resources:
@@ -240,16 +250,19 @@ resources:
       memory: 4Gi
     limits:
       memory: 16Gi
-      # Strongly recommended: uncomment a CPU limit. Windrose has an
-      # upstream idle-CPU bug: two UE5 TaskGraph worker threads busy-
-      # spin in userspace before any client is connected (strace shows
-      # zero syscalls for 5 s on the hot threads — pure busy-wait,
-      # unreachable from engine config). The cgroup CPU limit is the
-      # only working mitigation until the devs ship a fix; 14 plausible
-      # Engine.ini / ConsoleVariables.ini / launch-arg / Proton-env
-      # knobs have been tested, none move the idle number off 2 cores.
-      # See memory/windrose_idle_cpu_known_bug.md for the full list +
-      # root-cause notes.
+      # The idle-CPU bug: Windrose's dedicated server busy-spins two
+      # threads (~1.82 cores) when no player is connected. Two paths:
+      #   - patchIdleCpu: "1"  (see above) — binary-patches the game
+      #     binary to inject a Sleep(1) into the hot loop. Measured
+      #     97.5% reduction in idle CPU on the canary; no known side
+      #     effects. Preferred solution. Works on the specific
+      #     Windrose build whose md5 matches the patch's expected
+      #     checksum; a no-op on other builds.
+      #   - cgroup CPU cap (below) — works universally but wasteful
+      #     (throttle is real but harmless during idle; gameplay CPU
+      #     stays well below the cap so no latency impact).
+      # Either path is sufficient; you don't need both. Measurements
+      # in the sizing comment below assume the patch is NOT applied.
       #
       # Sizing (measured 2026-04-17 on AMD Ryzen 9 9955HX @ 4.7 GHz,
       # x86-64, hostNetwork:true, 1 map, defaults):
