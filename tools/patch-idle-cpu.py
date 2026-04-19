@@ -21,6 +21,17 @@ Safety:
   - No new imports, no new code sections; 43 bytes modified total
     (5 at the patch site + 38 in a pre-existing CC-padding window).
 
+DISCLAIMER: This script modifies a proprietary binary. It is provided
+AS IS, with no warranty of any kind, express or implied — it may break,
+malfunction, corrupt saves, or become inapplicable on any future
+Windrose build. You are responsible for ensuring your use complies
+with the Windrose EULA, the Steam Subscriber Agreement, and any
+applicable terms of service or laws in your jurisdiction; running this
+against a binary you do not own a valid license to is not supported.
+The authors do not distribute modified copies of the Windrose binary
+and do not authorize redistribution of any binary this script produces.
+The full risk as to functionality and legal compliance rests with you.
+
 Measured impact (2026-04-19, sf-west-1 canary pod, AMD Ryzen 9 9955HX, 32-core host):
   - Baseline idle CPU  : 206.65%  (two GameThreads at ~91% each + ~5% main)
   - Patched idle CPU   :   5.08%  (mean of 10x 30s samples)
