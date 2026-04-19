@@ -63,6 +63,14 @@ fi
 : "${FILES_WAIT_TIMEOUT_SECONDS:=0}"   # 0 = wait forever for the UI sidecar to populate
 : "${FILES_WAIT_POLL_SECONDS:=5}"
 : "${WINDROSE_CONFIG_MODE:=env}"
+# Default R5NetDriver replication tick rate seeded on first boot if no
+# Saved/Config/WindowsServer/Engine.ini exists yet. 60 is the sweet
+# spot for Windrose's co-op sailing/combat — 2x smoother positional
+# updates than stock 30 Hz, without the 4x bandwidth/CPU overhead of
+# 120. Operators can override via env (this value) or by editing the
+# generated Engine.ini directly; entrypoint only seeds if the file is
+# absent, never overwrites an existing one.
+: "${NET_SERVER_MAX_TICK_RATE:=60}"
 # How to get the server binary. `steamcmd` (default) pulls app id 4129620
 # anonymously on every boot — auto-patches. `files` skips SteamCMD and
 # waits for the operator to populate ${WINDROSE_SERVER_DIR} via the UI
@@ -387,6 +395,30 @@ migrate_saves_on_version_change
 ensure_world_layout
 reconcile_server_config
 maybe_disable_sentry
+
+# Seed Engine.ini with the project default net tick rate on first
+# boot only. Windrose uses UR5NetDriver, not stock UIpNetDriver, so
+# we target /Script/R5SocketSubsystem.R5NetDriver. Stock IpNetDriver
+# section mirrored as belt-and-suspenders. Does NOT overwrite an
+# operator-customized file.
+engine_ini="${WINDROSE_SERVER_DIR}/R5/Saved/Config/WindowsServer/Engine.ini"
+if [ ! -f "${engine_ini}" ]; then
+  mkdir -p "$(dirname "${engine_ini}")"
+  cat > "${engine_ini}" <<EOF
+; Seeded by windrose-self-hosted entrypoint on $(date -uIseconds).
+; Default R5NetDriver tick rate — 60 Hz is the project-wide default
+; (2x smoother than stock 30 Hz, low CPU/bandwidth cost on co-op
+; workloads). Override via NET_SERVER_MAX_TICK_RATE env var on the
+; next pristine install, or edit this file directly — the entrypoint
+; only seeds when the file is absent.
+[/Script/R5SocketSubsystem.R5NetDriver]
+NetServerMaxTickRate=${NET_SERVER_MAX_TICK_RATE}
+
+[/Script/OnlineSubsystemUtils.IpNetDriver]
+NetServerMaxTickRate=${NET_SERVER_MAX_TICK_RATE}
+EOF
+  echo "$(timestamp) INFO: Seeded ${engine_ini} with NetServerMaxTickRate=${NET_SERVER_MAX_TICK_RATE}"
+fi
 
 if [ "${WINDROSE_LAUNCH_STRATEGY}" = "launcher" ]; then
   EXE="${WINDROSE_SERVER_DIR}/WindroseServer.exe"
