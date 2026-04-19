@@ -121,6 +121,9 @@ Or just edit the env file and `systemctl restart windrose-game` after.
 | `WORLD_PRESET_TYPE` | `Medium` | `Easy`, `Medium`, `Hard`, `Custom` |
 | `P2P_PROXY_ADDRESS` | auto-detected | ICE host candidate. Leave empty unless the host is multi-homed. |
 | `WINDROSE_SERVER_SOURCE` | `steamcmd` | `steamcmd` (anonymous app_update) or `files` (BYO tarball via UI) |
+| `WINDROSE_DISCORD_WEBHOOK_URL` | empty | Post server.online/offline, player.join/leave, backup + config events as Discord embeds. Create the webhook in your Discord server's Integrations pane. |
+| `WINDROSE_WEBHOOK_URL` | empty | Same event set, generic `application/json` POST. Fires in parallel with the Discord one. |
+| `WINDROSE_WEBHOOK_EVENTS` | full set | Comma-separated subset to actually dispatch. Empty URLs disable delivery regardless. |
 
 ## Pre-loading The World (recommended for small VPSes)
 

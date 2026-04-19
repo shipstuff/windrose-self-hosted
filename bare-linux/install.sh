@@ -50,6 +50,14 @@ UI_PORT="${UI_PORT:-28080}"
 UI_PASSWORD="${UI_PASSWORD:-}"
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD="${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}"
 
+# Webhook knobs. All optional; if the URL vars are empty the
+# EventDetector thread still runs but skips dispatch.
+WINDROSE_WEBHOOK_URL="${WINDROSE_WEBHOOK_URL:-}"
+WINDROSE_DISCORD_WEBHOOK_URL="${WINDROSE_DISCORD_WEBHOOK_URL:-}"
+WINDROSE_WEBHOOK_EVENTS="${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}"
+WINDROSE_WEBHOOK_POLL_SECONDS="${WINDROSE_WEBHOOK_POLL_SECONDS:-15}"
+WINDROSE_WEBHOOK_TIMEOUT="${WINDROSE_WEBHOOK_TIMEOUT:-5}"
+
 # Warn if the operator is reaching for a publicly-exposed UI without
 # a password. Not fatal — compose / bare-Linux have legitimate
 # LAN-only deploys where this is fine — but loud so it's deliberate.
@@ -173,6 +181,21 @@ UI_PORT=${UI_PORT}
 UI_PASSWORD=${UI_PASSWORD}
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD=${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}
 UI_SERVE_STATIC=${UI_SERVE_STATIC:-true}
+
+# Webhook notifications — Discord embed + generic JSON POST. Leave URLs
+# empty to disable delivery (the EventDetector thread still runs but
+# skips dispatch). Restart windrose-ui after editing these.
+#
+# Event types (restrict via WINDROSE_WEBHOOK_EVENTS):
+#   server.online / server.offline   — game process appears / disappears
+#   player.join / player.leave       — AccountId appears in / drops from snapshot
+#   backup.created / backup.restored — /api/backups activity
+#   config.applied                   — admin console Apply + restart path
+WINDROSE_DISCORD_WEBHOOK_URL=${WINDROSE_DISCORD_WEBHOOK_URL}
+WINDROSE_WEBHOOK_URL=${WINDROSE_WEBHOOK_URL}
+WINDROSE_WEBHOOK_EVENTS=${WINDROSE_WEBHOOK_EVENTS}
+WINDROSE_WEBHOOK_POLL_SECONDS=${WINDROSE_WEBHOOK_POLL_SECONDS}
+WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT}
 EOF
 install -m 0640 -o root -g "${WINDROSE_GROUP}" "${tmp_env}" "${WINDROSE_ENV_FILE}"
 rm -f "${tmp_env}"
