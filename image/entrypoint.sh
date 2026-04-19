@@ -256,22 +256,52 @@ ensure_world_layout() {
   if [ "${WINDROSE_CONFIG_MODE}" != "env" ]; then
     return 0
   fi
-  local world_desc island_dir island_id
+
+  # Resolve the single world this boot's env vars apply to. The older
+  # behavior looped over every WorldDescription.json on disk and
+  # patched the WorldName / WorldPresetType whenever WORLD_ISLAND_ID
+  # was either unset or left at the sentinel "default-world" — which
+  # silently cross-contaminated every inactive world's metadata with
+  # the active world's SERVER_NAME / WORLD_NAME. On multi-world save
+  # trees (e.g. operators who generated a second world via the UI)
+  # that clobbers names across restarts.
+  #
+  # Resolution order:
+  #   1. explicit WORLD_ISLAND_ID env (if set and not the sentinel)
+  #   2. ServerDescription.json's WorldIslandId (backend-authoritative)
+  # If neither resolves we skip patching — the UI editor becomes the
+  # authoritative path for per-world metadata.
+  local target_island=""
+  if [ -n "${WORLD_ISLAND_ID}" ] && [ "${WORLD_ISLAND_ID}" != "default-world" ]; then
+    target_island="${WORLD_ISLAND_ID}"
+  elif [ -f "${WINDROSE_SERVER_CONFIG}" ]; then
+    target_island="$(jq -r '.ServerDescription_Persistent.WorldIslandId // ""' "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
+  fi
+  if [ -z "${target_island}" ]; then
+    echo "$(timestamp) INFO: No target WorldIslandId resolved (WORLD_ISLAND_ID unset + no ServerDescription.json yet); skipping WorldDescription env-mode patch"
+    return 0
+  fi
+
+  local world_desc island_dir island_id patched=0
   while IFS= read -r world_desc; do
     [ -z "${world_desc}" ] && continue
     island_dir="$(dirname "${world_desc}")"
     island_id="$(basename "${island_dir}")"
-    if [ -n "${WORLD_ISLAND_ID}" ] && [ "${WORLD_ISLAND_ID}" != "default-world" ] \
-      && [ "${island_id}" != "${WORLD_ISLAND_ID}" ]; then
+    if [ "${island_id}" != "${target_island}" ]; then
       continue
     fi
-    echo "$(timestamp) INFO: Patching WorldDescription at ${world_desc}"
+    echo "$(timestamp) INFO: Patching WorldDescription at ${world_desc} (active island ${target_island})"
     jq \
       --arg name "${WORLD_NAME}" \
       --arg preset "${WORLD_PRESET_TYPE}" \
       '.WorldDescription.WorldName = $name | .WorldDescription.WorldPresetType = $preset' \
       "${world_desc}" > "${world_desc}.tmp" && mv "${world_desc}.tmp" "${world_desc}"
+    patched=1
   done < <(find "${WINDROSE_SAVE_ROOT}/${version}/Worlds" -maxdepth 2 -name 'WorldDescription.json' 2>/dev/null)
+
+  if [ "${patched}" -eq 0 ]; then
+    echo "$(timestamp) INFO: Active island ${target_island} has no WorldDescription.json yet; the game will bootstrap it"
+  fi
 }
 
 reconcile_server_config() {
