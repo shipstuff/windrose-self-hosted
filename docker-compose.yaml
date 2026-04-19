@@ -27,6 +27,12 @@ services:
       WINDROSE_LAUNCH_STRATEGY: ${WINDROSE_LAUNCH_STRATEGY:-shipping}
       FILES_WAIT_TIMEOUT_SECONDS: ${FILES_WAIT_TIMEOUT_SECONDS:-0}
       PROTON_USE_XALIA: ${PROTON_USE_XALIA:-0}
+      # Idle-CPU bug mitigation. Empty = game sees all host cores (right for
+      # 3+ vCPU); "1:0" = Wine advertises 1 core to the game, pinning the
+      # upstream busy-spin GameThreads to CPU 0 and freeing the rest for
+      # handshake / UI / Coturn drain. Enable on ≤2 vCPU hosts.
+      # See memory/windrose_idle_cpu_known_bug.md.
+      WINE_CPU_TOPOLOGY: ${WINE_CPU_TOPOLOGY:-}
       DISABLE_SENTRY: ${DISABLE_SENTRY:-1}
       DISPLAY: ":99"
     volumes:

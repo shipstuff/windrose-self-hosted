@@ -131,6 +131,23 @@ install -d -m 1777 /tmp/.X11-unix
 # --- Env file ---------------------------------------------------------
 log "writing env file ${WINDROSE_ENV_FILE}"
 install -d -o root -g "${WINDROSE_GROUP}" -m 0750 "${WINDROSE_ENV_DIR}"
+
+# Auto-enable the idle-CPU mitigation on small boxes. WINE_CPU_TOPOLOGY=1:0
+# tells Wine to report a single-core topology to the Windows process, which
+# pins the game's two busy-spin GameThreads to CPU 0 and cuts idle host
+# load from ~195% to ~99% (measured 2026-04-18). On ≤2 vCPU hosts this is
+# the difference between "connect handshake starves" and "handshake
+# completes cleanly" — see memory/windrose_idle_cpu_known_bug.md. On ≥3
+# vCPU hosts there's no headroom problem and we leave the game unconstrained.
+wine_topology=""
+if [ "${WINE_CPU_TOPOLOGY:-}" != "" ]; then
+  wine_topology="${WINE_CPU_TOPOLOGY}"
+  log "WINE_CPU_TOPOLOGY=${wine_topology} (operator-specified)"
+elif [ "${mem_mib:-0}" -gt 0 ] && [ "$(nproc)" -le 2 ]; then
+  wine_topology="1:0"
+  log "auto-enabled WINE_CPU_TOPOLOGY=1:0 (nproc=$(nproc)) — quarantines the upstream idle-CPU bug to a single core"
+fi
+
 tmp_env="$(mktemp)"
 cat > "${tmp_env}" <<EOF
 # Written by bare-linux/install.sh. Edit freely; windrose-game restart
@@ -154,6 +171,10 @@ P2P_PROXY_ADDRESS=${P2P_PROXY_ADDRESS:-}
 DISABLE_SENTRY=${DISABLE_SENTRY:-1}
 PROTON_USE_XALIA=${PROTON_USE_XALIA:-0}
 FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
+# Idle-CPU bug mitigation. Empty = game sees all cores (right for 3+ vCPU).
+# "1:0" = Wine reports a single core, pinning the two busy-spin GameThreads
+# to CPU 0 and freeing the other(s) for handshake / UI / Coturn drain.
+WINE_CPU_TOPOLOGY=${wine_topology}
 UI_BIND=${UI_BIND}
 UI_PORT=${UI_PORT}
 UI_PASSWORD=${UI_PASSWORD}

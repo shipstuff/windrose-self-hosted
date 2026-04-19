@@ -15,19 +15,48 @@ on DigitalOcean droplets 2026-04-18):
 
 | Box                | Verdict                                                                 |
 | ------------------ | ----------------------------------------------------------------------- |
-| 1 vCPU / 2 GB      | **Unplayable (CPU-bound).** Connect handshake starves; Coturn resets after ~180 s. May become viable if the upstream idle bug is patched. |
-| 2 vCPU / 2 GB      | **Unplayable (RAM-bound).** Boots and idles clean for ~9 min, then a delayed ~500 MiB allocation blows past available RAM and the host locks up on page reclamation. No player ever connects. |
-| 2 vCPU / 4 GB + imported save | **Works.** Handshake completes, 1 player plays fine.                    |
-| ≥3 vCPU / 4 GB     | **Comfortable.** Room above the idle bug for connect bursts.            |
+| 1 vCPU / any RAM   | **Unplayable.** Even with the mitigation below, there's no second core for the handshake. May become viable if the upstream bug is patched. |
+| 2 vCPU / 2 GB      | **Unplayable (RAM-bound).** Boots and idles clean for ~9 min, then a delayed ~500 MiB allocation blows past available RAM; the kernel locks up on page reclamation. |
+| 2 vCPU / 4 GB      | **Works**, as long as `WINE_CPU_TOPOLOGY=1:0` is set (install.sh auto-enables it on ≤2 vCPU). |
+| ≥3 vCPU / 4 GB     | **Comfortable.** Mitigation not needed; leave `WINE_CPU_TOPOLOGY` empty so the game can use extra compute during peaks. |
 
-Two distinct floors, not one: **CPU ≥ 2 vCPU** (because the idle bug
-eats ~1.82 cores) **and** **RAM ≥ 4 GB** (because there's a delayed
-working-set step-up ~9 min into steady state that 2 GB hosts can't
-absorb, swap or no swap). Memory sizing is still less scary than the
-2.7 GiB RSS number suggests — most of it IS cold pages that park to
-swap happily (see § Swap below and `memory_footprint_cold_pages.md`)
-— but the 9-minute step-up sets the real floor above a 2 GB box
-regardless of how generous your swap is.
+Two distinct floors: **CPU ≥ 2 vCPU *with* the mitigation** (because
+the upstream idle-CPU bug otherwise eats ~1.82 cores), **and**
+**RAM ≥ 4 GB** (because there's a delayed working-set step-up ~9 min
+into steady state that 2 GB hosts can't absorb, swap or no swap).
+
+### The idle-CPU mitigation (auto-enabled on ≤2 vCPU)
+
+Windrose's dedicated server has an upstream bug: two threads named
+`GameThread` busy-spin in userspace — zero syscalls for 5+ seconds
+at a time — burning ~1.82 cores before any player connects. It's
+not reachable from Engine.ini / ConsoleVariables.ini / launch args;
+the Shipping build doesn't even ship with the relevant CVars
+compiled in. See `memory/windrose_idle_cpu_known_bug.md` for the
+exhaustive list of things that don't work.
+
+**What *does* work** is telling Wine to report a single-core CPU
+topology to the Windows process: `WINE_CPU_TOPOLOGY=1:0`. The spin
+collapses to ~99% of one core instead of pegging two, and the other
+core stays free for the P2P handshake burst. Measured effect:
+
+- Idle host load: 195% → **99%**
+- UI-sidecar latency p95: 36 ms → **14 ms**
+
+`install.sh` writes `WINE_CPU_TOPOLOGY=1:0` into
+`/etc/windrose/windrose.env` when it detects `nproc ≤ 2`, and leaves
+it empty otherwise. Override either way with an explicit env var at
+install time:
+
+```bash
+sudo WINE_CPU_TOPOLOGY=1:0 ./bare-linux/install.sh   # force-on
+sudo WINE_CPU_TOPOLOGY=""  ./bare-linux/install.sh   # force-off
+```
+
+Memory sizing is less scary than the 2.7 GiB RSS number suggests —
+most of it is cold pages that park to swap happily (see § Swap and
+`memory_footprint_cold_pages.md`) — but the 9-minute step-up still
+sets the RAM floor above 2 GB regardless of how generous your swap is.
 
 ## Quick Install
 
