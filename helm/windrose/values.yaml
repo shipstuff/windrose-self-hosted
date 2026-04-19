@@ -167,12 +167,14 @@ serverConfig:
   # before +app_update and restores after.
   source: steamcmd
   # Appended after the required `-log` on the game binary's command line.
-  # Default caps the engine tick to 30 FPS. Without this, idle (no
-  # clients) burns whole cores because the main loop has no NetDriver
-  # pacing it. With a client the cap is redundant (NetServerMaxTickRate
-  # already throttles to 30Hz) but also harmless. Set to "" to disable
-  # or override with e.g. "-FPS=60 -ExecCmds=t.MaxFPS 60".
-  launchArgs: "-FPS=30"
+  # Default caps the engine tick to 60 FPS. The older 30-FPS default was
+  # there as a brake on the idle-CPU spin bug (the main loop was
+  # unpaced when no clients were connected and burned whole cores); the
+  # idle-CPU binary patch (see `patchIdleCpu` below + `tools/patch-idle-cpu.py`)
+  # is the real fix, so the cap is no longer needed at 30 and we leave
+  # headroom for the server to simulate + replicate at 60. Drop to
+  # "-FPS=30" if you prefer the older behavior, or "" to uncap entirely.
+  launchArgs: "-FPS=60"
   # Applied in env mode.
   serverName: "Windrose Server"
   inviteCode: ""
