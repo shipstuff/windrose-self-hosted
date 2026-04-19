@@ -241,13 +241,15 @@ resources:
     limits:
       memory: 16Gi
       # Strongly recommended: uncomment a CPU limit. Windrose has an
-      # upstream bug where an empty dedicated server spins the main loop
-      # unpaced and burns ~2 full cores (community-confirmed, devs aware,
-      # see memory/windrose_idle_cpu_known_bug.md). A cgroup limit is
-      # currently the only knob that bounds the idle spin — we tried
-      # -FPS=30 launch arg, bUseFixedFrameRate, bSmoothFrameRate,
-      # t.MaxFPS, NetServerMaxTickRate; none of them throttle the UE
-      # main loop when no client is connected.
+      # upstream idle-CPU bug: two UE5 TaskGraph worker threads busy-
+      # spin in userspace before any client is connected (strace shows
+      # zero syscalls for 5 s on the hot threads — pure busy-wait,
+      # unreachable from engine config). The cgroup CPU limit is the
+      # only working mitigation until the devs ship a fix; 14 plausible
+      # Engine.ini / ConsoleVariables.ini / launch-arg / Proton-env
+      # knobs have been tested, none move the idle number off 2 cores.
+      # See memory/windrose_idle_cpu_known_bug.md for the full list +
+      # root-cause notes.
       #
       # Sizing (measured 2026-04-17 on AMD Ryzen 9 9955HX @ 4.7 GHz,
       # x86-64, hostNetwork:true, 1 map, defaults):

@@ -408,6 +408,13 @@ CI runs these plus JSON validation and YAML lint.
        --from-file=app.js=./image/ui/app.js
      ```
      Point nginx's `root` or `alias` at the mount and `proxy_pass` the `/api/*` location to the windrose Service.
+- **Empty-server idle CPU is a known upstream bug — sizing floor is 3 vCPU (or a cgroup cap).** With no players connected the dedicated server's UE5 task-worker threads busy-spin in userspace, burning ~1.82 cores on dispatch that has no network peer to pace against. `strace` on the hot threads shows zero syscalls — it's pure spin-wait, unreachable from Engine.ini / ConsoleVariables.ini / launch-arg knobs (all 14 plausible knobs tested — see `memory/windrose_idle_cpu_known_bug.md`). Validated on DigitalOcean bare-Linux droplets 2026-04-18:
+  - **1 vCPU / 2 GB**: unplayable. Idle bug pegs 100%; P2pGate can't drain connect handshake datagrams; Coturn relay resets after ~180 s and client bounces to menu.
+  - **2 vCPU / 2 GB**: same failure path on fresh worlds where terrain generation fights the idle bug for cores. Datagram gap grows past 148 s before Coturn reset.
+  - **2 vCPU + pre-generated save**: works once world gen is skipped; handshake completes.
+  - **≥3 vCPU**: headroom above the idle bug; handshakes cleanly.
+
+  If the devs ship an upstream fix (the community thread tracks it [here](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/)), smaller boxes may become viable. Today the only way to use a 1 vCPU host is a `resources.limits.cpu` cap (Helm) / `--cpus` (compose) / `CPUQuota=` (systemd) — which bounds the wasted idle cycles but still leaves too little CPU on a 1 vCPU box for the handshake burst. A 2 vCPU box with a 500m cap on the game container is the smallest realistic "working" configuration.
 - **GE-Proton version matters.** We pin `10-34`. `10-32` hit WSA error 996 (gRPC `UNAVAILABLE`) on backend registration for this UE5 build. If you bump, test backend registration before the registry; see [GE-Proton releases](https://github.com/GloriousEggroll/proton-ge-custom/releases).
 - **World Island ID is backend-assigned.** When the server registers with Windrose's backend, the backend mints (or looks up) an island ID keyed off the server's `PersistentServerId`. Game syncs *down* from the backend — it does not discover an island ID *up* from local save files. Dropping a save onto disk doesn't make the server adopt it unless you can preserve the PSID that originally owned that island. See `memory/windrose_island_identity.md`.
 - **Sentry/Crashpad is disabled.** Under Proton it hard-aborts the process ~5 s after launch. `DISABLE_SENTRY=1` in the entrypoint renames the plugin to `Sentry.DISABLED`; set `DISABLE_SENTRY=0` only if you're actively debugging Sentry behavior.

@@ -5,6 +5,26 @@ three systemd system services: game + Xvfb + admin UI. Validated on an
 Ubuntu 24.04 DigitalOcean droplet with 2 cores / 4 GiB RAM; should run
 anywhere the [`image/Dockerfile`](../image/Dockerfile) deps are available.
 
+## Sizing
+
+An upstream idle-CPU bug in the dedicated server (UE5 task-worker
+busy-spin, tracked on the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/))
+eats ~1.82 cores before any player is connected. Until that's fixed
+upstream, the box needs real headroom above it. Concretely (validated
+on DigitalOcean droplets 2026-04-18):
+
+| Box                | Verdict                                                                 |
+| ------------------ | ----------------------------------------------------------------------- |
+| 1 vCPU / 2 GB      | **Unplayable**. Connect handshake starves; Coturn relay resets. May become viable if the idle bug is patched upstream. |
+| 2 vCPU / 2 GB (fresh world) | Server boots but fresh-world generation fights the idle bug; connects stall. |
+| 2 vCPU / 4 GB (imported save) | **Works.** Handshake completes, 1 player plays fine.                    |
+| ≥3 vCPU / 4 GB     | **Comfortable.** Room above the idle bug for connect bursts.            |
+
+Memory sizing is separate and less scary than it looks — the game's
+2.7 GiB RSS is mostly cold memory-mapped UE5 paks that park to swap
+with no perf impact. See § Swap below. The real floor is **CPU**, not
+RAM, as long as you have a swapfile.
+
 ## Quick Install
 
 From a checkout of this repo, as root on the target host:
