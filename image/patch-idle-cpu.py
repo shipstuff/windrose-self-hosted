@@ -32,8 +32,12 @@ Measured impact (2026-04-19, sf-west-1 canary pod, AMD Ryzen 9 9955HX, 32-core h
                          unchanged, 20+ minute continuous stability
 
 Target binary: UE5.6 R5 build `WindroseServer-Win64-Shipping.exe` shipped
-in Windrose 0.10.0 (md5 61e320a6a45f4ac539f2c5d0f7b7ff2c). A binary whose
-first-5-bytes-at-patch-site differ from the original is rejected.
+in Windrose 0.10.0 — md5 8a62138c8fd19ede9ec8a5cf10579cb8 (post-2026-04-19
+Steam update). The previous build (md5 61e320a6a45f4ac539f2c5d0f7b7ff2c)
+had the same bug at slightly different offsets — the whole `reset()`
+function moved by -0x440 but PATCH_SITE_ORIG bytes and the trampoline
+window are identical across the two. A binary whose first-5-bytes-at-
+patch-site differ from the original is rejected.
 
 Usage:
   python3 patch-idle-cpu.py /path/to/WindroseServer-Win64-Shipping.exe
@@ -48,22 +52,30 @@ import sys
 
 # --- Hard-coded, build-specific patch parameters ---
 # If Windrose ships a new build, re-derive these (see comments at bottom of file).
-EXPECTED_MD5 = "61e320a6a45f4ac539f2c5d0f7b7ff2c"
+EXPECTED_MD5 = "8a62138c8fd19ede9ec8a5cf10579cb8"
 
-# Patch site: the `jmp 0x4c98270` at the tail of the hot loop in
+# Patch site: the `jmp <loop_top>` at the tail of the hot loop in
 # boost::asio::detail::socket_select_interrupter::reset().
-PATCH_SITE_FILE = 0x4C98A09
-PATCH_SITE_ORIG = bytes.fromhex("e962f8ffff")  # jmp -0x7e1 -> 0x4c98270
+# Previous build: file offset 0x4C98A09 / loop top 0x4C98270.
+# Current build: whole function shifted by -0x440; the relative bytes
+# ("jmp -0x79e") are identical, only the absolute file offset changed.
+PATCH_SITE_FILE = 0x4C985C9
+PATCH_SITE_ORIG = bytes.fromhex("e962f8ffff")  # jmp -0x79e -> 0x4C97E30
+
+# Loop-top file offset (the target of the jmp we're replacing). Used to
+# compute the trampoline's final `jmp back` rel32.
+LOOP_TOP_FILE = 0x4C97E30
 
 # Trampoline goes in a 655-byte CC-padding window at 0xd30371 which is
-# within .text (raw) but between functions per .pdata.
+# within .text (raw) but between functions per .pdata. This window
+# survived the 2026-04-19 rebuild at the same absolute offset.
 TRAMPOLINE_FILE = 0xD30371
 TRAMPOLINE_ORIG = b"\xcc" * 38  # we require existing bytes are all int3 padding
 
-# Sleep IAT entry (KERNEL32.dll!Sleep).
-# VA 0x14c282428 -> file offset 0x14c282428 - 0x140000000 - 0xc282000 + 0xc281600 = 0xc281a28
-# Anyone bumping this patch should verify the IAT entry didn't move.
-SLEEP_IAT_VA = 0x14C282428
+# Sleep IAT entry (KERNEL32.dll!Sleep). The IAT slot moved +0x20008 in
+# the 2026-04-19 rebuild (0x14C282428 -> 0x14C2A2430). Anyone bumping
+# this patch should verify the IAT entry didn't move again.
+SLEEP_IAT_VA = 0x14C2A2430
 
 # Image base, .text raw start, .text vaddr start.
 IMAGE_BASE = 0x140000000
@@ -106,8 +118,8 @@ def compile_patch() -> tuple[bytes, bytes]:
     tramp += b"\x59"              # pop rcx
     tramp += b"\x5a"              # pop rdx
 
-    # jmp rel32 back to the loop top at 0x4c98270.
-    jmp_top_va = file_to_va(0x4C98270)
+    # jmp rel32 back to the loop top (file offset depends on the build).
+    jmp_top_va = file_to_va(LOOP_TOP_FILE)
     jmp_instr_va = trampoline_base_va + len(tramp)
     rel_top = jmp_top_va - (jmp_instr_va + 5)
     tramp += b"\xe9" + rel_top.to_bytes(4, "little", signed=True)

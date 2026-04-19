@@ -274,8 +274,8 @@ maybe_patch_idle_cpu() {
   # by checking md5 against both known states — cheaper than dry-run.
   local current_md5
   current_md5="$(md5sum "${exe}" | awk '{print $1}')"
-  local original_md5="61e320a6a45f4ac539f2c5d0f7b7ff2c"
-  local patched_md5="b1796533f22603ad2f2da021033e3f9f"
+  local original_md5="8a62138c8fd19ede9ec8a5cf10579cb8"
+  local patched_md5="a7f9260faf16e180d9a50959183264d0"
   if [ "${current_md5}" = "${patched_md5}" ]; then
     echo "$(timestamp) INFO: Idle-CPU patch already applied (md5 matches patched build); skipping"
     return 0
