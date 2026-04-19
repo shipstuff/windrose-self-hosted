@@ -58,23 +58,25 @@ RUN mkdir -p "${GE_PROTON_SEED_ROOT}" \
     && echo "Baking GE-Proton${GE_PROTON_VERSION} into image seed cache..." \
     && curl -fsSL "${GE_PROTON_URL}" | tar zxf - -C "${GE_PROTON_SEED_ROOT}"
 
-COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY ServerDescription_example.json /usr/local/share/ServerDescription_example.json
-COPY WorldDescription_example.json /usr/local/share/WorldDescription_example.json
+COPY --chmod=755 image/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY image/ServerDescription_example.json /usr/local/share/ServerDescription_example.json
+COPY image/WorldDescription_example.json /usr/local/share/WorldDescription_example.json
 # Optional idle-CPU throttle patch (off by default — opt in with
 # WINDROSE_PATCH_IDLE_CPU=1). Drops idle CPU from ~200% to ~5% by
 # inserting a Sleep(1) into the Boost.Asio socket_select_interrupter
 # drain loop that spins under Wine/Proton. See the docstring inside
 # the script for the full derivation. Safe to ship unconditionally —
-# entrypoint only invokes it when the env var is set.
-COPY --chmod=755 patch-idle-cpu.py /usr/local/bin/patch-idle-cpu.py
+# entrypoint only invokes it when the env var is set. Sourced from
+# tools/ — the single source of truth; same script operators run
+# manually against a bare-Linux install.
+COPY --chmod=755 tools/patch-idle-cpu.py /usr/local/bin/patch-idle-cpu.py
 
 # Admin console. Python stdlib-only HTTP server — no pip deps. Baked
 # into the same image as the game binary so the UI sidecar runs via a
 # command override. Previously this was a separate `windrose-ui` image
 # with busybox httpd + CGI scripts; consolidated into one image to drop
 # the build + version complexity.
-COPY --chown=10000:10000 ui/ /opt/windrose-ui/
+COPY --chown=10000:10000 image/ui/ /opt/windrose-ui/
 RUN chmod 755 /opt/windrose-ui/server.py
 
 USER steam

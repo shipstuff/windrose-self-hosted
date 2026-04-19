@@ -2,7 +2,7 @@ services:
   windrose:
     image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:latest}
     build:
-      context: ./image
+      context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     # Host networking keeps wine's ephemeral UDP ports reachable at the

@@ -21,8 +21,8 @@ jobs:
       matrix:
         include:
           - image_name: windrose-server
-            context: ./image
-            file: ./image/Dockerfile
+            context: .
+            file: ./Dockerfile
 
     steps:
       - uses: actions/checkout@v4

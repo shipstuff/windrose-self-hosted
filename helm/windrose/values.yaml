@@ -294,7 +294,13 @@ resources:
       cpu: 10m
       memory: 32Mi
     limits:
-      memory: 128Mi
+      # 256Mi covers steady-state (~20 MB) with headroom for the rare
+      # slow path: /api/idle-cpu-patch on a binary whose MD5 isn't in
+      # the patch script's KNOWN_OFFSETS table triggers a 300 MB mmap
+      # scan in a subprocess. Fast path for known MD5s (including
+      # known-patched ones) stays under 32 MB. Bump to 512Mi if you
+      # pin to a self-built Windrose that auto-derive needs to scan.
+      memory: 256Mi
 
 securityContext:
   runAsUser: 10000

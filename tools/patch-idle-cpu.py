@@ -65,10 +65,21 @@ Usage:
 """
 import argparse
 import hashlib
+import mmap
 import os
+import shutil
 import struct
 import sys
 from dataclasses import dataclass
+
+
+def _file_md5(path: str) -> str:
+    """Stream-compute md5 without loading the whole file into memory."""
+    m = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            m.update(chunk)
+    return m.hexdigest()
 
 
 # === Invariants the patch relies on ===
@@ -97,27 +108,36 @@ class Offsets:
 
 # Known builds — consistency check for auto-derive, and the sole source
 # of truth under --use-known-offsets. Add new builds as they appear.
+_OLD_BUILD = Offsets(
+    patch_site_file=0x4C98A09,
+    loop_top_file=0x4C98270,
+    trampoline_file=0xD30371,
+    sleep_iat_va=0x14C282428,
+    image_base=0x140000000,
+    text_raw=0x600,
+    text_vaddr=0x1000,
+)
+_NEW_BUILD = Offsets(
+    patch_site_file=0x4C985C9,
+    loop_top_file=0x4C97E30,
+    trampoline_file=0xD30371,
+    sleep_iat_va=0x14C2A2430,
+    image_base=0x140000000,
+    text_raw=0x600,
+    text_vaddr=0x1000,
+)
+# Known builds — both unpatched AND patched MD5s point to the same
+# Offsets, so state detection on a patched binary is a fast-path lookup
+# (no 300 MB linear scan) — important for the UI sidecar's memory
+# budget. Patched MD5s computed during release validation; keep them
+# in sync whenever the corresponding _OLD_BUILD/_NEW_BUILD entry changes.
 KNOWN_OFFSETS = {
     # Initial Windrose 0.10.0 build
-    "61e320a6a45f4ac539f2c5d0f7b7ff2c": Offsets(
-        patch_site_file=0x4C98A09,
-        loop_top_file=0x4C98270,
-        trampoline_file=0xD30371,
-        sleep_iat_va=0x14C282428,
-        image_base=0x140000000,
-        text_raw=0x600,
-        text_vaddr=0x1000,
-    ),
+    "61e320a6a45f4ac539f2c5d0f7b7ff2c": _OLD_BUILD,  # unpatched
+    "b1796533f22603ad2f2da021033e3f9f": _OLD_BUILD,  # patched
     # Post-2026-04-19 Steam update (function shifted -0x440 as a block)
-    "8a62138c8fd19ede9ec8a5cf10579cb8": Offsets(
-        patch_site_file=0x4C985C9,
-        loop_top_file=0x4C97E30,
-        trampoline_file=0xD30371,
-        sleep_iat_va=0x14C2A2430,
-        image_base=0x140000000,
-        text_raw=0x600,
-        text_vaddr=0x1000,
-    ),
+    "8a62138c8fd19ede9ec8a5cf10579cb8": _NEW_BUILD,  # unpatched
+    "a7f9260faf16e180d9a50959183264d0": _NEW_BUILD,  # patched
 }
 
 
@@ -203,32 +223,37 @@ def file_to_rva(pe: PEInfo, file_off: int) -> int:
 
 # === Anchor discovery ===
 
-def find_signature(data: bytes) -> int:
+def find_signature(data) -> int:
     """Return the file offset of the `e9` opcode at SIGNATURE[8]. Enforces
-    that the signature appears exactly once."""
-    count = data.count(SIGNATURE)
-    if count == 0:
+    that the signature appears exactly once. Works on both bytes and
+    mmap.mmap — mmap.find() exists but mmap.count() does not, so we
+    count via a find loop."""
+    offsets: list[int] = []
+    start = 0
+    while True:
+        idx = data.find(SIGNATURE, start)
+        if idx < 0:
+            break
+        offsets.append(idx)
+        start = idx + 1
+        if len(offsets) > 1:
+            # No need to keep counting — we've already disqualified the binary.
+            break
+    if not offsets:
         raise SystemExit(
             f"error: signature {SIGNATURE.hex()} not found in binary. "
             "The target function was likely refactored in this Windrose build; "
             "auto-derive cannot proceed. This is a refuse-cleanly outcome — the "
             "patch is inapplicable until someone re-derives against the new code shape."
         )
-    if count > 1:
-        offsets = []
-        start = 0
-        while True:
-            idx = data.find(SIGNATURE, start)
-            if idx < 0:
-                break
-            offsets.append(hex(idx))
-            start = idx + 1
+    if len(offsets) > 1:
         raise SystemExit(
-            f"error: signature {SIGNATURE.hex()} found {count} times at "
-            f"{', '.join(offsets)}; expected exactly 1. Refusing to guess — "
-            "fall back to --use-known-offsets with a known MD5."
+            f"error: signature {SIGNATURE.hex()} found at least {len(offsets)} "
+            f"times (first two: {hex(offsets[0])}, {hex(offsets[1])}); expected "
+            "exactly 1. Refusing to guess — fall back to --use-known-offsets "
+            "with a known MD5."
         )
-    return data.find(SIGNATURE) + 8
+    return offsets[0] + 8
 
 
 def find_cc_padding_window(data: bytes, pe: PEInfo, min_size: int = TRAMPOLINE_SIZE) -> int:
@@ -468,55 +493,50 @@ def reconstruct_original_site_bytes(data: bytes, off: Offsets) -> bytes:
 
 # === Mode selection ===
 
-def resolve_offsets(data: bytes, md5: str, use_known: bool) -> tuple[Offsets, str]:
-    """Return (offsets, mode_label). mode_label is 'known' or 'derived'."""
-    if use_known:
-        if md5 not in KNOWN_OFFSETS:
-            raise SystemExit(
-                f"error: --use-known-offsets requested but MD5 {md5} is not in the "
-                f"known-builds table (known: {', '.join(KNOWN_OFFSETS.keys()) or '(none)'}). "
-                "Drop --use-known-offsets to let auto-derive try."
-            )
-        return KNOWN_OFFSETS[md5], "known"
+def resolve_offsets(data, md5: str, use_known: bool) -> tuple[Offsets, str]:
+    """Return (offsets, mode_label). mode_label is 'known' or 'derived'.
 
-    derived = derive_offsets(data)
+    Fast path: if MD5 (patched or unpatched) appears in KNOWN_OFFSETS, we
+    return those offsets without running derive_offsets. This is what
+    keeps peak memory bounded in a cgroup-constrained UI sidecar — the
+    300 MB scan only runs for truly unknown builds.
+    """
     if md5 in KNOWN_OFFSETS:
-        known = KNOWN_OFFSETS[md5]
-        if derived != known:
-            raise SystemExit(
-                "error: auto-derive disagrees with known-good offsets for this MD5.\n"
-                f"  known:   {known}\n"
-                f"  derived: {derived}\n"
-                "This is a BUG in auto-derive. Use --use-known-offsets for now and "
-                "file an issue."
-            )
-    return derived, "derived"
+        return KNOWN_OFFSETS[md5], "known"
+    if use_known:
+        raise SystemExit(
+            f"error: --use-known-offsets requested but MD5 {md5} is not in the "
+            f"known-builds table (known: {', '.join(sorted(KNOWN_OFFSETS.keys())) or '(none)'}). "
+            "Drop --use-known-offsets to let auto-derive try."
+        )
+    return derive_offsets(data), "derived"
 
 
 # === Apply ===
 
 def print_state(path: str) -> None:
     """Emit a single JSON line describing the binary's patch state.
-    Exits 0 on any outcome that can be reported (patched, unpatched,
-    corrupt, or binary-not-a-match). Meant for the UI sidecar to poll
-    without parsing text output."""
+    Exits 0 on any outcome that can be reported. Meant for the UI
+    sidecar to poll without parsing text output. Uses mmap + streaming
+    md5 so the 300 MB binary doesn't need to fit in the UI container's
+    memory limit."""
     import json
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except FileNotFoundError:
+    if not os.path.isfile(path):
         print(json.dumps({"state": "missing", "path": path}))
         return
-    md5 = hashlib.md5(data).hexdigest()
+    md5 = _file_md5(path)
     result = {"path": path, "md5": md5}
     try:
-        off = derive_offsets(data)
-        result["state"] = binary_state(data, off)
-        result["mode"] = "derived"
-        if md5 in KNOWN_OFFSETS:
-            result["mode"] = "known"
-        result["patch_site_file"] = off.patch_site_file
-        result["trampoline_file"] = off.trampoline_file
+        with open(path, "rb") as f:
+            data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            try:
+                off, mode = resolve_offsets(data, md5, use_known=False)
+                result["state"] = binary_state(data, off)
+                result["mode"] = mode
+                result["patch_site_file"] = off.patch_site_file
+                result["trampoline_file"] = off.trampoline_file
+            finally:
+                data.close()
     except SystemExit as e:
         result["state"] = "inapplicable"
         result["reason"] = str(e).replace("error: ", "")
@@ -525,69 +545,83 @@ def print_state(path: str) -> None:
 
 def apply_patch(path: str, revert: bool, dry_run: bool, use_known: bool,
                 verbose: bool, idempotent: bool) -> None:
-    with open(path, "rb") as f:
-        data = f.read()
-
-    md5 = hashlib.md5(data).hexdigest()
+    md5 = _file_md5(path)
     print(f"MD5 of {path}: {md5}")
 
-    off, mode = resolve_offsets(data, md5, use_known)
-    if verbose or mode == "derived":
-        print(
-            f"using {mode} offsets: "
-            f"patch_site=0x{off.patch_site_file:x} "
-            f"loop_top=0x{off.loop_top_file:x} "
-            f"trampoline=0x{off.trampoline_file:x} "
-            f"sleep_iat_va=0x{off.sleep_iat_va:x}"
-        )
+    # mmap the binary for reading — scanning 300 MB via mmap keeps peak
+    # RSS below what a cgroup-constrained UI sidecar can tolerate.
+    with open(path, "rb") as f:
+        data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            off, mode = resolve_offsets(data, md5, use_known)
+            if verbose or mode == "derived":
+                print(
+                    f"using {mode} offsets: "
+                    f"patch_site=0x{off.patch_site_file:x} "
+                    f"loop_top=0x{off.loop_top_file:x} "
+                    f"trampoline=0x{off.trampoline_file:x} "
+                    f"sleep_iat_va=0x{off.sleep_iat_va:x}"
+                )
 
-    state = binary_state(data, off)
-    patch, tramp = compile_patch(off)
+            state = binary_state(data, off)
+            patch, tramp = compile_patch(off)
 
-    if revert:
-        if state == "unpatched":
-            msg = f"binary at {path} is already unpatched; nothing to revert."
-            if idempotent:
-                print(f"info: {msg}")
-                return
-            raise SystemExit(f"error: {msg}")
-        if state != "patched":
-            raise SystemExit(
-                f"error: binary at {path} is in an unexpected state ({state}); "
-                "refusing to revert. Restore from backup if you have one."
-            )
-        orig_site = reconstruct_original_site_bytes(data, off)
-        new_data = bytearray(data)
-        new_data[off.patch_site_file:off.patch_site_file + 5] = orig_site
-        new_data[off.trampoline_file:off.trampoline_file + TRAMPOLINE_SIZE] = b"\xcc" * TRAMPOLINE_SIZE
-        action = "reverted"
-    else:
-        if state == "patched":
-            msg = f"binary at {path} is already patched; use --revert to undo."
-            if idempotent:
-                print(f"info: {msg}")
-                return
-            raise SystemExit(f"error: {msg}")
-        if state != "unpatched":
-            raise SystemExit(
-                f"error: binary at {path} is in an unexpected state ({state}); "
-                "refusing to patch."
-            )
-        new_data = bytearray(data)
-        new_data[off.patch_site_file:off.patch_site_file + 5] = patch
-        new_data[off.trampoline_file:off.trampoline_file + TRAMPOLINE_SIZE] = tramp
-        action = "patched"
+            if revert:
+                if state == "unpatched":
+                    msg = f"binary at {path} is already unpatched; nothing to revert."
+                    if idempotent:
+                        print(f"info: {msg}")
+                        return
+                    raise SystemExit(f"error: {msg}")
+                if state != "patched":
+                    raise SystemExit(
+                        f"error: binary at {path} is in an unexpected state ({state}); "
+                        "refusing to revert. Restore from backup if you have one."
+                    )
+                site_bytes = reconstruct_original_site_bytes(data, off)
+                tramp_bytes = b"\xcc" * TRAMPOLINE_SIZE
+                action = "reverted"
+            else:
+                if state == "patched":
+                    msg = f"binary at {path} is already patched; use --revert to undo."
+                    if idempotent:
+                        print(f"info: {msg}")
+                        return
+                    raise SystemExit(f"error: {msg}")
+                if state != "unpatched":
+                    raise SystemExit(
+                        f"error: binary at {path} is in an unexpected state ({state}); "
+                        "refusing to patch."
+                    )
+                site_bytes, tramp_bytes = patch, tramp
+                action = "patched"
+        finally:
+            data.close()
 
-    if dry_run:
-        new_md5 = hashlib.md5(bytes(new_data)).hexdigest()
-        print(f"dry-run: would have {action} binary; new MD5 would be {new_md5}")
-        return
-
+    # Atomic write via copy + targeted overwrites. Uses O(1) memory plus
+    # temp-disk space (~binary size) instead of materializing a 300 MB
+    # bytearray copy in the calling container.
     tmp_path = path + ".tmp.patch"
-    with open(tmp_path, "wb") as f:
-        f.write(bytes(new_data))
-    os.replace(tmp_path, path)
-    new_md5 = hashlib.md5(bytes(new_data)).hexdigest()
+    shutil.copyfile(path, tmp_path)
+    try:
+        with open(tmp_path, "r+b") as f:
+            f.seek(off.patch_site_file)
+            f.write(site_bytes)
+            f.seek(off.trampoline_file)
+            f.write(tramp_bytes)
+        new_md5 = _file_md5(tmp_path)
+        if dry_run:
+            print(f"dry-run: would have {action} binary; new MD5 would be {new_md5}")
+            os.unlink(tmp_path)
+            return
+        os.replace(tmp_path, path)
+    except Exception:
+        # Clean up on any failure so we don't leave a partial .tmp.patch.
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
     print(f"{action} in place; new MD5 is {new_md5}")
 
 
