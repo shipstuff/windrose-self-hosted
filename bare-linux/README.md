@@ -15,15 +15,19 @@ on DigitalOcean droplets 2026-04-18):
 
 | Box                | Verdict                                                                 |
 | ------------------ | ----------------------------------------------------------------------- |
-| 1 vCPU / 2 GB      | **Unplayable**. Connect handshake starves; Coturn relay resets. May become viable if the idle bug is patched upstream. |
-| 2 vCPU / 2 GB (fresh world) | Server boots but fresh-world generation fights the idle bug; connects stall. |
-| 2 vCPU / 4 GB (imported save) | **Works.** Handshake completes, 1 player plays fine.                    |
+| 1 vCPU / 2 GB      | **Unplayable (CPU-bound).** Connect handshake starves; Coturn resets after ~180 s. May become viable if the upstream idle bug is patched. |
+| 2 vCPU / 2 GB      | **Unplayable (RAM-bound).** Boots and idles clean for ~9 min, then a delayed ~500 MiB allocation blows past available RAM and the host locks up on page reclamation. No player ever connects. |
+| 2 vCPU / 4 GB + imported save | **Works.** Handshake completes, 1 player plays fine.                    |
 | ≥3 vCPU / 4 GB     | **Comfortable.** Room above the idle bug for connect bursts.            |
 
-Memory sizing is separate and less scary than it looks — the game's
-2.7 GiB RSS is mostly cold memory-mapped UE5 paks that park to swap
-with no perf impact. See § Swap below. The real floor is **CPU**, not
-RAM, as long as you have a swapfile.
+Two distinct floors, not one: **CPU ≥ 2 vCPU** (because the idle bug
+eats ~1.82 cores) **and** **RAM ≥ 4 GB** (because there's a delayed
+working-set step-up ~9 min into steady state that 2 GB hosts can't
+absorb, swap or no swap). Memory sizing is still less scary than the
+2.7 GiB RSS number suggests — most of it IS cold pages that park to
+swap happily (see § Swap below and `memory_footprint_cold_pages.md`)
+— but the 9-minute step-up sets the real floor above a 2 GB box
+regardless of how generous your swap is.
 
 ## Quick Install
 
