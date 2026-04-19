@@ -17,7 +17,8 @@ DigitalOcean droplets 2026-04-18/19:
 | ------------------ | ----------------------------------------------------------------------- |
 | 1 vCPU / any RAM   | **Unplayable.** Idle bug pegs the single core; nothing left for the P2P handshake. Client sits in `UePreloginVerified`, Coturn resets after ~180 s, user bounces to menu. |
 | 2 vCPU / 2 GB      | **Unplayable (RAM-bound).** Boots and idles clean for ~9 min, then a delayed ~500 MiB allocation blows past available RAM; the kernel locks up on page reclamation. |
-| 2 vCPU / 4 GB      | **Works, slow first-connect.** The idle bug + terrain generation on a fresh world compete for the 2 cores; handshake datagrams drain slowly and the first connect can take a while. Retries are fine once the world is warm. On slower shared vCPUs, the first connect occasionally races Coturn's ~180 s timeout — a pre-generated / imported save skips the spike entirely. |
+| 2 vCPU / 4 GB, fresh world | **Marginal.** On slower shared vCPUs (typical DO / Hetzner / Linode small tiers) the idle bug + terrain generation saturate both cores during the first-connect handshake; Coturn times out at ~180 s and the client bounces to menu. |
+| 2 vCPU / 4 GB, **with a pre-loaded save** | **Works reliably.** Pre-generating the world on a faster box and importing the save into the small host sidesteps the worst of the CPU spike. **Recommended path for any small-VPS deploy** — see § Pre-loading below. |
 | ≥3 vCPU / 4 GB     | **Comfortable.** Real headroom above the idle bug; fresh-world first-connects complete cleanly. |
 
 Two distinct floors:
@@ -99,6 +100,55 @@ Or just edit the env file and `systemctl restart windrose-game` after.
 | `WORLD_PRESET_TYPE` | `Medium` | `Easy`, `Medium`, `Hard`, `Custom` |
 | `P2P_PROXY_ADDRESS` | auto-detected | ICE host candidate. Leave empty unless the host is multi-homed. |
 | `WINDROSE_SERVER_SOURCE` | `steamcmd` | `steamcmd` (anonymous app_update) or `files` (BYO tarball via UI) |
+
+## Pre-loading The World (recommended for small VPSes)
+
+On a small host (2 vCPU / 4 GB on a typical shared-vCPU VPS), letting
+the server generate a fresh world *on the first player's connect* is
+the failure mode. The idle-CPU bug already eats ~1.82 cores; adding
+terrain generation on top of that saturates both cores and the P2P
+handshake datagrams can't drain before Coturn resets the relay.
+Result: user bounces to menu, retry sometimes works once the world
+is partially cached, sometimes doesn't.
+
+**The workaround is boring and reliable**: generate the world on a
+beefier box first, then drop the resulting `Saved/` + identity into
+the small host. The server skips the generation spike on first
+connect and the handshake completes comfortably even under the
+idle-bug ceiling.
+
+The "beefier box" can be anything that handles fresh-world gen
+cleanly (your workstation, a short-lived 4 vCPU droplet, an existing
+k8s cluster). Spin up Windrose there, connect once to generate the
+world, disconnect, stop the server, and tar the save + identity:
+
+```bash
+# On the beefy source host:
+sudo systemctl stop windrose-game
+cd /home/steam/windrose/WindowsServer/R5
+sudo tar -czf /tmp/windrose-warm-save.tgz ServerDescription.json Saved
+sudo systemctl start windrose-game   # source can come back online
+
+# Drop it on your local workstation:
+scp root@<beefy-host>:/tmp/windrose-warm-save.tgz ~/
+```
+
+Then on the small-VPS target, after `./bare-linux/install.sh` has
+finished its SteamCMD pull:
+
+```bash
+sudo systemctl stop windrose-game
+sudo rm -rf /home/steam/windrose/WindowsServer/R5/Saved
+sudo rm -f  /home/steam/windrose/WindowsServer/R5/ServerDescription.json
+sudo tar -xzf ~/windrose-warm-save.tgz \
+  -C /home/steam/windrose/WindowsServer/R5/
+sudo chown -R steam:steam /home/steam/windrose/WindowsServer/R5/
+sudo systemctl start windrose-game
+```
+
+First boot after the restore re-registers with Windrose's backend
+using the preserved `PersistentServerId`, so you keep the same
+island and invite code.
 
 ## Migrating An Existing Save
 
