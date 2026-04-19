@@ -233,61 +233,91 @@ maybe_disable_sentry() {
 # strace showing 0 syscalls in 3 s on either thread). The patch injects
 # a `Sleep(1)` call at the loop-continue tail — each iteration now
 # yields to the kernel via pselect6, cutting idle CPU from ~200% to ~5%
-# on the canary. Patch is idempotent (script rejects already-patched
-# binary), isolated to 43 bytes (5 at the site + 38 in CC padding),
-# and reverts cleanly via `--revert`. See
-# `tools/patch-idle-cpu.py` for the derivation + rollback path.
+# on the canary. Isolated to 43 bytes (5 at the site + 38 in CC padding);
+# auto-derive locates the patch site via a unique 9-byte signature and
+# parses PE imports to find KERNEL32!Sleep; reverts cleanly via
+# `--revert`. See `tools/patch-idle-cpu.py` for the derivation details.
 #
 # Off by default — operator opts in by setting WINDROSE_PATCH_IDLE_CPU=1.
-# When ON, failure to patch (wrong build md5, missing python3) is a
-# warning, not a fatal: we'd rather boot with a busy server than not
-# boot at all.
+# The UI can override this decision without a helm roll by writing
+# `disabled` to `$WINDROSE_PATCH_OVERRIDE_FILE` (default
+# `$WINDROSE_SERVER_DIR/R5/.idle-patch-override`); that takes effect on
+# next container restart. Failures (missing python3, signature not
+# found, etc.) are warnings — we'd rather boot with a busy server than
+# not boot at all.
 maybe_patch_idle_cpu() {
   : "${WINDROSE_PATCH_IDLE_CPU:=0}"
-  if [ "${WINDROSE_PATCH_IDLE_CPU}" != "1" ]; then
+  local exe="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
+  local override_file="${WINDROSE_PATCH_OVERRIDE_FILE:-${WINDROSE_SERVER_DIR}/R5/.idle-patch-override}"
+
+  # UI override takes precedence over env var so operators can flip the
+  # patch off without a helm/values round-trip. `disabled` forces OFF;
+  # `enabled` forces ON (on top of env=0); any other content is ignored.
+  local override=""
+  if [ -f "${override_file}" ]; then
+    override="$(tr -d '[:space:]' < "${override_file}" | head -c 16)"
+  fi
+  local effective="${WINDROSE_PATCH_IDLE_CPU}"
+  if [ "${override}" = "disabled" ]; then
+    effective="0"
+    echo "$(timestamp) INFO: Idle-CPU patch override='disabled' at ${override_file}; forcing OFF"
+  elif [ "${override}" = "enabled" ]; then
+    effective="1"
+    echo "$(timestamp) INFO: Idle-CPU patch override='enabled' at ${override_file}; forcing ON"
+  fi
+
+  if [ "${effective}" != "1" ]; then
+    # If env was ON but override flipped it OFF and binary is currently
+    # patched, revert so the new state actually takes effect.
+    if [ "${WINDROSE_PATCH_IDLE_CPU}" = "1" ] && [ "${override}" = "disabled" ] && [ -f "${exe}" ]; then
+      local script
+      script="$(_find_patch_script)"
+      if [ -n "${script}" ] && command -v python3 >/dev/null 2>&1; then
+        echo "$(timestamp) INFO: Reverting idle-CPU patch (override disabled it)"
+        python3 "${script}" "${exe}" --revert --idempotent || \
+          echo "$(timestamp) WARNING: Idle-CPU patch revert failed; binary left as-is"
+      fi
+    fi
     return 0
   fi
-  local exe="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
-  # In-image location (installed by Dockerfile to /usr/local/bin).
-  local script="/usr/local/bin/patch-idle-cpu.py"
-  if [ ! -f "${script}" ]; then
-    # Fall back to tools/ in the repo — useful for bare-Linux installs
-    # where the operator ran the installer from a repo checkout.
-    script="$(dirname "$0")/patch-idle-cpu.py"
-  fi
-  if [ ! -f "${script}" ]; then
-    script="$(dirname "$0")/../tools/patch-idle-cpu.py"
-  fi
+
+  local script
+  script="$(_find_patch_script)"
   if [ ! -f "${exe}" ]; then
     echo "$(timestamp) WARNING: Idle-CPU patch requested but ${exe} is missing"
     return 0
   fi
-  if [ ! -f "${script}" ]; then
-    echo "$(timestamp) WARNING: Idle-CPU patch requested but patch-idle-cpu.py not found in image"
+  if [ -z "${script}" ]; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but patch-idle-cpu.py not found"
     return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
     echo "$(timestamp) WARNING: Idle-CPU patch requested but python3 not available"
     return 0
   fi
-  # Is it already patched? The script rejects a second apply, so test
-  # by checking md5 against both known states — cheaper than dry-run.
-  local current_md5
-  current_md5="$(md5sum "${exe}" | awk '{print $1}')"
-  local original_md5="8a62138c8fd19ede9ec8a5cf10579cb8"
-  local patched_md5="a7f9260faf16e180d9a50959183264d0"
-  if [ "${current_md5}" = "${patched_md5}" ]; then
-    echo "$(timestamp) INFO: Idle-CPU patch already applied (md5 matches patched build); skipping"
-    return 0
-  fi
-  if [ "${current_md5}" != "${original_md5}" ]; then
-    echo "$(timestamp) WARNING: Shipping EXE md5 (${current_md5}) doesn't match the build this patch was derived against (${original_md5}). Skipping patch — re-derive offsets for the new build before re-enabling."
-    return 0
-  fi
-  echo "$(timestamp) INFO: Applying idle-CPU patch via ${script} (drops idle CPU from ~200% to ~5%)"
-  if ! python3 "${script}" "${exe}"; then
+
+  echo "$(timestamp) INFO: Applying idle-CPU patch via ${script} (auto-derive; drops idle CPU from ~200% to ~5%)"
+  if ! python3 "${script}" "${exe}" --idempotent; then
     echo "$(timestamp) WARNING: Idle-CPU patch failed; binary left unmodified"
   fi
+}
+
+_find_patch_script() {
+  # In-image location (installed by Dockerfile to /usr/local/bin) first;
+  # fall back to tools/ adjacent to the entrypoint for bare-Linux repo
+  # checkouts.
+  local candidates=(
+    "/usr/local/bin/patch-idle-cpu.py"
+    "$(dirname "$0")/patch-idle-cpu.py"
+    "$(dirname "$0")/../tools/patch-idle-cpu.py"
+  )
+  for c in "${candidates[@]}"; do
+    if [ -f "${c}" ]; then
+      echo "${c}"
+      return 0
+    fi
+  done
+  echo ""
 }
 
 detect_save_version() {
