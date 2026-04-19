@@ -151,8 +151,22 @@ ln -snf "${WINDROSE_INSTALL_DIR}/image/ui" /opt/windrose-ui
 install -d -m 1777 /tmp/.X11-unix
 
 # --- Env file ---------------------------------------------------------
-log "writing env file ${WINDROSE_ENV_FILE}"
+# Never clobber an existing env file — operators edit /etc/windrose/windrose.env
+# directly for things the installer doesn't know about (WINDROSE_CONFIG_MODE,
+# BLACKHOLE_REGIONS, custom launch args, rotated passwords). Re-running
+# install.sh used to silently overwrite the whole file and wipe those
+# customizations — we learned that the hard way 2026-04-19 when re-running
+# install.sh on the canary to test webhook env-var pass-through reset
+# WINDROSE_CONFIG_MODE=mutable back to default env, which then started
+# stamping WORLD_NAME from env on every restart.
 install -d -o root -g "${WINDROSE_GROUP}" -m 0750 "${WINDROSE_ENV_DIR}"
+if [ -f "${WINDROSE_ENV_FILE}" ]; then
+  warn "${WINDROSE_ENV_FILE} already exists — preserving as-is."
+  warn "If you want to reset with the latest installer defaults, rm the file first and re-run install.sh."
+  # Skip env-file writing entirely. Services are (re)started below — the
+  # existing env values take effect on that restart.
+else
+log "writing env file ${WINDROSE_ENV_FILE}"
 tmp_env="$(mktemp)"
 cat > "${tmp_env}" <<EOF
 # Written by bare-linux/install.sh. Edit freely; windrose-game restart
@@ -199,6 +213,7 @@ WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT}
 EOF
 install -m 0640 -o root -g "${WINDROSE_GROUP}" "${tmp_env}" "${WINDROSE_ENV_FILE}"
 rm -f "${tmp_env}"
+fi
 
 # --- Service units ----------------------------------------------------
 write_unit() {
