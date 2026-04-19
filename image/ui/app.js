@@ -76,6 +76,16 @@ const importTitle    = document.getElementById("importTitle");
 const importBlurb    = document.getElementById("importBlurb");
 const restartHint    = document.getElementById("restartHint");
 const statusEl       = document.getElementById("status");
+const ipBinaryState     = document.getElementById("ipBinaryState");
+const ipBinaryMd5       = document.getElementById("ipBinaryMd5");
+const ipEnvRequested    = document.getElementById("ipEnvRequested");
+const ipOverride        = document.getElementById("ipOverride");
+const ipEffective       = document.getElementById("ipEffective");
+const ipNeedsRestart    = document.getElementById("ipNeedsRestart");
+const ipEnableBtn       = document.getElementById("ipEnableBtn");
+const ipDisableBtn      = document.getElementById("ipDisableBtn");
+const ipAutoBtn         = document.getElementById("ipAutoBtn");
+const ipApplyRestartBtn = document.getElementById("ipApplyRestartBtn");
 
 const kv = {
   serverName: document.getElementById("kvServerName"),
@@ -552,12 +562,13 @@ function applyStatus(data) {
   // modal before our sign-in button is even clicked).
   if (showAdmin && !window._adminHydrated) {
     window._adminHydrated = true;
-    loadConfig(); loadBackups();
+    loadConfig(); loadBackups(); loadIdlePatch();
   } else if (!showAdmin) {
     window._adminHydrated = false;
   }
   [uploadBtn, configSaveBtn, configRevertBtn, backupCreateBtn, worldUploadBtn,
-   restartServerBtn, discardAllStagedBtn, worldStageBtn, worldDiscardBtn].forEach(b => {
+   restartServerBtn, discardAllStagedBtn, worldStageBtn, worldDiscardBtn,
+   ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn].forEach(b => {
     if (b) b.disabled = !destructive;
   });
   stagedTag.classList.toggle("hidden", !data.stagedConfigPending);
@@ -654,6 +665,49 @@ async function loadBackups() {
   } catch (err) { log("backups load failed: " + err); }
 }
 
+async function loadIdlePatch() {
+  try {
+    const res = await authFetch("/api/idle-cpu-patch");
+    if (!res.ok) return;
+    renderIdlePatch(await res.json());
+  } catch (err) { log("idle-patch load failed: " + err); }
+}
+
+function renderIdlePatch(s) {
+  const stateLabel = {
+    unpatched: "unpatched",
+    patched:   "patched",
+    corrupt:   "corrupt (restore from backup)",
+    missing:   "binary missing",
+    inapplicable: "signature not found in this build",
+    unknown:   "unknown",
+  }[s.binaryState] || s.binaryState || "-";
+  ipBinaryState.textContent = stateLabel + (s.binaryReason ? ` — ${s.binaryReason}` : "");
+  ipBinaryMd5.textContent   = s.binaryMd5 || "-";
+  ipEnvRequested.textContent = s.envRequested ? "WINDROSE_PATCH_IDLE_CPU=1" : "WINDROSE_PATCH_IDLE_CPU=0 (or unset)";
+  ipOverride.textContent = s.override === "auto" ? "auto (follow env)" : s.override;
+  ipEffective.textContent = s.effectiveOn ? "ON (patch will be applied)" : "OFF (patch will be reverted)";
+  ipNeedsRestart.classList.toggle("hidden", !s.needsRestart);
+  ipApplyRestartBtn.classList.toggle("hidden", !s.needsRestart);
+  // Disable whichever button matches the current override to nudge intent.
+  ipEnableBtn.disabled  = s.override === "enabled";
+  ipDisableBtn.disabled = s.override === "disabled";
+  ipAutoBtn.disabled    = s.override === "auto";
+}
+
+async function setIdlePatchOverride(value, restart = false) {
+  log(`idle-patch override -> ${value}${restart ? " + restart" : ""}...`);
+  const res = await authFetch("/api/idle-cpu-patch", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ override: value, restart }),
+  });
+  if (!res.ok) { log(`idle-patch update failed: ${await res.text()}`); return; }
+  const s = await res.json();
+  renderIdlePatch(s);
+  if (s.restartRequested) log("restart signaled to game container");
+}
+
 async function stageConfig(json) {
   const res = await authFetch("/api/config", {
     method: "PUT",
@@ -665,7 +719,7 @@ async function stageConfig(json) {
 }
 
 // --- Event wiring -------------------------------------------------
-refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); });
+refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadIdlePatch(); });
 downloadSavesBtn.addEventListener("click", () => { window.location.href = "/api/saves/download"; });
 
 uploadBtn.addEventListener("click", async () => {
@@ -855,6 +909,18 @@ backupCreateBtn.addEventListener("click", async () => {
   loadBackups();
 });
 
+ipEnableBtn.addEventListener("click", () => setIdlePatchOverride("enabled"));
+ipDisableBtn.addEventListener("click", () => setIdlePatchOverride("disabled"));
+ipAutoBtn.addEventListener("click", () => setIdlePatchOverride(null));
+ipApplyRestartBtn.addEventListener("click", async () => {
+  if (!confirm("Restart the game container now so the patch change takes effect?")) return;
+  // Re-send the current override to trigger the server-side restart flow.
+  const cur = ipOverride.textContent.trim();
+  const val = cur.startsWith("auto") ? null : cur;
+  await setIdlePatchOverride(val, /*restart=*/true);
+  loadStatus();
+});
+
 worldUploadBtn.addEventListener("click", () => {
   const id = prompt("Island ID to upload into. Paste an existing one from the Worlds table to replace, or enter a new 32-char hex to create.");
   if (!id) return;
@@ -974,3 +1040,4 @@ signOutBtn.addEventListener("click", () => {
 loadStatus();
 setInterval(loadStatus, 5000);
 setInterval(() => { if (window._adminHydrated) loadBackups(); }, 30000);
+setInterval(() => { if (window._adminHydrated) loadIdlePatch(); }, 30000);

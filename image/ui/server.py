@@ -82,6 +82,22 @@ GAME_MEM_LIMIT_STR    = os.environ.get("WINDROSE_GAME_MEM_LIMIT", "")
 
 CPU_STATE_PATH        = Path("/tmp/windrose-ui-cpu.state")
 
+# Idle-CPU patch UI override file. Entrypoint consults this on every boot
+# to decide whether to apply or revert the binary patch (see maybe_patch_idle_cpu
+# in image/entrypoint.sh). `disabled` forces OFF (revert on next restart if
+# currently patched); `enabled` forces ON (patch on next restart regardless of
+# WINDROSE_PATCH_IDLE_CPU env). Absent file = follow env.
+IDLE_PATCH_OVERRIDE_FILE = Path(os.environ.get(
+    "WINDROSE_PATCH_OVERRIDE_FILE",
+    str(R5_DIR / ".idle-patch-override"),
+))
+GAME_EXE_PATH = WINDROSE_SERVER_DIR / "R5" / "Binaries" / "Win64" / "WindroseServer-Win64-Shipping.exe"
+PATCH_SCRIPT_CANDIDATES = [
+    Path("/usr/local/bin/patch-idle-cpu.py"),
+    Path(__file__).resolve().parent.parent / "tools" / "patch-idle-cpu.py",
+]
+_PATCH_STATE_CACHE: dict = {"mtime": None, "md5": None, "state": None, "reason": None}
+
 # --- Webhooks ---------------------------------------------------------------
 WEBHOOK_URL           = os.environ.get("WINDROSE_WEBHOOK_URL", "").strip()
 WEBHOOK_DISCORD_URL   = os.environ.get("WINDROSE_DISCORD_WEBHOOK_URL", "").strip()
@@ -412,6 +428,137 @@ def current_save_version() -> str:
     return versions[-1] if versions else ""
 
 # --- Backup handling --------------------------------------------------------
+# --- idle-CPU patch helpers -------------------------------------------------
+def read_idle_patch_override() -> str:
+    """Return the trimmed content of the override file, or '' if absent."""
+    try:
+        v = IDLE_PATCH_OVERRIDE_FILE.read_text(encoding="ascii", errors="replace").strip()
+        return v if v in ("enabled", "disabled") else ""
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return ""
+
+
+def write_idle_patch_override(value: str) -> None:
+    """Write 'enabled' or 'disabled' to the override file, or delete it if
+    value is falsy. Raises ValueError on unknown value."""
+    if value in (None, "", "auto", "clear"):
+        try:
+            IDLE_PATCH_OVERRIDE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    if value not in ("enabled", "disabled"):
+        raise ValueError(f"override must be 'enabled', 'disabled', or 'auto'; got {value!r}")
+    IDLE_PATCH_OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write so a crashed process can't leave a half-written override.
+    tmp = IDLE_PATCH_OVERRIDE_FILE.with_suffix(".tmp")
+    tmp.write_text(value + "\n", encoding="ascii")
+    tmp.replace(IDLE_PATCH_OVERRIDE_FILE)
+
+
+def _find_patch_script() -> Path | None:
+    for c in PATCH_SCRIPT_CANDIDATES:
+        if c.is_file():
+            return c
+    return None
+
+
+def idle_patch_binary_state() -> dict:
+    """Return a cached dict describing the shipping EXE's patch state. Uses
+    mtime+size as a cache key so a restart / patch / revert invalidates us
+    without re-scanning the 300 MB binary on every UI poll."""
+    try:
+        st = GAME_EXE_PATH.stat()
+    except FileNotFoundError:
+        _PATCH_STATE_CACHE.update({"mtime": None, "md5": None, "state": "missing", "reason": None})
+        return {"state": "missing", "md5": None}
+    key = (st.st_mtime_ns, st.st_size)
+    if _PATCH_STATE_CACHE.get("mtime") == key and _PATCH_STATE_CACHE.get("state"):
+        return {
+            "state": _PATCH_STATE_CACHE["state"],
+            "md5": _PATCH_STATE_CACHE["md5"],
+            "reason": _PATCH_STATE_CACHE.get("reason"),
+        }
+    script = _find_patch_script()
+    if script is None:
+        return {"state": "unknown", "md5": None, "reason": "patch-idle-cpu.py not installed"}
+    try:
+        out = subprocess.run(
+            ["python3", str(script), str(GAME_EXE_PATH), "--print-state"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        return {"state": "unknown", "md5": None, "reason": f"subprocess error: {e}"}
+    line = (out.stdout or "").strip().splitlines()[-1] if out.stdout else ""
+    try:
+        parsed = json.loads(line) if line else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    state = parsed.get("state", "unknown")
+    md5 = parsed.get("md5")
+    reason = parsed.get("reason")
+    _PATCH_STATE_CACHE.update({"mtime": key, "md5": md5, "state": state, "reason": reason})
+    return {"state": state, "md5": md5, "reason": reason}
+
+
+def idle_patch_full_status() -> dict:
+    """Full state payload for GET /api/idle-cpu-patch."""
+    override = read_idle_patch_override()
+    binary = idle_patch_binary_state()
+    # The operator-configured env var on the GAME container. Read from the
+    # game process's /proc/<pid>/environ so the UI reflects the deployed
+    # value, not the UI container's own env (which doesn't set it).
+    env_requested = _read_game_container_env("WINDROSE_PATCH_IDLE_CPU") == "1"
+    effective_on = env_requested
+    if override == "enabled":
+        effective_on = True
+    elif override == "disabled":
+        effective_on = False
+    binary_state_val = binary.get("state")
+    # Whether a game restart is needed for effective state to match the binary.
+    needs_restart = (
+        (effective_on and binary_state_val == "unpatched") or
+        (not effective_on and binary_state_val == "patched")
+    )
+    return {
+        "envRequested": env_requested,
+        "override": override or "auto",
+        "overrideFile": str(IDLE_PATCH_OVERRIDE_FILE),
+        "effectiveOn": effective_on,
+        "binaryMd5": binary.get("md5"),
+        "binaryState": binary_state_val,
+        "binaryReason": binary.get("reason"),
+        "needsRestart": needs_restart,
+    }
+
+
+def _read_game_container_env(var_name: str) -> str:
+    """Best-effort read of an env var from the game container's process via
+    the shared PID namespace. Returns '' on any failure."""
+    try:
+        for pid_dir in Path("/proc").iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                cmdline = (pid_dir / "cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"WindroseServer-Win64-Shipping" not in cmdline and b"proton" not in cmdline:
+                continue
+            try:
+                environ = (pid_dir / "environ").read_bytes()
+            except OSError:
+                continue
+            for entry in environ.split(b"\x00"):
+                if entry.startswith(var_name.encode() + b"="):
+                    return entry.split(b"=", 1)[1].decode("ascii", "replace")
+    except OSError:
+        pass
+    return ""
+
+
 def list_backups() -> list[dict]:
     out: list[dict] = []
     if not BACKUP_ROOT.exists():
@@ -957,6 +1104,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/server/restart",     "_api_server_restart"),
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
+        ("GET",    "/api/idle-cpu-patch",     "_api_idle_patch_get"),
+        ("POST",   "/api/idle-cpu-patch",     "_api_idle_patch_post"),
         # /api/backups/{id}/restore, /api/worlds/{id}/upload, and
         # /api/worlds/{id}/config handled in _dispatch dynamically.
     ]
@@ -1430,6 +1579,38 @@ class Handler(BaseHTTPRequestHandler):
         request_restart()
         fire_event("backup.restored", backupId=bid)
         self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True})
+
+    def _api_idle_patch_get(self):
+        self._json(HTTPStatus.OK, idle_patch_full_status())
+
+    def _api_idle_patch_post(self):
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"invalid JSON body\n"); return
+        override = payload.get("override")
+        # Accept None / "" / "auto" / "clear" to delete the file; "enabled"
+        # / "disabled" to write it. Anything else is rejected.
+        try:
+            write_idle_patch_override(override)
+        except ValueError as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode()); return
+        # Invalidate binary-state cache so the next GET reflects the new
+        # override immediately (binary bytes are unchanged, but the
+        # effective-on flag will flip).
+        _PATCH_STATE_CACHE.update({"mtime": None})
+        status = idle_patch_full_status()
+        if payload.get("restart") and status["needsRestart"] and allow_destructive():
+            try:
+                request_restart()
+                status["restartRequested"] = True
+            except Exception as e:
+                status["restartError"] = str(e)
+        self._json(HTTPStatus.OK, status)
 
 # --- Main -------------------------------------------------------------------
 def main():

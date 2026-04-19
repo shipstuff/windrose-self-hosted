@@ -495,6 +495,34 @@ def resolve_offsets(data: bytes, md5: str, use_known: bool) -> tuple[Offsets, st
 
 # === Apply ===
 
+def print_state(path: str) -> None:
+    """Emit a single JSON line describing the binary's patch state.
+    Exits 0 on any outcome that can be reported (patched, unpatched,
+    corrupt, or binary-not-a-match). Meant for the UI sidecar to poll
+    without parsing text output."""
+    import json
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        print(json.dumps({"state": "missing", "path": path}))
+        return
+    md5 = hashlib.md5(data).hexdigest()
+    result = {"path": path, "md5": md5}
+    try:
+        off = derive_offsets(data)
+        result["state"] = binary_state(data, off)
+        result["mode"] = "derived"
+        if md5 in KNOWN_OFFSETS:
+            result["mode"] = "known"
+        result["patch_site_file"] = off.patch_site_file
+        result["trampoline_file"] = off.trampoline_file
+    except SystemExit as e:
+        result["state"] = "inapplicable"
+        result["reason"] = str(e).replace("error: ", "")
+    print(json.dumps(result))
+
+
 def apply_patch(path: str, revert: bool, dry_run: bool, use_known: bool,
                 verbose: bool, idempotent: bool) -> None:
     with open(path, "rb") as f:
@@ -582,7 +610,13 @@ def main() -> None:
                     help="Exit 0 with an info message if the binary is already in the "
                          "desired state (patched for normal mode, unpatched for --revert). "
                          "Meant for boot scripts that want a no-op on re-run.")
+    ap.add_argument("--print-state", action="store_true",
+                    help="Emit a single JSON line describing the binary's current patch "
+                         "state (md5, state, patch-site offsets) and exit 0. For the UI.")
     args = ap.parse_args()
+    if args.print_state:
+        print_state(args.path)
+        return
     apply_patch(
         args.path,
         revert=args.revert,
