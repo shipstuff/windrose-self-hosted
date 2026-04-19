@@ -27,8 +27,7 @@ Other Windrose dockerizations exist — this one leans on patterns we already op
 
 ## Published Images And Helm Chart
 
-- `ghcr.io/shipstuff/windrose-server` — game container
-- `ghcr.io/shipstuff/windrose-ui` — UI sidecar
+- `ghcr.io/shipstuff/windrose-server` — single image for game + xvfb + UI sidecar (stdlib Python admin console baked in at `/opt/windrose-ui/`)
 - `oci://ghcr.io/shipstuff/charts/windrose` — Helm chart
 
 ## Critical Setting: `P2pProxyAddress`

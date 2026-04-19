@@ -18,8 +18,18 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck -x -S warning \
             image/entrypoint.sh \
-            image/ui/cgi-bin/*.sh \
+            bare-linux/install.sh \
             tools/pack-windowsserver.sh
+
+  python-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Syntax-check UI server
+        run: python3 -m py_compile image/ui/server.py
 
   yaml-lint:
     runs-on: ubuntu-latest

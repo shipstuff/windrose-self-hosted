@@ -31,8 +31,12 @@
       </div>
       <div id="signInError" class="warn-inline row hidden"></div>
     </div>
-    <div id="adminBanner" class="admin-banner">
-      <strong id="adminBannerLead">⚠ Admin-only.</strong> <span id="adminBannerText">Checking auth state…</span>
+    <!-- Admin banner + admin-only cards start hidden so the public
+         view renders immediately on load. applyStatus() unhides them
+         once it knows the auth + destructive state — avoids the
+         "flash of admin UI" before the first /api/status returns. -->
+    <div id="adminBanner" class="admin-banner hidden">
+      <strong id="adminBannerLead"></strong> <span id="adminBannerText"></span>
     </div>
 
     <!-- Invite — top priority once available -->
@@ -62,11 +66,11 @@
       </dl>
       <div class="row">
         <button id="refreshBtn" type="button">Refresh</button>
-        <button id="downloadSavesBtn" class="admin-only" type="button">Download saves (.tar.gz)</button>
+        <button id="downloadSavesBtn" class="admin-only hidden" type="button">Download saves (.tar.gz)</button>
         <!-- Single dynamic restart button — label flips to
              "Apply + restart" when any staged changes exist (server
              config or per-world). Plain "Restart server" otherwise. -->
-        <button id="restartServerBtn" class="danger admin-only" type="button">Restart server</button>
+        <button id="restartServerBtn" class="danger admin-only hidden" type="button">Restart server</button>
         <button id="discardAllStagedBtn" class="admin-only hidden" type="button">Discard all staged</button>
       </div>
     </div>
@@ -80,7 +84,7 @@
       </table>
     </div>
 
-    <div class="card admin-only">
+    <div class="card admin-only hidden">
       <h2>Worlds <span id="worldsStagedTag" class="tag hidden">pending changes</span></h2>
       <div id="worldsEmpty" class="empty-note hidden">No worlds found on disk.</div>
       <table id="worldsTable">
@@ -163,7 +167,7 @@
     </div>
 
     <!-- Server config — form by default, raw JSON on demand -->
-    <div class="card admin-only">
+    <div class="card admin-only hidden">
       <h2>Server Config <span id="stagedTag" class="tag hidden">pending changes</span></h2>
       <p class="muted">Edit fields then Stage — changes apply on next server restart. Identity (PersistentServerId) and world data are preserved.</p>
       <div id="configDiffBox" class="hidden">
@@ -215,7 +219,7 @@
     </div>
 
     <!-- Backups -->
-    <div class="card admin-only">
+    <div class="card admin-only hidden">
       <h2>Backups</h2>
       <p class="muted">Snapshots of <code>R5/Saved/</code> + identity files under <code>/home/steam/backups/</code>. Oldest pruned automatically.</p>
       <div id="backupsEmpty" class="empty-note hidden">No backups yet.</div>
@@ -229,7 +233,7 @@
     </div>
 
     <!-- Manual update — advanced, collapsed by default -->
-    <details class="card admin-only" id="updateCard">
+    <details class="card admin-only hidden" id="updateCard">
       <summary><h2><span id="importTitle">Manual WindowsServer Update</span></h2></summary>
       <p id="importBlurb" class="muted">Upload a custom / modded <code>WindowsServer</code> tarball to replace the stock binary SteamCMD pulls from Valve. Useful for running community mods, pinning a specific build, or staging a pre-release binary. The stock online path (<code>serverConfig.source: steamcmd</code>) refreshes from app id 4129620 on every restart — switch to <code>source: files</code> in your values if you want your upload to stick across reboots.</p>
       <p class="muted">Pack command (WSL): <code>tar -czf windrose-server.tgz -C "/mnt/c/Program Files (x86)/Steam/steamapps/common/Windrose/R5/Builds" WindowsServer</code></p>
