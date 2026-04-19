@@ -389,7 +389,14 @@ def find_worlds() -> list[dict]:
                 "islandId":    island.name,
                 "staged":      staged.is_file(),
             }
-            data = load_json(wd)
+            # The row values shown in the UI's worlds table. When a
+            # staged override exists we prefer its values here — the
+            # editor already opens from staged (so the operator sees
+            # their in-progress edits), and showing the live values
+            # in the list produced a confusing "list says X, editor
+            # says Y" mismatch on any row with pending changes.
+            src_path = staged if staged.is_file() else wd
+            data = load_json(src_path)
             if data:
                 inner = data.get("WorldDescription", data)
                 w["worldName"]       = inner.get("WorldName", "")
@@ -843,11 +850,15 @@ def dispatch_event(event: dict) -> None:
         ok, detail = post_json(WEBHOOK_DISCORD_URL, build_discord_payload(event), WEBHOOK_TIMEOUT)
         print(f"[webhook:discord] {name} → {'ok' if ok else 'FAIL'} ({detail})", file=sys.stderr, flush=True)
 
-def fire_event(name: str, **fields) -> None:
+def fire_event(event_name: str, **fields) -> None:
     """Dispatch an event from anywhere in the process. Wrapped in a thread
-    so request handlers don't block on webhook delivery."""
+    so request handlers don't block on webhook delivery.
+
+    The leading arg is `event_name` (not `name`) because player events
+    pass `name=<player_name>` as a field, which collides with any
+    parameter literally called `name`."""
     event = {
-        "event": name,
+        "event": event_name,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **fields,
     }

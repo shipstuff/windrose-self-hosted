@@ -4,12 +4,25 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Windrose Self-Hosted Admin Console</title>
+    <script>
+      // Apply stored theme preference BEFORE the stylesheet paints so
+      // there's no flash of the wrong mode. Values: "light" | "dark" |
+      // absent (= follow OS via the stylesheet's prefers-color-scheme
+      // media query).
+      (function() {
+        var t = localStorage.getItem("windrose.theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="app.css">
   </head>
   <body>
     <div class="header-row">
       <h1><span id="appTitle">Windrose Self-Hosted</span> <span id="destructiveTag" class="tag locked hidden">read-only</span></h1>
       <div id="authBox" class="auth-box">
+        <button id="themeToggleBtn" class="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">◐</button>
         <span id="authState" class="muted">not signed in</span>
         <button id="signInBtn" type="button">Sign in</button>
         <button id="signOutBtn" type="button" class="hidden">Sign out</button>

@@ -29,13 +29,13 @@ Other Windrose dockerizations exist — this one leans on patterns we already op
 
 The admin console is a stdlib-only Python HTTP server baked into the same container as the game. It handles the invite-code display, server/players/resource status, config editor with staged-changes diffing, per-world editor, backups, manual `WindowsServer` upload, and Discord/generic webhook dispatch. Authentication is optional HTTP basic auth (`UI_PASSWORD`); destructive routes are gated behind that password plus an `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` opt-in for LAN-only deploys.
 
-<!-- Screenshots: add under docs/screenshots/ when a real deployment is handy.
-     Suggested: the invite card, the server config stage/diff view,
-     the worlds card with per-row editor, the backups table. Reference
-     them here as:
-     ![Invite card](docs/screenshots/invite.png)
-     ![Server config diff](docs/screenshots/config-diff.png)
--->
+Public view (not signed in) — invite code, server status, connected players, resource usage. Everything read-only, no admin surface exposed:
+
+![Public view: invite + status + players + resources](docs/screenshots/01-public-view.jpg)
+
+Admin view (signed in) — adds the Worlds card with per-row editor, Server Config with stage/apply/discard, Backups, Manual WindowsServer update, and the live log tail:
+
+![Admin view: worlds + server config + backups + log](docs/screenshots/02-admin-view.jpg)
 
 
 ## Published Images And Helm Chart
@@ -173,7 +173,7 @@ The server config lives at `/home/steam/windrose/WindowsServer/R5/ServerDescript
 
 When Windrose ships a patch, the dedicated-server binary bumps its `<GameVersion>` save-path segment. Entrypoint migrates worlds forward automatically when it sees ≥2 version folders under `RocksDB/`.
 
-### Preferred: re-upload via the UI (or its API)
+### Preferred: re-upload via the UI (or its [API](#admin-console-api))
 
 The UI's upload endpoint (`/api/upload`) preserves the save, `ServerDescription.json` (the server's **identity** — PersistentServerId, WorldIslandId, InviteCode), and `WorldDescription.json` across replacement, and snapshots the old tree to `/home/steam/backups/<utc>/` (last 5 kept). This is the only flow that keeps your save tied to your old island; a bare wipe orphans it (see caveat below).
 
@@ -229,6 +229,57 @@ kubectl -n games exec windrose-0 -c windrose-ui -- \
 # via port-forward
 kubectl -n games port-forward svc/windrose 28080:28080 &
 curl -s -u admin:$PASSWORD http://127.0.0.1:28080/api/invite
+```
+
+## Admin Console API
+
+All routes are served by the `windrose-ui` container at `:28080`. Static assets at `/` and `/healthz` are always open; `/api/status` is always reachable but returns a **redacted** payload (no `AccountId`, no `allowDestructive`, no staged state) when the request isn't authenticated. Every other `/api/*` route requires HTTP basic auth (any username, password from `UI_PASSWORD`); routes marked *destructive* additionally require either `UI_PASSWORD` set, or `UI_ENABLE_ADMIN_WITHOUT_PASSWORD=true` for explicit LAN-only opt-in.
+
+| Method | Path                                          | Auth          | Purpose                                                                                 |
+| ------ | --------------------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
+| GET    | `/healthz`                                    | open          | Liveness — returns `ok`. Safe for k8s probes and external monitors.                      |
+| GET    | `/`, `/app.css`, `/app.js`, `/index.html`     | open          | Served when `ui.serveStatic=true` (default). Disable if nginx serves the static assets. |
+| GET    | `/api/status`                                 | open / authed | Game process state, player list, resource usage, invite code, backend region, staged-change hints. Public view redacts `AccountId`s and omits `allowDestructive` / `stagedWorlds`. |
+| GET    | `/api/invite`                                 | authed        | Plain-text invite code.                                                                  |
+| GET    | `/api/config`                                 | authed        | Live + staged `ServerDescription.json` + worlds list.                                    |
+| PUT    | `/api/config`                                 | authed        | Stage server-config changes (writes `ServerDescription.staged.json`). Schema-validated.  |
+| DELETE | `/api/config`                                 | *destructive* | Discard the staged server config.                                                        |
+| POST   | `/api/config/validate`                        | authed        | Dry-run schema check for a config body, no side effects.                                 |
+| POST   | `/api/config/apply`                           | *destructive* | Swap staged → live for server + every staged world atomically, then signal restart.      |
+| GET    | `/api/backups`                                | authed        | List of timestamped snapshots under `/home/steam/backups/`.                              |
+| POST   | `/api/backups`                                | *destructive* | Create a manual snapshot now. Fires `backup.created` webhook.                            |
+| POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. Fires `backup.restored`. |
+| GET    | `/api/saves/download`                         | authed        | Stream `R5/Saved/` as a `.tar.gz` (useful for local analysis or backups off-host).       |
+| POST   | `/api/upload`                                 | *destructive* | Stream a `.tar.gz` / `.tar` / `.zip` of a `WindowsServer/` tree onto the PVC. Preserves identity + saves; snapshots the old tree to `backups/`. |
+| GET    | `/api/worlds/{islandId}/config`               | authed        | Live + staged `WorldDescription.json` for one world.                                     |
+| PUT    | `/api/worlds/{islandId}/config`               | *destructive* | Stage per-world changes (writes `WorldDescription.staged.json`). Normalized on receive.  |
+| DELETE | `/api/worlds/{islandId}/config`               | *destructive* | Discard the staged per-world changes.                                                    |
+| POST   | `/api/worlds/{islandId}/upload`               | *destructive* | Upload a world tarball into `R5/Saved/.../Worlds/{id}/`. Requires the game to be stopped. |
+| POST   | `/api/server/restart`                         | *destructive* | SIGTERM the game process; supervisor brings it back. No config changes applied.          |
+| POST   | `/api/server/stop`                            | *destructive* | SIGTERM the game process. Kubelet / Docker / systemd restarts the container per usual.   |
+
+`islandId` is the 32-character hex folder name under `RocksDB/<GameVersion>/Worlds/`. Backup `id` is the UTC timestamp folder name under `/home/steam/backups/` (format `YYYYMMDDTHHMMSSZ`).
+
+Example — curl the invite code behind basic auth:
+
+```bash
+curl -s -u admin:$PASSWORD http://<host>:28080/api/invite
+```
+
+Example — stage a WorldDescription change from a local JSON file:
+
+```bash
+curl -s -u admin:$PASSWORD \
+  -H 'Content-Type: application/json' \
+  --data-binary @new-world.json \
+  -X PUT \
+  http://<host>:28080/api/worlds/1D2317CE3EA24706E080C103FCE2FB29/config
+```
+
+Example — apply all staged changes + restart:
+
+```bash
+curl -s -u admin:$PASSWORD -X POST http://<host>:28080/api/config/apply
 ```
 
 ## Send Notifications Via Discord Or Generic Webhooks

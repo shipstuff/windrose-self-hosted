@@ -4,6 +4,7 @@ const adminBannerLead = document.getElementById("adminBannerLead");
 const adminBannerText = document.getElementById("adminBannerText");
 const destructiveTag = document.getElementById("destructiveTag");
 const appTitle        = document.getElementById("appTitle");
+const themeToggleBtn  = document.getElementById("themeToggleBtn");
 const authBox        = document.getElementById("authBox");
 const authState      = document.getElementById("authState");
 const signInBtn      = document.getElementById("signInBtn");
@@ -892,6 +893,33 @@ copyInviteBtn.addEventListener("click", async () => {
   }
   log(copied ? "invite copied" : "copy not permitted; select manually: " + code);
 });
+
+// --- Theme toggle -------------------------------------------------
+// Inline script in index.html's <head> applies the stored preference
+// BEFORE first paint. This just handles click-to-cycle + glyph update.
+// Three-state cycle: auto (follow OS) → light → dark → auto.
+function currentThemeMode() {
+  const stored = localStorage.getItem("windrose.theme");
+  return stored === "light" || stored === "dark" ? stored : "auto";
+}
+function updateThemeToggleGlyph() {
+  const mode = currentThemeMode();
+  // ◐ (auto/OS) — ☀ (forced light) — ☾ (forced dark)
+  themeToggleBtn.textContent = mode === "light" ? "☀" : mode === "dark" ? "☾" : "◐";
+  themeToggleBtn.title = `Theme: ${mode} (click to cycle)`;
+}
+themeToggleBtn.addEventListener("click", () => {
+  const next = { auto: "light", light: "dark", dark: "auto" }[currentThemeMode()];
+  if (next === "auto") {
+    localStorage.removeItem("windrose.theme");
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    localStorage.setItem("windrose.theme", next);
+    document.documentElement.setAttribute("data-theme", next);
+  }
+  updateThemeToggleGlyph();
+});
+updateThemeToggleGlyph();
 
 // --- Auth handlers ------------------------------------------------
 signInBtn.addEventListener("click", () => {
