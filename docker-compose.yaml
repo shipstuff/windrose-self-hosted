@@ -50,6 +50,16 @@ services:
     # the Python admin console is baked at /opt/windrose-ui/server.py.
     image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:latest}
     restart: unless-stopped
+    # Share the game service's PID namespace so the UI's /api/server/restart
+    # can find the Proton/game process via /proc and os.kill() it. Without
+    # this, each compose service gets its own PID namespace and the UI
+    # can't see (let alone signal) the game. k8s achieves the same thing
+    # via shareProcessNamespace + CAP_KILL on the sidecar; bare-Linux
+    # gets it for free (all three services run as the same user in the
+    # host PID namespace).
+    pid: service:windrose
+    depends_on:
+      - windrose
     command: ["python3", "/opt/windrose-ui/server.py"]
     environment:
       UI_BIND: ${UI_BIND:-127.0.0.1}
