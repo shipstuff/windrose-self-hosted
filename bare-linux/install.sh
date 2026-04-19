@@ -42,10 +42,24 @@ WINDROSE_INSTALL_DIR="${WINDROSE_INSTALL_DIR:-/opt/windrose}"
 WINDROSE_ENV_DIR="${WINDROSE_ENV_DIR:-/etc/windrose}"
 WINDROSE_ENV_FILE="${WINDROSE_ENV_FILE:-${WINDROSE_ENV_DIR}/windrose.env}"
 
-UI_BIND="${UI_BIND:-0.0.0.0}"
+# Safe-by-default: bind the admin UI to loopback. Exposing it publicly
+# (UI_BIND=0.0.0.0) without UI_PASSWORD set is a foot-gun on any VPS,
+# so the operator has to explicitly flip both knobs.
+UI_BIND="${UI_BIND:-127.0.0.1}"
 UI_PORT="${UI_PORT:-28080}"
 UI_PASSWORD="${UI_PASSWORD:-}"
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD="${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}"
+
+# Warn if the operator is reaching for a publicly-exposed UI without
+# a password. Not fatal — compose / bare-Linux have legitimate
+# LAN-only deploys where this is fine — but loud so it's deliberate.
+if [ "${UI_BIND}" = "0.0.0.0" ] && [ -z "${UI_PASSWORD}" ] && [ "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}" != "true" ]; then
+  printf '\033[33m[install] WARN: UI_BIND=0.0.0.0 with no UI_PASSWORD.\n'
+  printf '          The admin console will refuse destructive routes\n'
+  printf '          without credentials, but anyone on the internet can\n'
+  printf '          hit it. Set UI_PASSWORD=... or keep UI_BIND=127.0.0.1\n'
+  printf '          and reverse-proxy via nginx/caddy with auth in front.\033[0m\n' >&2
+fi
 
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '\033[33m[install] WARN: %s\033[0m\n' "$*" >&2; }
@@ -244,8 +258,18 @@ systemctl enable --now windrose-xvfb.service windrose-ui.service windrose-game.s
 
 log "done."
 echo
+echo "  Services run as:   ${WINDROSE_USER} (non-root; systemd units at"
+echo "                      /etc/systemd/system/windrose-{xvfb,game,ui}.service)"
+echo "  Game data lives:   ${WINDROSE_HOME}/windrose/"
+echo "  Env file (edit):   ${WINDROSE_ENV_FILE}"
 echo "  Tail game logs:    sudo journalctl -fu windrose-game"
 echo "  Tail UI logs:      sudo journalctl -fu windrose-ui"
+echo
 echo "  Admin console:     http://${UI_BIND}:${UI_PORT}/"
-echo "  Env file (edit):   ${WINDROSE_ENV_FILE}"
-echo "  Game data lives:   ${WINDROSE_HOME}/windrose/"
+if [ "${UI_BIND}" = "127.0.0.1" ]; then
+echo "                      (loopback-only by default — reach it via SSH tunnel:"
+echo "                       'ssh -L ${UI_PORT}:127.0.0.1:${UI_PORT} root@<this host>'"
+echo "                       then browse http://127.0.0.1:${UI_PORT}/ locally)"
+echo "  To expose over LAN/WAN: set UI_BIND=0.0.0.0 AND UI_PASSWORD=... in"
+echo "                          ${WINDROSE_ENV_FILE}, then systemctl restart windrose-ui"
+fi

@@ -45,19 +45,42 @@ From a checkout of this repo, as root on the target host:
 sudo ./bare-linux/install.sh
 ```
 
-The installer:
+Defaults are safe: non-root services, UI on loopback, no public exposure.
+See § What The Install Includes for the full picture.
 
-- Installs OS packages: `xvfb`, `python3`, `winbind`, `dbus`, `libfreetype6`,
-  `libgnutls30`, `lib32gcc-s1` (i386 enabled for Proton), and supporting
-  tools (`curl`, `jq`, `tar`, `gzip`, `unzip`).
-- Creates a dedicated non-root `steam` user.
-- Drops the repo's [`image/entrypoint.sh`](../image/entrypoint.sh) +
-  [`image/ui/`](../image/ui/) assets under `/opt/windrose/`.
-- Writes `/etc/windrose/windrose.env` with all runtime knobs.
-- Enables + starts three systemd units:
+### What The Install Includes
+
+- **OS packages**: `xvfb`, `python3`, `winbind`, `dbus`, `libfreetype6`,
+  `libgnutls30`, `lib32gcc-s1` (i386 enabled for Proton), `curl`, `jq`,
+  `tar`, `gzip`, `unzip`.
+- **A dedicated `steam` user**, created if missing. The install script
+  needs root (apt, systemd, `/etc/windrose/`), but **the three services
+  all run as `steam`, not root** — SteamCMD, GE-Proton, the game, and
+  the admin console never see root privileges. Override the user with
+  `WINDROSE_USER=...` at install time if you want to reuse an existing
+  account.
+- **Three systemd system units**, all running as `steam`:
   - `windrose-xvfb.service` — virtual display on `:99`
   - `windrose-game.service` — the game under GE-Proton
-  - `windrose-ui.service`   — the Python admin console on port `28080`
+  - `windrose-ui.service`   — the Python admin console (stdlib, no deps)
+- **Files under `/opt/windrose/`** (the installed code) and
+  **`/home/steam/windrose/`** (the PVC-equivalent: game binaries,
+  saves, backups). `/etc/windrose/windrose.env` holds all runtime knobs,
+  owned by `root:steam` with mode `0640` so the `steam` user can read
+  but not rewrite it.
+- **The admin UI binds to `127.0.0.1` by default**. That's safe on any
+  VPS out of the box — nothing listens externally, nothing can be
+  probed. Reach it via SSH tunnel:
+  ```bash
+  ssh -L 28080:127.0.0.1:28080 root@<your host>
+  # then browse http://127.0.0.1:28080/ locally
+  ```
+  To expose over LAN/WAN, **set `UI_PASSWORD` first**, then bind to
+  `0.0.0.0`:
+  ```bash
+  sudo UI_BIND=0.0.0.0 UI_PASSWORD='hunter2' ./bare-linux/install.sh
+  ```
+  The installer warns if you pass `UI_BIND=0.0.0.0` without a password.
 
 On first boot the game service runs SteamCMD anonymously to pull app
 `4129620` (~3 GiB) into `/home/steam/windrose/WindowsServer/`, then
@@ -70,8 +93,6 @@ Tail it:
 sudo journalctl -fu windrose-game
 sudo journalctl -fu windrose-ui
 ```
-
-Hit the admin console at `http://<host>:28080/`.
 
 ## Overrides
 
@@ -90,7 +111,7 @@ Or just edit the env file and `systemctl restart windrose-game` after.
 |---|---|---|
 | `WINDROSE_USER` | `steam` | owner of the install + services |
 | `WINDROSE_INSTALL_DIR` | `/opt/windrose` | where `image/` lands |
-| `UI_BIND` | `0.0.0.0` | UI listen iface (drop to `127.0.0.1` + reverse-proxy for TLS) |
+| `UI_BIND` | `127.0.0.1` | UI listen iface. Loopback-only by default — reach it via SSH tunnel or reverse-proxy. Set to `0.0.0.0` to expose; the installer warns if you do so without `UI_PASSWORD`. |
 | `UI_PORT` | `28080` | UI listen port |
 | `UI_PASSWORD` | empty | HTTP basic-auth password. Strongly recommended for any publicly-reachable host. |
 | `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` | `false` | explicit opt-in for destructive routes when no password is set — LAN-only |
