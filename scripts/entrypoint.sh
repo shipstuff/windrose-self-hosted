@@ -292,6 +292,14 @@ maybe_patch_idle_cpu() {
     return 0
   fi
 
+  # Migration from the old in-place model: if the original was patched
+  # before (prior entrypoint version modified in place), unpatch it now
+  # so it matches Steam's manifest and the sibling is built from a
+  # clean copy. --revert --idempotent is a no-op on an unpatched
+  # binary, so this is safe to run unconditionally.
+  python3 "${script}" "${exe}" --revert --idempotent 2>&1 \
+    | sed "s/^/$(timestamp) patch-migrate: /" || true
+
   # Source md5. If it matches the md5 recorded alongside an existing
   # patched sibling, the sibling is still valid — reuse, no SteamCMD
   # conflict, no re-patch thrash.
