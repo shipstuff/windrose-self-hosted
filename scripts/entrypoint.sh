@@ -651,6 +651,36 @@ reconcile_server_config() {
 # ---- MAIN ----
 
 mkdir -p "${WINDROSE_PATH}" "${STEAM_COMPAT_DATA_PATH}" "${STEAM_COMPAT_DATA_PATH}/pfx"
+
+# Clean up stale wine processes from a prior boot of THIS instance.
+# wineserver and its children routinely detach (ppid=1), so systemd's
+# cgroup-level SIGTERM can't always reach them — a fresh `systemctl
+# restart` then finds the new proton stuck in waitforexitandrun behind
+# an old wineserver. Scan /proc for processes whose environ carries the
+# tag we wrote on our last boot and kill those. Tag lives in a
+# WINDROSE_PATH-scoped pidfile so multi-tenant hosts (other Windrose
+# installs, other wine apps) are unaffected — we only match processes
+# we spawned ourselves.
+_instance_tag_file="${WINDROSE_PATH}/.last-instance-tag"
+if [ -f "${_instance_tag_file}" ]; then
+  _stale_tag="$(cat "${_instance_tag_file}" 2>/dev/null || true)"
+  if [ -n "${_stale_tag}" ]; then
+    _killed=0
+    for _p in /proc/[0-9]*; do
+      [ -r "${_p}/environ" ] || continue
+      if tr '\0' '\n' < "${_p}/environ" 2>/dev/null \
+           | grep -qxF "WINDROSE_INSTANCE_TAG=${_stale_tag}"; then
+        kill -9 "${_p##*/}" 2>/dev/null && _killed=$((_killed + 1)) || true
+      fi
+    done
+    if [ "${_killed}" -gt 0 ]; then
+      echo "$(timestamp) INFO: Killed ${_killed} stale wine process(es) from prior boot (tag ${_stale_tag})"
+      sleep 1  # give wineserver a beat to unwind before we respawn it
+    fi
+  fi
+  rm -f "${_instance_tag_file}"
+fi
+
 init_steamcmd
 init_proton
 mkdir -p "${STEAM_COMPAT_DATA_PATH}" "${STEAM_COMPAT_DATA_PATH}/pfx"
@@ -789,6 +819,16 @@ read -r -a launch_args <<< "${SERVER_LAUNCH_ARGS}"
 R5_LOG="${WINDROSE_SERVER_DIR}/R5/Saved/Logs/R5.log"
 mkdir -p "$(dirname "${R5_LOG}")"
 ( tail -n 0 -F "${R5_LOG}" 2>/dev/null | sed -u 's/^/[R5.log] /' >&2 ) &
+
+# Tag every process we're about to spawn (via Proton + wineserver tree)
+# with a boot-unique marker. Next boot's entrypoint uses this to find
+# and kill any stragglers that detached from systemd's cgroup (see the
+# top-of-main cleanup block). The tag is exported, so all descendants
+# — including ones wineserver reparents to init — inherit it in their
+# /proc/<pid>/environ.
+export WINDROSE_INSTANCE_TAG="$$-$(date +%s)"
+mkdir -p "$(dirname "${_instance_tag_file}")"
+echo "${WINDROSE_INSTANCE_TAG}" > "${_instance_tag_file}"
 
 echo "$(timestamp) INFO: exec'ing Proton (becomes PID 1; Xvfb is in the xvfb sidecar; R5.log tail is streaming to stderr). Launch args: -log ${SERVER_LAUNCH_ARGS}"
 cd "${WINDROSE_SERVER_DIR}"
