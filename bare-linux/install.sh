@@ -15,6 +15,8 @@
 #   UI_ENABLE_ADMIN_WITHOUT_PASSWORD
 #                                 explicit opt-in for destructive routes when
 #                                 UI_PASSWORD is empty      (default: false)
+#   WINDROSE_PATCH_IDLE_CPU       opt in to the idle-CPU binary patch
+#                                 (default: 0; flip to "1" to apply on boot)
 #   SERVER_NAME, MAX_PLAYER_COUNT, WORLD_NAME, WORLD_PRESET_TYPE,
 #   P2P_PROXY_ADDRESS, WINDROSE_SERVER_SOURCE, etc. — any env var the
 #   entrypoint understands can be seeded here too; anything unset falls
@@ -147,6 +149,12 @@ chmod 0755 "${WINDROSE_INSTALL_DIR}/scripts/ui/server.py"
 # already there from a previous install.
 ln -snf "${WINDROSE_INSTALL_DIR}/scripts/ui" /opt/windrose-ui
 
+# Idle-CPU patch script — install at /usr/local/bin/ to match the
+# Docker image layout so the entrypoint's _find_patch_script hits
+# the fast-path candidate. Opt in via WINDROSE_PATCH_IDLE_CPU=1 in
+# the env file; the UI Idle-CPU card toggles the runtime override.
+install -m 0755 "${SCRIPTS_SRC}/patch-idle-cpu.py" /usr/local/bin/patch-idle-cpu.py
+
 # --- Xvfb socket dir --------------------------------------------------
 install -d -m 1777 /tmp/.X11-unix
 
@@ -175,7 +183,8 @@ _MANAGED_KEYS=" \
   DISPLAY WINDROSE_SERVER_SOURCE SERVER_NAME MAX_PLAYER_COUNT \
   IS_PASSWORD_PROTECTED SERVER_PASSWORD WORLD_ISLAND_ID WORLD_NAME \
   WORLD_PRESET_TYPE P2P_PROXY_ADDRESS DISABLE_SENTRY PROTON_USE_XALIA \
-  FILES_WAIT_TIMEOUT_SECONDS UI_BIND UI_PORT UI_PASSWORD \
+  FILES_WAIT_TIMEOUT_SECONDS WINDROSE_PATCH_IDLE_CPU \
+  UI_BIND UI_PORT UI_PASSWORD \
   UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
   WINDROSE_DISCORD_WEBHOOK_URL WINDROSE_WEBHOOK_URL \
   WINDROSE_WEBHOOK_EVENTS WINDROSE_WEBHOOK_POLL_SECONDS \
@@ -245,6 +254,10 @@ P2P_PROXY_ADDRESS=${P2P_PROXY_ADDRESS:-}
 DISABLE_SENTRY=${DISABLE_SENTRY:-1}
 PROTON_USE_XALIA=${PROTON_USE_XALIA:-0}
 FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
+# Opt in to the idle-CPU binary patch (scripts/patch-idle-cpu.py).
+# "1" -> entrypoint patches the EXE on every start (idempotent).
+# The UI Idle-CPU card can flip this per-host without editing this file.
+WINDROSE_PATCH_IDLE_CPU=${WINDROSE_PATCH_IDLE_CPU:-0}
 UI_BIND=${UI_BIND}
 UI_PORT=${UI_PORT}
 UI_PASSWORD=${UI_PASSWORD}

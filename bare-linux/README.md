@@ -7,11 +7,13 @@ anywhere the [`Dockerfile`](../Dockerfile) deps are available.
 
 ## Sizing
 
-An upstream idle-CPU bug in the dedicated server (UE5 task-worker
-busy-spin, tracked on the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/))
-eats ~1.82 cores before any player is connected. Until that's fixed
-upstream, the box needs real headroom above it. Validated on
-DigitalOcean droplets 2026-04-18/19:
+An upstream idle-CPU bug in the dedicated server eats ~1.82 cores
+before any player is connected (UE5 task-worker busy-spin, tracked on
+the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/)).
+The community binary patch at `scripts/patch-idle-cpu.py` (opt in via
+`WINDROSE_PATCH_IDLE_CPU=1` in `/etc/windrose/windrose.env`) drops that
+to ~5% — if you apply it, a 1 vCPU host becomes viable. Without the
+patch the box needs real headroom above the idle floor:
 
 | Box                | Verdict                                                                 |
 | ------------------ | ----------------------------------------------------------------------- |
