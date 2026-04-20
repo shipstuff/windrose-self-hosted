@@ -124,6 +124,38 @@ server_files_present() {
 # so the caller can fall back to files-import.
 install_via_steamcmd() {
   local app_id="${WINDROSE_STEAM_APP_ID:-4129620}"
+  local exe="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
+
+  # Patch-preservation short-circuit: if the idle-CPU patch is active
+  # and the binary is already patched, skip SteamCMD. Empirically, each
+  # SteamCMD run reverts the patch ~every other boot (Steam detects
+  # the patched bytes don't match its cached manifest and "corrects"
+  # them), so the entrypoint was re-patching on every restart. Skipping
+  # SteamCMD when the desired state already exists eliminates that
+  # thrash. WINDROSE_STEAMCMD_FORCE=1 forces a normal run — use it
+  # when you want to pull a Windrose game update.
+  if [ "${WINDROSE_STEAMCMD_FORCE:-0}" != "1" ] && [ -f "${exe}" ] \
+     && command -v python3 >/dev/null 2>&1; then
+    local override_file="${WINDROSE_PATCH_OVERRIDE_FILE:-${WINDROSE_SERVER_DIR}/R5/.idle-patch-override}"
+    local override=""
+    [ -f "${override_file}" ] && override="$(tr -d '[:space:]' < "${override_file}" | head -c 16)"
+    local effective="${WINDROSE_PATCH_IDLE_CPU:-0}"
+    [ "${override}" = "enabled" ] && effective="1"
+    [ "${override}" = "disabled" ] && effective="0"
+    if [ "${effective}" = "1" ]; then
+      local script
+      script="$(_find_patch_script)"
+      if [ -n "${script}" ]; then
+        local state
+        state="$(python3 "${script}" "${exe}" --print-state 2>/dev/null | jq -r '.state // "unknown"' 2>/dev/null)"
+        if [ "${state}" = "patched" ]; then
+          echo "$(timestamp) INFO: Binary already patched (idle-CPU) — skipping SteamCMD to preserve the patch. Set WINDROSE_STEAMCMD_FORCE=1 to pull a Windrose update."
+          return 0
+        fi
+      fi
+    fi
+  fi
+
   # validate re-hashes every file — slow + not needed unless operator is
   # debugging corruption. Default off; set WINDROSE_STEAMCMD_VALIDATE=1
   # to enable. Also forced on if we see a partial install (dir exists but
@@ -132,7 +164,7 @@ install_via_steamcmd() {
   if [ "${WINDROSE_STEAMCMD_VALIDATE:-0}" = "1" ]; then
     validate_arg="validate"
   elif [ -d "${WINDROSE_SERVER_DIR}" ] \
-       && [ ! -f "${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe" ] \
+       && [ ! -f "${exe}" ] \
        && [ -n "$(ls -A "${WINDROSE_SERVER_DIR}" 2>/dev/null)" ]; then
     # Partial install detected; force validate to clean it up.
     validate_arg="validate"
