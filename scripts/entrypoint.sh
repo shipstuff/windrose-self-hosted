@@ -226,33 +226,33 @@ maybe_disable_sentry() {
   fi
 }
 
-# Optional: patch the shipping EXE to throttle the idle-spin loop in
-# `boost::asio::detail::socket_select_interrupter::reset()`. Without this,
-# two game threads burn ~91% CPU each when no player is connected (pure
-# userspace busy-loop on an Asio socket-pair drain; confirmed via
-# strace showing 0 syscalls in 3 s on either thread). The patch injects
-# a `Sleep(1)` call at the loop-continue tail — each iteration now
-# yields to the kernel via pselect6, cutting idle CPU from ~200% to ~5%
-# on the canary. Isolated to 43 bytes (5 at the site + 38 in CC padding);
-# auto-derive locates the patch site via a unique 9-byte signature and
-# parses PE imports to find KERNEL32!Sleep; reverts cleanly via
-# `--revert`. See `scripts/patch-idle-cpu.py` for the derivation details.
+# Optional: maintain a PATCHED COPY of the shipping EXE alongside the
+# original, and launch that instead of the original. This throttles a
+# Boost.Asio drain-loop spin (see scripts/patch-idle-cpu.py for the
+# derivation) that otherwise burns ~2 CPU cores when no client is
+# connected. Sibling-file approach keeps Steam's manifest-managed
+# original untouched — SteamCMD doesn't revert anything because there's
+# nothing to revert. On each boot we md5 the original and compare to
+# the source md5 recorded alongside the patched sibling; rebuild iff
+# the source changed (Windrose update) or the sibling is missing.
 #
-# Off by default — operator opts in by setting WINDROSE_PATCH_IDLE_CPU=1.
-# The UI can override this decision without a helm roll by writing
-# `disabled` to `$WINDROSE_PATCH_OVERRIDE_FILE` (default
-# `$WINDROSE_SERVER_DIR/R5/.idle-patch-override`); that takes effect on
-# next container restart. Failures (missing python3, signature not
-# found, etc.) are warnings — we'd rather boot with a busy server than
-# not boot at all.
+# Off by default. Enable via WINDROSE_PATCH_IDLE_CPU=1. UI override
+# via $WINDROSE_PATCH_OVERRIDE_FILE ("disabled" forces OFF, "enabled"
+# forces ON). Failures (patch script missing, python3 missing,
+# signature can't be found in a future build) log a WARNING and fall
+# back to launching the original — we'd rather boot with a busy
+# server than not boot at all.
+#
+# Exports IDLE_PATCH_EFFECTIVE_EXE as the path to launch (either the
+# patched sibling or the original). The bottom-of-file exec uses it.
 maybe_patch_idle_cpu() {
   : "${WINDROSE_PATCH_IDLE_CPU:=0}"
   local exe="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
+  local patched="${exe%.exe}.patched.exe"
+  local source_md5_file="${exe%.exe}.patched-source.md5"
   local override_file="${WINDROSE_PATCH_OVERRIDE_FILE:-${WINDROSE_SERVER_DIR}/R5/.idle-patch-override}"
+  export IDLE_PATCH_EFFECTIVE_EXE="${exe}"
 
-  # UI override takes precedence over env var so operators can flip the
-  # patch off without a helm/values round-trip. `disabled` forces OFF;
-  # `enabled` forces ON (on top of env=0); any other content is ignored.
   local override=""
   if [ -f "${override_file}" ]; then
     override="$(tr -d '[:space:]' < "${override_file}" | head -c 16)"
@@ -267,40 +267,60 @@ maybe_patch_idle_cpu() {
   fi
 
   if [ "${effective}" != "1" ]; then
-    # Whenever the effective mode is OFF, try to revert so a previously
-    # patched binary doesn't stay patched through env changes / override
-    # flips / a fresh SteamCMD pull landing onto an already-patched tree.
-    # --revert --idempotent is a no-op on an unpatched binary, so it's
-    # safe to invoke unconditionally.
-    if [ -f "${exe}" ]; then
-      local script
-      script="$(_find_patch_script)"
-      if [ -n "${script}" ] && command -v python3 >/dev/null 2>&1; then
-        python3 "${script}" "${exe}" --revert --idempotent 2>&1 | \
-          sed "s/^/$(timestamp) patch: /" || true
-      fi
+    # Patch OFF: drop the patched sibling if it's around so the next
+    # launch uses the original. Cheap: it's just a sibling file.
+    if [ -f "${patched}" ] || [ -f "${source_md5_file}" ]; then
+      echo "$(timestamp) INFO: Idle-CPU patch effective=OFF; removing patched sibling"
+      rm -f "${patched}" "${source_md5_file}"
     fi
     return 0
   fi
 
-  local script
-  script="$(_find_patch_script)"
+  # Patch ON. Preflight the script + interpreter before touching anything.
   if [ ! -f "${exe}" ]; then
     echo "$(timestamp) WARNING: Idle-CPU patch requested but ${exe} is missing"
     return 0
   fi
-  if [ -z "${script}" ]; then
-    echo "$(timestamp) WARNING: Idle-CPU patch requested but patch-idle-cpu.py not found"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but python3 not available; launching original"
     return 0
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "$(timestamp) WARNING: Idle-CPU patch requested but python3 not available"
+  local script
+  script="$(_find_patch_script)"
+  if [ -z "${script}" ]; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but patch-idle-cpu.py not found; launching original"
     return 0
   fi
 
-  echo "$(timestamp) INFO: Applying idle-CPU patch via ${script} (auto-derive; drops idle CPU from ~200% to ~5%)"
-  if ! python3 "${script}" "${exe}" --idempotent; then
-    echo "$(timestamp) WARNING: Idle-CPU patch failed; binary left unmodified"
+  # Source md5. If it matches the md5 recorded alongside an existing
+  # patched sibling, the sibling is still valid — reuse, no SteamCMD
+  # conflict, no re-patch thrash.
+  local current_md5 cached_md5
+  current_md5="$(md5sum "${exe}" | awk '{print $1}')"
+  cached_md5="$(cat "${source_md5_file}" 2>/dev/null || true)"
+  if [ -f "${patched}" ] && [ "${cached_md5}" = "${current_md5}" ]; then
+    echo "$(timestamp) INFO: Patched sibling at ${patched} is current (source md5 ${current_md5}); reusing"
+    IDLE_PATCH_EFFECTIVE_EXE="${patched}"
+    return 0
+  fi
+
+  # Need to rebuild. Either the source changed (Windrose update) or
+  # the sibling is absent.
+  if [ -f "${patched}" ]; then
+    echo "$(timestamp) INFO: Source md5 changed (${cached_md5:-\(none\)} → ${current_md5}); rebuilding patched sibling"
+    rm -f "${patched}" "${source_md5_file}"
+  else
+    echo "$(timestamp) INFO: Building patched sibling at ${patched} (source md5 ${current_md5})"
+  fi
+
+  cp -a "${exe}" "${patched}"
+  if python3 "${script}" "${patched}"; then
+    echo "${current_md5}" > "${source_md5_file}"
+    echo "$(timestamp) INFO: Patched sibling ready; launching ${patched} in place of ${exe}"
+    IDLE_PATCH_EFFECTIVE_EXE="${patched}"
+  else
+    echo "$(timestamp) WARNING: Patch build failed; removing incomplete sibling and launching original"
+    rm -f "${patched}" "${source_md5_file}"
   fi
 }
 
@@ -697,6 +717,12 @@ if [ "${WINDROSE_LAUNCH_STRATEGY}" = "launcher" ]; then
   EXE="${WINDROSE_SERVER_DIR}/WindroseServer.exe"
 else
   EXE="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
+fi
+# maybe_patch_idle_cpu sets IDLE_PATCH_EFFECTIVE_EXE to the sibling
+# .patched.exe when active, else leaves it at the original. Shipping
+# launch strategy is the only one with a sibling patch today.
+if [ "${WINDROSE_LAUNCH_STRATEGY}" != "launcher" ] && [ -n "${IDLE_PATCH_EFFECTIVE_EXE:-}" ]; then
+  EXE="${IDLE_PATCH_EFFECTIVE_EXE}"
 fi
 if [ ! -f "${EXE}" ]; then
   echo "$(timestamp) ERROR: Launch binary not found at ${EXE}"

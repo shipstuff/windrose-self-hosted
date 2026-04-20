@@ -179,8 +179,8 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 **Idle-CPU patch**
 | Env var | Default | Purpose |
 |---|---|---|
-| `WINDROSE_PATCH_IDLE_CPU` | `0` | `1` → entrypoint runs `scripts/patch-idle-cpu.py` against the game binary on every start. **Experimental, no warranty.** See the Caveats section and the script header for the disclaimer. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
-| `WINDROSE_PATCH_OVERRIDE_FILE` | `$R5_DIR/.idle-patch-override` | Path the entrypoint consults for a runtime override written by the admin UI's Idle-CPU card. `disabled` forces OFF and triggers a revert on next boot; `enabled` forces ON. Absent = follow `WINDROSE_PATCH_IDLE_CPU`. |
+| `WINDROSE_PATCH_IDLE_CPU` | `0` | `1` → entrypoint builds a `WindroseServer-Win64-Shipping.patched.exe` sibling of the Steam-managed original on every start (caching by source md5), and launches that instead. The original is never modified, so SteamCMD's app_update has nothing to revert. **Experimental, no warranty** — see Caveats and the script header. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
+| `WINDROSE_PATCH_OVERRIDE_FILE` | `$R5_DIR/.idle-patch-override` | Runtime override written by the admin UI's Idle-CPU card. `disabled` forces OFF (patched sibling is removed on next restart, game launches original); `enabled` forces ON regardless of env. Absent = follow `WINDROSE_PATCH_IDLE_CPU`. |
 
 **Admin UI (`windrose-ui` sidecar)**
 | Env var | Default | Purpose |

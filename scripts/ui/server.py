@@ -33,6 +33,7 @@ Without either, destructive endpoints return 403.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -486,46 +487,63 @@ def _find_patch_script() -> Path | None:
 
 
 def idle_patch_binary_state() -> dict:
-    """Return a cached dict describing the shipping EXE's patch state. Uses
-    mtime+size as a cache key so a restart / patch / revert invalidates us
-    without re-scanning the 300 MB binary on every UI poll. Thread-safe
-    via _PATCH_STATE_LOCK so concurrent request handlers see consistent
-    reads + writes."""
+    """Report the idle-CPU patch state under the sidecar model. The
+    entrypoint maintains a sibling `<exe>.patched.exe` alongside the
+    Steam-managed original, plus a `<exe>.patched-source.md5` file
+    recording the md5 of the source it was built from.
+
+    States:
+      missing   — original EXE isn't on disk yet
+      unpatched — no sibling (patch is OFF or has never been built)
+      patched   — sibling exists and its recorded source md5 matches
+                  the current original's md5; will launch on next start
+      stale     — sibling exists but source md5 differs (Windrose
+                  updated since last patch build). Next boot rebuilds.
+    """
     try:
-        st = GAME_EXE_PATH.stat()
+        src_st = GAME_EXE_PATH.stat()
     except FileNotFoundError:
-        with _PATCH_STATE_LOCK:
-            _PATCH_STATE_CACHE.update({"mtime": None, "md5": None, "state": "missing", "reason": None})
         return {"state": "missing", "md5": None}
-    key = (st.st_mtime_ns, st.st_size)
+
+    patched_exe = GAME_EXE_PATH.parent / (GAME_EXE_PATH.stem + ".patched.exe")
+    source_md5_file = GAME_EXE_PATH.parent / (GAME_EXE_PATH.stem + ".patched-source.md5")
+
+    cache_key = (src_st.st_mtime_ns, src_st.st_size,
+                 patched_exe.stat().st_mtime_ns if patched_exe.is_file() else 0)
     with _PATCH_STATE_LOCK:
-        if _PATCH_STATE_CACHE.get("mtime") == key and _PATCH_STATE_CACHE.get("state"):
+        if _PATCH_STATE_CACHE.get("mtime") == cache_key and _PATCH_STATE_CACHE.get("state"):
             return {
                 "state": _PATCH_STATE_CACHE["state"],
                 "md5": _PATCH_STATE_CACHE["md5"],
                 "reason": _PATCH_STATE_CACHE.get("reason"),
             }
-    script = _find_patch_script()
-    if script is None:
-        return {"state": "unknown", "md5": None, "reason": "patch-idle-cpu.py not installed"}
-    try:
-        out = subprocess.run(
-            ["python3", str(script), str(GAME_EXE_PATH), "--print-state"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception as e:
-        return {"state": "unknown", "md5": None, "reason": f"subprocess error: {e}"}
-    line = (out.stdout or "").strip().splitlines()[-1] if out.stdout else ""
-    try:
-        parsed = json.loads(line) if line else {}
-    except json.JSONDecodeError:
-        parsed = {}
-    state = parsed.get("state", "unknown")
-    md5 = parsed.get("md5")
-    reason = parsed.get("reason")
+
+    src_md5 = _file_md5_streaming(GAME_EXE_PATH)
+
+    if not patched_exe.is_file():
+        state, reason = "unpatched", None
+    else:
+        try:
+            cached = source_md5_file.read_text(encoding="ascii").strip()
+        except OSError:
+            cached = ""
+        if cached == src_md5:
+            state, reason = "patched", None
+        else:
+            state = "stale"
+            reason = f"source md5 moved from {cached or '(none)'} to {src_md5}; will rebuild on next restart"
+
     with _PATCH_STATE_LOCK:
-        _PATCH_STATE_CACHE.update({"mtime": key, "md5": md5, "state": state, "reason": reason})
-    return {"state": state, "md5": md5, "reason": reason}
+        _PATCH_STATE_CACHE.update({"mtime": cache_key, "md5": src_md5, "state": state, "reason": reason})
+    return {"state": state, "md5": src_md5, "reason": reason}
+
+
+def _file_md5_streaming(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def idle_patch_full_status() -> dict:
