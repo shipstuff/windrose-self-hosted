@@ -171,8 +171,6 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `WINDROSE_CONFIG_MODE` | `env` | `env` (stamp `ServerDescription.json` from env on every boot), `managed` (render from chart inlineJson + Secret), `mutable` (leave operator's on-disk file alone; recommended for UI-driven edits). |
 | `WINDROSE_LAUNCH_STRATEGY` | `shipping` | `shipping` (headless, recommended) or `launcher` (`WindroseServer.exe`). |
 | `WINDROSE_SERVER_SOURCE` | `steamcmd` | `steamcmd` (anonymous `app_update 4129620` on every boot) or `files` (operator populates `WindowsServer/` via UI upload / `kubectl cp`). |
-| `WINDROSE_STEAMCMD_FORCE` | `0` | `1` forces a SteamCMD run even when the idle-CPU patch is active and the binary is already patched. Normally the entrypoint skips the SteamCMD step in that case (Steam otherwise reverts the patch, which we'd then have to re-apply — wasted work on every boot). Flip to `1` when you want to pull a Windrose update. |
-| `WINDROSE_STEAMCMD_VALIDATE` | `0` | `1` passes `validate` to SteamCMD, which re-hashes every file. Slow; only needed when debugging a corrupted install. |
 | `SERVER_LAUNCH_ARGS` | `-FPS=60` | Extra args appended after `-log` on the game binary's command line. Empty uncaps, `-FPS=30` matches older behavior. |
 | `FILES_WAIT_TIMEOUT_SECONDS` | `0` | 0 = wait forever for `WindowsServer/` to appear before launching. Only relevant when `WINDROSE_SERVER_SOURCE=files`. |
 | `PROTON_USE_XALIA` | `0` | Xalia crashes on headless Proton; leave off. |
