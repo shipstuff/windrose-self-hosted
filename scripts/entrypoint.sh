@@ -267,15 +267,17 @@ maybe_patch_idle_cpu() {
   fi
 
   if [ "${effective}" != "1" ]; then
-    # If env was ON but override flipped it OFF and binary is currently
-    # patched, revert so the new state actually takes effect.
-    if [ "${WINDROSE_PATCH_IDLE_CPU}" = "1" ] && [ "${override}" = "disabled" ] && [ -f "${exe}" ]; then
+    # Whenever the effective mode is OFF, try to revert so a previously
+    # patched binary doesn't stay patched through env changes / override
+    # flips / a fresh SteamCMD pull landing onto an already-patched tree.
+    # --revert --idempotent is a no-op on an unpatched binary, so it's
+    # safe to invoke unconditionally.
+    if [ -f "${exe}" ]; then
       local script
       script="$(_find_patch_script)"
       if [ -n "${script}" ] && command -v python3 >/dev/null 2>&1; then
-        echo "$(timestamp) INFO: Reverting idle-CPU patch (override disabled it)"
-        python3 "${script}" "${exe}" --revert --idempotent || \
-          echo "$(timestamp) WARNING: Idle-CPU patch revert failed; binary left as-is"
+        python3 "${script}" "${exe}" --revert --idempotent 2>&1 | \
+          sed "s/^/$(timestamp) patch: /" || true
       fi
     fi
     return 0
@@ -551,13 +553,12 @@ if [ ! -S "/tmp/.X11-unix/X${display_num}" ]; then
 fi
 
 # Extra launch args for the game binary. Default caps the engine tick to
-# 30 FPS — without a connected client the main loop has no pacing source
-# and burns whole cores on dispatch overhead. `-FPS=N` tells UE to sleep
-# between ticks. When a client is connected, NetServerMaxTickRate (30Hz
-# UE default) already paces the loop and this cap is a no-op. Set to
-# empty string to disable, or to a different arg list (e.g.
-# "-FPS=60 -ExecCmds=..." ) for experimentation.
-: "${SERVER_LAUNCH_ARGS:=-FPS=30}"
+# 60 FPS — the patch (scripts/patch-idle-cpu.py) is the real fix for the
+# unpaced-main-loop spin; this cap is belt-and-braces for hosts that
+# don't run the patch. Matches the Helm chart default so compose /
+# plain-manifest / bare-Linux deployments all behave identically. Set
+# empty to uncap, or to "-FPS=30" for the older behavior.
+: "${SERVER_LAUNCH_ARGS:=-FPS=60}"
 read -r -a launch_args <<< "${SERVER_LAUNCH_ARGS}"
 
 # Stream R5.log to this container's stderr so `kubectl logs` / `docker logs`

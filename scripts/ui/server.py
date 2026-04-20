@@ -92,11 +92,15 @@ IDLE_PATCH_OVERRIDE_FILE = Path(os.environ.get(
     str(R5_DIR / ".idle-patch-override"),
 ))
 GAME_EXE_PATH = WINDROSE_SERVER_DIR / "R5" / "Binaries" / "Win64" / "WindroseServer-Win64-Shipping.exe"
+# First: the Docker / bare-Linux install target. Second: alongside the
+# UI server file for repo-checkout + source-run scenarios (scripts/ui/server.py
+# -> scripts/patch-idle-cpu.py).
 PATCH_SCRIPT_CANDIDATES = [
     Path("/usr/local/bin/patch-idle-cpu.py"),
-    Path(__file__).resolve().parent.parent / "tools" / "patch-idle-cpu.py",
+    Path(__file__).resolve().parent.parent / "patch-idle-cpu.py",
 ]
 _PATCH_STATE_CACHE: dict = {"mtime": None, "md5": None, "state": None, "reason": None}
+_PATCH_STATE_LOCK = threading.Lock()
 
 # --- Webhooks ---------------------------------------------------------------
 WEBHOOK_URL           = os.environ.get("WINDROSE_WEBHOOK_URL", "").strip()
@@ -452,8 +456,10 @@ def write_idle_patch_override(value: str) -> None:
     if value not in ("enabled", "disabled"):
         raise ValueError(f"override must be 'enabled', 'disabled', or 'auto'; got {value!r}")
     IDLE_PATCH_OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write so a crashed process can't leave a half-written override.
-    tmp = IDLE_PATCH_OVERRIDE_FILE.with_suffix(".tmp")
+    # Atomic write. `.with_suffix(".tmp")` misbehaves on dot-leading names
+    # (`.idle-patch-override` → `.tmp`, not `.idle-patch-override.tmp`),
+    # so build the sibling path explicitly.
+    tmp = IDLE_PATCH_OVERRIDE_FILE.parent / (IDLE_PATCH_OVERRIDE_FILE.name + ".tmp")
     tmp.write_text(value + "\n", encoding="ascii")
     tmp.replace(IDLE_PATCH_OVERRIDE_FILE)
 
@@ -468,19 +474,23 @@ def _find_patch_script() -> Path | None:
 def idle_patch_binary_state() -> dict:
     """Return a cached dict describing the shipping EXE's patch state. Uses
     mtime+size as a cache key so a restart / patch / revert invalidates us
-    without re-scanning the 300 MB binary on every UI poll."""
+    without re-scanning the 300 MB binary on every UI poll. Thread-safe
+    via _PATCH_STATE_LOCK so concurrent request handlers see consistent
+    reads + writes."""
     try:
         st = GAME_EXE_PATH.stat()
     except FileNotFoundError:
-        _PATCH_STATE_CACHE.update({"mtime": None, "md5": None, "state": "missing", "reason": None})
+        with _PATCH_STATE_LOCK:
+            _PATCH_STATE_CACHE.update({"mtime": None, "md5": None, "state": "missing", "reason": None})
         return {"state": "missing", "md5": None}
     key = (st.st_mtime_ns, st.st_size)
-    if _PATCH_STATE_CACHE.get("mtime") == key and _PATCH_STATE_CACHE.get("state"):
-        return {
-            "state": _PATCH_STATE_CACHE["state"],
-            "md5": _PATCH_STATE_CACHE["md5"],
-            "reason": _PATCH_STATE_CACHE.get("reason"),
-        }
+    with _PATCH_STATE_LOCK:
+        if _PATCH_STATE_CACHE.get("mtime") == key and _PATCH_STATE_CACHE.get("state"):
+            return {
+                "state": _PATCH_STATE_CACHE["state"],
+                "md5": _PATCH_STATE_CACHE["md5"],
+                "reason": _PATCH_STATE_CACHE.get("reason"),
+            }
     script = _find_patch_script()
     if script is None:
         return {"state": "unknown", "md5": None, "reason": "patch-idle-cpu.py not installed"}
@@ -499,7 +509,8 @@ def idle_patch_binary_state() -> dict:
     state = parsed.get("state", "unknown")
     md5 = parsed.get("md5")
     reason = parsed.get("reason")
-    _PATCH_STATE_CACHE.update({"mtime": key, "md5": md5, "state": state, "reason": reason})
+    with _PATCH_STATE_LOCK:
+        _PATCH_STATE_CACHE.update({"mtime": key, "md5": md5, "state": state, "reason": reason})
     return {"state": state, "md5": md5, "reason": reason}
 
 
@@ -1602,7 +1613,8 @@ class Handler(BaseHTTPRequestHandler):
         # Invalidate binary-state cache so the next GET reflects the new
         # override immediately (binary bytes are unchanged, but the
         # effective-on flag will flip).
-        _PATCH_STATE_CACHE.update({"mtime": None})
+        with _PATCH_STATE_LOCK:
+            _PATCH_STATE_CACHE.update({"mtime": None})
         status = idle_patch_full_status()
         if payload.get("restart") and status["needsRestart"] and allow_destructive():
             try:
