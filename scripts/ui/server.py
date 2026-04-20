@@ -101,6 +101,11 @@ MAINTENANCE_FLAG_FILE = Path(os.environ.get(
     "WINDROSE_MAINTENANCE_FLAG_FILE",
     str(R5_DIR / ".maintenance-mode"),
 ))
+# Scratch dir for /api/saves/download's copytree snapshot. Defaults to
+# /tmp which is fine on most hosts, but on tmpfs-backed /tmp (common on
+# RHEL / some Docker setups) a large save can OOM the host mid-stream.
+# Point this at a PVC-backed path (e.g. /home/steam/tmp) on those hosts.
+SAVES_DOWNLOAD_SCRATCH_DIR = os.environ.get("WINDROSE_DOWNLOAD_SCRATCH_DIR", "/tmp")
 # First: the Docker / bare-Linux install target. Second: alongside the
 # UI server file for repo-checkout + source-run scenarios (scripts/ui/server.py
 # -> scripts/patch-idle-cpu.py).
@@ -1325,8 +1330,11 @@ class Handler(BaseHTTPRequestHandler):
         # symptom: world fails to load on next boot, game falls back to
         # generating a fresh one. Snapshot to a scratch dir first — that
         # detaches our I/O from the live DB — then tar and stream the
-        # snapshot. Scratch lives in /tmp so it doesn't bloat backups/.
-        with tempfile.TemporaryDirectory(prefix="windrose-dl-", dir="/tmp") as scratch:
+        # snapshot. Override scratch dir via WINDROSE_DOWNLOAD_SCRATCH_DIR
+        # on hosts where /tmp is tmpfs and saves exceed available RAM.
+        os.makedirs(SAVES_DOWNLOAD_SCRATCH_DIR, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="windrose-dl-",
+                                         dir=SAVES_DOWNLOAD_SCRATCH_DIR) as scratch:
             scratch_root = Path(scratch)
             try:
                 shutil.copytree(saved, scratch_root / "Saved",

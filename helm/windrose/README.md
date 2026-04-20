@@ -84,14 +84,20 @@ helm upgrade --install windrose ./helm/windrose \
 
 | Mode      | Behavior                                                                                        |
 | --------- | ----------------------------------------------------------------------------------------------- |
-| `env` (default) | Seed from the example `ServerDescription.json`, patch known keys from env on every start. Good for single-world deployments driven by chart values. |
-| `managed` | Render `serverConfig.inlineJson` into a ConfigMap, merge `Password` from the optional Secret. Good for operators who want the full config declaratively. |
-| `mutable` | Require a pre-existing `ServerDescription.json` on the PVC and leave it alone. Good for multi-world deployments where the admin UI owns config edits. |
+| `env` (default) | Seed from the example `ServerDescription.json`, patch known keys from env on every start. Preserves operator edits via a shadow-stamp divergence marker: if `ServerName` / `WorldName` / etc. drift from the last env-intent we wrote, the entrypoint leaves the drifted keys alone. Good for chart-driven deploys where you want env vars to mostly win but UI edits to survive. |
+| `managed` | Render `serverConfig.inlineJson` into a ConfigMap, merge `Password` from the optional Secret. Operator owns the chart values; the PVC copy is regenerated on every boot. Good for GitOps-style deploys where the JSON is checked into your values.yaml alongside the rest of the release. |
+| `mutable` | The entrypoint does not touch `ServerDescription.json` at all. The file must already exist on the PVC (from a prior boot, an uploaded tarball, or a manually-seeded file). All edits — UI, ldb, hand-edit — are authoritative. Good for operators who want zero env-driven reconciliation. |
 
-If you're editing per-world `WorldDescription.json` via the admin UI
-on a multi-world setup, use `mutable` mode — `env` mode patches the
-active world's name/preset on every restart (single-world assumption),
-which would overwrite UI edits.
+### Using `mutable` mode successfully
+
+1. Start with `env` or `managed` mode on first install so the file is created (or upload a tarball that contains `ServerDescription.json`).
+2. Flip `serverConfig.mode: mutable` in your values override and `helm upgrade`.
+3. Edit config from the admin UI's Server Config card. Hit *Stage* then *Apply + restart* — the UI atomically promotes `ServerDescription.staged.json` → `ServerDescription.json` and signals the game to restart.
+4. Env vars (`SERVER_NAME`, `MAX_PLAYER_COUNT`, etc.) are **ignored** in this mode; they stay as documentation of the initial values but the live file is the source of truth.
+
+If you ever need to re-seed from env, flip back to `env` mode temporarily, helm upgrade, let the entrypoint stamp, then flip back to `mutable`.
+
+**`env` mode already preserves UI edits** via the shadow-stamp (since PR #2). You only need `mutable` if you want the stronger guarantee that the entrypoint will *never* touch the file — for example when running multi-world setups where every world's metadata is managed via the UI's per-world editor, or when an operator is doing something the env-mode reconciler doesn't know about (injecting a modded `WorldPresetType`, etc.).
 
 ## Override `P2pProxyAddress`
 

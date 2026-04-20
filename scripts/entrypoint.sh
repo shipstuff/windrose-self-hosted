@@ -392,12 +392,58 @@ ensure_world_layout() {
     if [ "${island_id}" != "${target_island}" ]; then
       continue
     fi
-    echo "$(timestamp) INFO: Patching WorldDescription at ${world_desc} (active island ${target_island})"
-    jq \
-      --arg name "${WORLD_NAME}" \
-      --arg preset "${WORLD_PRESET_TYPE}" \
-      '.WorldDescription.WorldName = $name | .WorldDescription.WorldPresetType = $preset' \
-      "${world_desc}" > "${world_desc}.tmp" && mv "${world_desc}.tmp" "${world_desc}"
+    # Shadow-stamp WorldDescription just like ServerDescription — so a
+    # UI-edited WorldName survives restarts. Shadow at
+    # WorldDescription.last-env-stamp.json next to the live file. First
+    # boot (no shadow) treats live as operator-owned; per-key skip when
+    # live diverges from the last env intent we recorded.
+    local wshadow="${world_desc%.*}.last-env-stamp.json"
+    local wfirst="false"
+    if [ ! -f "${wshadow}" ]; then
+      wfirst="true"
+      echo "$(timestamp) INFO: env-mode: no WorldDescription shadow at ${wshadow} — treating live as operator-owned; seeding shadow from env intent"
+    fi
+    local wfilter=''
+    local ws_name="false" ws_preset="false"
+    _world_keep() {
+      if [ "${wfirst}" = "true" ]; then echo "true"; return; fi
+      local live shadowed
+      live="$(jq -r "$1" "${world_desc}" 2>/dev/null)"
+      shadowed="$(jq -r "$1" "${wshadow}" 2>/dev/null)"
+      if [ "${live}" != "${shadowed}" ]; then echo "true"; else echo "false"; fi
+    }
+    if [ "$(_world_keep '.WorldDescription.WorldName')" = "false" ]; then
+      ws_name="true"
+      wfilter=".WorldDescription.WorldName = \$name"
+    elif [ "${wfirst}" != "true" ]; then
+      echo "$(timestamp) INFO: env-mode: keeping operator-modified WorldName for ${island_id}"
+    fi
+    if [ "$(_world_keep '.WorldDescription.WorldPresetType')" = "false" ]; then
+      ws_preset="true"
+      wfilter="${wfilter}${wfilter:+ | }.WorldDescription.WorldPresetType = \$preset"
+    elif [ "${wfirst}" != "true" ]; then
+      echo "$(timestamp) INFO: env-mode: keeping operator-modified WorldPresetType for ${island_id}"
+    fi
+    if [ -n "${wfilter}" ]; then
+      echo "$(timestamp) INFO: Patching WorldDescription at ${world_desc} (active island ${target_island})"
+      jq --arg name "${WORLD_NAME}" --arg preset "${WORLD_PRESET_TYPE}" \
+        "${wfilter}" "${world_desc}" > "${world_desc}.tmp" \
+        && mv "${world_desc}.tmp" "${world_desc}"
+    fi
+    # Refresh world shadow: stamp-or-first-boot sets to env intent,
+    # skip preserves old shadow value (divergence sticks).
+    local wbase='{}'
+    if [ -f "${wshadow}" ] && jq empty "${wshadow}" >/dev/null 2>&1; then
+      wbase="$(cat "${wshadow}")"
+    fi
+    jq -n --argjson base "${wbase}" --arg name "${WORLD_NAME}" --arg preset "${WORLD_PRESET_TYPE}" \
+      --arg first "${wfirst}" --arg sn "${ws_name}" --arg sp "${ws_preset}" '
+      ($base.WorldDescription // {}) as $b
+      | ($first == "true") as $seed
+      | { WorldDescription: ($b
+          | (if $seed or $sn == "true" then .WorldName       = $name   else . end)
+          | (if $seed or $sp == "true" then .WorldPresetType = $preset else . end)
+        ) }' > "${wshadow}.tmp" && mv "${wshadow}.tmp" "${wshadow}"
     patched=1
   done < <(find "${WINDROSE_SAVE_ROOT}/${version}/Worlds" -maxdepth 2 -name 'WorldDescription.json' 2>/dev/null)
 
@@ -516,8 +562,15 @@ reconcile_server_config() {
       # Refresh shadow: for each key we STAMPED, record the env value we
       # wrote. For each key we SKIPPED, preserve the old shadow value so
       # the divergence marker survives. On first boot we seed every key.
+      # jq empty guard defends against a malformed shadow from a partial
+      # write or manual edit — a corrupt base would otherwise break boot.
       local shadow_base='{}'
-      [ -f "${shadow}" ] && shadow_base="$(cat "${shadow}")"
+      if [ -f "${shadow}" ] && jq empty "${shadow}" >/dev/null 2>&1; then
+        shadow_base="$(cat "${shadow}")"
+      elif [ -f "${shadow}" ]; then
+        echo "$(timestamp) WARNING: env-mode: shadow at ${shadow} is not valid JSON; treating as absent"
+        first_boot="true"
+      fi
       jq -n \
         --argjson base "${shadow_base}" \
         --arg name "${SERVER_NAME}" \
