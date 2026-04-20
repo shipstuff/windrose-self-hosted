@@ -207,8 +207,6 @@ spec:
               cpu: "10m"
               memory: "32Mi"
             limits:
-              # 256Mi covers steady-state + rare slow-path scan via the
-              # idle-CPU patch script's --print-state on an unknown MD5.
               memory: "256Mi"
           volumeMounts:
             - name: data

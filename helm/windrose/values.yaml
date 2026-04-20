@@ -252,36 +252,11 @@ resources:
       memory: 4Gi
     limits:
       memory: 16Gi
-      # The idle-CPU bug: Windrose's dedicated server busy-spins two
-      # threads (~1.82 cores) when no player is connected. Two paths:
-      #   - patchIdleCpu: "1"  (see above) — binary-patches the game
-      #     binary to inject a Sleep(1) into the hot loop. Measured
-      #     97.5% reduction in idle CPU on the canary; no known side
-      #     effects. Preferred solution. Works on the specific
-      #     Windrose build whose md5 matches the patch's expected
-      #     checksum; a no-op on other builds.
-      #   - cgroup CPU cap (below) — works universally but wasteful
-      #     (throttle is real but harmless during idle; gameplay CPU
-      #     stays well below the cap so no latency impact).
-      # Either path is sufficient; you don't need both. Measurements
-      # in the sizing comment below assume the patch is NOT applied.
-      #
-      # Sizing (measured 2026-04-17 on AMD Ryzen 9 9955HX @ 4.7 GHz,
-      # x86-64, hostNetwork:true, 1 map, defaults):
-      #   0 players: wants 2 cores; gets capped to whatever you set
-      #   1 player:  ~125 mcpu (NetDriver paces, game genuinely low)
-      #   2-3 players: ~200 mcpu (sublinear; shared simulation amortizes)
-      # Expect ~250-300 mcpu for 4 players, ~400-500 mcpu for 10. Scale
-      # up proportionally on slower CPUs (halve GHz ≈ double mcpu).
-      # Recommended caps (also adjust requests.cpu above to match/less):
-      #   1 player (solo):    300m
-      #   2-4 players:        500m
-      #   10 players:         1000m
-      #
-      # Throttle is real (nr_throttled is high while empty) but harmless
-      # — the game's cycles during idle are non-productive busy-spin.
-      # With a client connected, actual usage stays well below the cap
-      # so gameplay isn't throttled.
+      # Unpatched idle: ~2 cores (upstream spin bug). Mitigate with
+      # patchIdleCpu: "1" (preferred) or a cgroup cap below. Gameplay
+      # CPU scales ~125 mcpu per player (sublinear past the first);
+      # budget 300m for solo, 500m for 2-4, 1000m for 10. A CPU cap
+      # is safe to layer on top of the patch as belt-and-braces.
       # cpu: 500m
   xvfb:
     requests:
@@ -294,12 +269,6 @@ resources:
       cpu: 10m
       memory: 32Mi
     limits:
-      # 256Mi covers steady-state (~20 MB) with headroom for the rare
-      # slow path: /api/idle-cpu-patch on a binary whose MD5 isn't in
-      # the patch script's KNOWN_OFFSETS table triggers a 300 MB mmap
-      # scan in a subprocess. Fast path for known MD5s (including
-      # known-patched ones) stays under 32 MB. Bump to 512Mi if you
-      # pin to a self-built Windrose that auto-derive needs to scan.
       memory: 256Mi
 
 securityContext:

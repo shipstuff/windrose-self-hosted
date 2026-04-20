@@ -1,96 +1,58 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """
-Patch `WindroseServer-Win64-Shipping.exe` to slash idle CPU from ~200% to ~5%.
+Patch `WindroseServer-Win64-Shipping.exe` to throttle the Boost.Asio
+`socket_select_interrupter::reset()` drain loop that busy-spins under
+Wine/Proton and burns ~2 CPU cores on an idle server.
 
-Root cause: `boost::asio::detail::socket_select_interrupter::reset()` spins
-at full rate under Wine/Proton because its socket drain loop never makes
-a syscall — it's a pure userspace busy loop. Two such threads (both named
-`GameThread` by Wine) burn ~91% CPU each on an idle server.
+Inserts a ~43-byte trampoline that calls `KERNEL32!Sleep(1)` on the
+loop-continue tail; the loop exits via its normal branch as soon as
+real packets arrive, so the detour is cold under player load. Revert
+is byte-for-byte clean (`--revert`), state is detected from the binary
+itself so there's no cache to keep in sync, and the patch refuses to
+apply if the 9-byte loop-tail signature isn't uniquely present.
 
-Patch: inject a `Sleep(1)` call at the loop-continue tail of `reset()`.
-Registers clobbered by the call are preserved around it; the patch fires
-only on the tight spin path (not during the init fall-through exits), so
-the rest of the server is untouched.
+Modes:
+  default            auto-derive offsets from a signature scan + PE
+                     parse; works on any build where the interrupter
+                     pattern still matches
+  --use-known-offsets  skip the scan and pull from the KNOWN_OFFSETS
+                     table (refuses if MD5 is unknown)
 
-Two modes:
-  - --auto-derive (default): scan the binary for the stable 9-byte
-    loop-tail signature, parse PE structures, and derive patch offsets
-    from ground truth. Works on any build where the Asio interrupter
-    pattern still matches. Refuses cleanly if the signature isn't found
-    or isn't unique, or if no suitable CC-padding trampoline window
-    exists outside .pdata-covered ranges.
-  - --use-known-offsets: use a hard-coded table keyed on the binary's
-    MD5. Fast path for known-good builds; refuses any MD5 not in the
-    table. Kept as a belt-and-suspenders fallback if auto-derive ever
-    produces surprising output on a known build.
+Known MD5s (patched + unpatched) populate the fast path; the scan only
+runs for truly new builds. Peak memory is bounded by CHUNK (1 MiB)
+regardless of binary size — safe on a memory-constrained sidecar.
 
-Safety:
-  - Idempotent: script rejects an already-patched binary (wrong 5 bytes
-    at the patch site under --use-known-offsets; auto-derive separately
-    detects the current bytes form an e9 jump into an occupied window).
-  - Rollback: `--revert` flips the patch back.
-  - No new imports, no new code sections; 43 bytes modified total
-    (5 at the patch site + 38 in a pre-existing CC-padding window).
-  - Auto-derive path enforces signature uniqueness: if the 9-byte
-    pattern appears 0 or >1 times in the binary, the script refuses
-    rather than guessing.
-
-DISCLAIMER: This script modifies a proprietary binary. It is provided
-AS IS, with no warranty of any kind, express or implied — it may break,
-malfunction, corrupt saves, or become inapplicable on any future
-Windrose build. You are responsible for ensuring your use complies
-with the Windrose EULA, the Steam Subscriber Agreement, and any
-applicable terms of service or laws in your jurisdiction; running this
-against a binary you do not own a valid license to is not supported.
-The authors do not distribute modified copies of the Windrose binary
-and do not authorize redistribution of any binary this script produces.
-The full risk as to functionality and legal compliance rests with you.
-
-Measured impact (2026-04-19, sf-west-1 canary pod, AMD Ryzen 9 9955HX, 32-core host):
-  - Baseline idle CPU  : 206.65%  (two GameThreads at ~91% each + ~5% main)
-  - Patched idle CPU   :   5.08%  (mean of 10x 30s samples)
-  - Improvement        : 97.5% reduction
-  - Per-thread strace  : before 0 syscalls/3s; after 2818 pselect6 + 2818
-                         sched_yield + 5636 getrusage / 3 s (Wine's Sleep
-                         implementation)
-  - Under 1-player load: Foreground/spin threads drop from 91% to ~2.2%
-                         each (patched detour doesn't fire when packets flow)
+DISCLAIMER: Modifies a proprietary binary. AS IS, no warranty of any
+kind — may break, malfunction, corrupt saves, or become inapplicable
+on a future build. You are responsible for EULA / Steam Subscriber
+Agreement / local-law compliance. The authors do not distribute
+modified binaries and do not authorize redistributing any binary this
+script produces. Full risk rests with you.
 
 Usage:
-  python3 patch-idle-cpu.py /path/to/WindroseServer-Win64-Shipping.exe
-  python3 patch-idle-cpu.py /path/to/WindroseServer-Win64-Shipping.exe --revert
-  python3 patch-idle-cpu.py /path/to/WindroseServer-Win64-Shipping.exe --dry-run
-  python3 patch-idle-cpu.py /path/to/WindroseServer-Win64-Shipping.exe --use-known-offsets
+  python3 patch-idle-cpu.py PATH_TO_EXE
+  python3 patch-idle-cpu.py PATH_TO_EXE --revert
+  python3 patch-idle-cpu.py PATH_TO_EXE --dry-run
+  python3 patch-idle-cpu.py PATH_TO_EXE --use-known-offsets
+  python3 patch-idle-cpu.py PATH_TO_EXE --print-state   # JSON for the UI
 """
 import argparse
 import hashlib
-import mmap
+import json
 import os
 import shutil
 import struct
-import sys
 from dataclasses import dataclass
 
 
-def _file_md5(path: str) -> str:
-    """Stream-compute md5 without loading the whole file into memory."""
-    m = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            m.update(chunk)
-    return m.hexdigest()
-
-
-# === Invariants the patch relies on ===
-# 9-byte loop-tail signature: mov (%rbx),%rcx ; mov %edi,%eax ; xchg %eax,0x34(%rcx) ; jmp rel32
-# Verified unique across two Windrose builds (pre + post 2026-04-19 Steam update).
-# The byte at offset 8 is the `e9` opcode of the jmp we replace.
 SIGNATURE = b"\x48\x8b\x0b\x8b\xc7\x87\x41\x34\xe9"
 TRAMPOLINE_SIZE = 38
+# First 7 bytes of the trampoline (push rdx; rcx; rax; r8; r9). Acts as
+# the "is this binary patched?" fingerprint at the jump target.
+TRAMPOLINE_PROLOGUE = b"\x52\x51\x50\x41\x50\x41\x51"
+CHUNK = 1 << 20
 
-
-# === Offsets (same shape whether hard-coded or derived) ===
 
 @dataclass(frozen=True)
 class Offsets:
@@ -106,42 +68,25 @@ class Offsets:
         return self.image_base + file_off - self.text_raw + self.text_vaddr
 
 
-# Known builds — consistency check for auto-derive, and the sole source
-# of truth under --use-known-offsets. Add new builds as they appear.
 _OLD_BUILD = Offsets(
-    patch_site_file=0x4C98A09,
-    loop_top_file=0x4C98270,
-    trampoline_file=0xD30371,
-    sleep_iat_va=0x14C282428,
-    image_base=0x140000000,
-    text_raw=0x600,
-    text_vaddr=0x1000,
+    patch_site_file=0x4C98A09, loop_top_file=0x4C98270,
+    trampoline_file=0xD30371,  sleep_iat_va=0x14C282428,
+    image_base=0x140000000, text_raw=0x600, text_vaddr=0x1000,
 )
 _NEW_BUILD = Offsets(
-    patch_site_file=0x4C985C9,
-    loop_top_file=0x4C97E30,
-    trampoline_file=0xD30371,
-    sleep_iat_va=0x14C2A2430,
-    image_base=0x140000000,
-    text_raw=0x600,
-    text_vaddr=0x1000,
+    patch_site_file=0x4C985C9, loop_top_file=0x4C97E30,
+    trampoline_file=0xD30371,  sleep_iat_va=0x14C2A2430,
+    image_base=0x140000000, text_raw=0x600, text_vaddr=0x1000,
 )
-# Known builds — both unpatched AND patched MD5s point to the same
-# Offsets, so state detection on a patched binary is a fast-path lookup
-# (no 300 MB linear scan) — important for the UI sidecar's memory
-# budget. Patched MD5s computed during release validation; keep them
-# in sync whenever the corresponding _OLD_BUILD/_NEW_BUILD entry changes.
+# Both unpatched and patched MD5s map to the same Offsets so
+# /api/idle-cpu-patch state detection stays O(1) on known builds.
 KNOWN_OFFSETS = {
-    # Initial Windrose 0.10.0 build
     "61e320a6a45f4ac539f2c5d0f7b7ff2c": _OLD_BUILD,  # unpatched
     "b1796533f22603ad2f2da021033e3f9f": _OLD_BUILD,  # patched
-    # Post-2026-04-19 Steam update (function shifted -0x440 as a block)
     "8a62138c8fd19ede9ec8a5cf10579cb8": _NEW_BUILD,  # unpatched
     "a7f9260faf16e180d9a50959183264d0": _NEW_BUILD,  # patched
 }
 
-
-# === PE parsing (stdlib only) ===
 
 @dataclass
 class Section:
@@ -162,47 +107,148 @@ class PEInfo:
     exception_dir_size: int
 
 
-def parse_pe(data: bytes) -> PEInfo:
-    if data[:2] != b"MZ":
+# --- file helpers (all chunked, no mmap) ------------------------------------
+
+def _file_md5(path: str) -> str:
+    m = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(CHUNK), b""):
+            m.update(chunk)
+    return m.hexdigest()
+
+
+def _read_at(f, offset: int, n: int) -> bytes:
+    f.seek(offset)
+    return f.read(n)
+
+
+def _scan_for_signature(f, signature: bytes, max_matches: int = 2) -> list[int]:
+    """Return file offsets of `signature`, stopping at max_matches (callers
+    only care about 0, 1, or ≥2). Uses bytes.find() within 1 MiB chunks
+    with a (len(signature)-1)-byte tail carried forward to catch
+    boundary-crossing matches."""
+    overlap = len(signature) - 1
+    offsets: list[int] = []
+    buf = b""
+    base = 0
+    f.seek(0)
+    while True:
+        chunk = f.read(CHUNK)
+        if not chunk:
+            break
+        combined = buf + chunk
+        i = 0
+        while True:
+            idx = combined.find(signature, i)
+            if idx < 0:
+                break
+            offsets.append(base + idx)
+            if len(offsets) >= max_matches:
+                return offsets
+            i = idx + 1
+        if len(combined) > overlap:
+            carry = combined[-overlap:]
+            base += len(combined) - overlap
+            buf = carry
+        else:
+            buf = combined
+    return offsets
+
+
+def _scan_for_cc_runs(f, start: int, end: int, min_size: int) -> list[tuple[int, int]]:
+    """Return (size, file_offset) for every CC-padding run ≥ min_size in
+    [start, end). Uses bytes.find() to skip non-CC bytes fast, and
+    carries partial runs across chunk boundaries."""
+    results: list[tuple[int, int]] = []
+    carry_start: int | None = None
+    carry_size = 0
+    f.seek(start)
+    pos = start
+    remaining = end - start
+    while remaining > 0:
+        to_read = min(CHUNK, remaining)
+        chunk = f.read(to_read)
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        # Extend a run carried from the previous chunk.
+        i = 0
+        if carry_start is not None:
+            while i < len(chunk) and chunk[i] == 0xCC:
+                i += 1
+            carry_size += i
+            if i == len(chunk):
+                pos += len(chunk)
+                continue
+            if carry_size >= min_size:
+                results.append((carry_size, carry_start))
+            carry_start = None
+            carry_size = 0
+        # Scan the rest of the chunk for fresh runs.
+        while i < len(chunk):
+            idx = chunk.find(b"\xcc", i)
+            if idx < 0:
+                break
+            j = idx
+            while j < len(chunk) and chunk[j] == 0xCC:
+                j += 1
+            run_size = j - idx
+            if j == len(chunk):
+                # Runs extending to the chunk boundary might continue.
+                carry_start = pos + idx
+                carry_size = run_size
+            elif run_size >= min_size:
+                results.append((run_size, pos + idx))
+            i = j
+        pos += len(chunk)
+    if carry_start is not None and carry_size >= min_size:
+        results.append((carry_size, carry_start))
+    return results
+
+
+# --- PE parsing -------------------------------------------------------------
+
+def parse_pe(f) -> PEInfo:
+    head = _read_at(f, 0, 16 * 1024)
+    if head[:2] != b"MZ":
         raise SystemExit("error: not a PE file (missing MZ header)")
-    pe_off = struct.unpack_from("<I", data, 0x3C)[0]
-    if data[pe_off:pe_off + 4] != b"PE\x00\x00":
+    pe_off = struct.unpack_from("<I", head, 0x3C)[0]
+    if head[pe_off:pe_off + 4] != b"PE\x00\x00":
         raise SystemExit(f"error: no PE signature at file offset {pe_off:#x}")
     coff_off = pe_off + 4
-    num_sections = struct.unpack_from("<H", data, coff_off + 2)[0]
-    size_opt_header = struct.unpack_from("<H", data, coff_off + 16)[0]
+    num_sections = struct.unpack_from("<H", head, coff_off + 2)[0]
+    size_opt_header = struct.unpack_from("<H", head, coff_off + 16)[0]
     opt_off = coff_off + 20
-    magic = struct.unpack_from("<H", data, opt_off)[0]
+    magic = struct.unpack_from("<H", head, opt_off)[0]
     if magic != 0x20B:
         raise SystemExit(f"error: expected PE32+ (magic 0x20B), got 0x{magic:x}")
-    image_base = struct.unpack_from("<Q", data, opt_off + 24)[0]
-    num_dd = struct.unpack_from("<I", data, opt_off + 108)[0]
+    image_base = struct.unpack_from("<Q", head, opt_off + 24)[0]
+    num_dd = struct.unpack_from("<I", head, opt_off + 108)[0]
     dd_off = opt_off + 112
     if num_dd < 4:
-        raise SystemExit(f"error: too few data directories ({num_dd}); need at least 4")
-    import_dir_rva, import_dir_size = struct.unpack_from("<II", data, dd_off + 1 * 8)
-    exception_dir_rva, exception_dir_size = struct.unpack_from("<II", data, dd_off + 3 * 8)
+        raise SystemExit(f"error: too few data directories ({num_dd}); need ≥4")
+    import_dir_rva, import_dir_size = struct.unpack_from("<II", head, dd_off + 8)
+    exception_dir_rva, exception_dir_size = struct.unpack_from("<II", head, dd_off + 24)
     section_off = opt_off + size_opt_header
+    if section_off + num_sections * 40 > len(head):
+        raise SystemExit("error: section table extends past the 16 KiB header window")
     sections = []
     for i in range(num_sections):
         s_off = section_off + i * 40
-        name = data[s_off:s_off + 8].rstrip(b"\x00").decode("ascii", "replace")
-        virt_size = struct.unpack_from("<I", data, s_off + 8)[0]
-        virt_addr = struct.unpack_from("<I", data, s_off + 12)[0]
-        raw_size = struct.unpack_from("<I", data, s_off + 16)[0]
-        raw_ptr = struct.unpack_from("<I", data, s_off + 20)[0]
+        name = head[s_off:s_off + 8].rstrip(b"\x00").decode("ascii", "replace")
+        virt_size = struct.unpack_from("<I", head, s_off + 8)[0]
+        virt_addr = struct.unpack_from("<I", head, s_off + 12)[0]
+        raw_size = struct.unpack_from("<I", head, s_off + 16)[0]
+        raw_ptr = struct.unpack_from("<I", head, s_off + 20)[0]
         sections.append(Section(name, virt_addr, virt_size, raw_ptr, raw_size))
     return PEInfo(
-        image_base=image_base,
-        sections=sections,
-        import_dir_rva=import_dir_rva,
-        import_dir_size=import_dir_size,
-        exception_dir_rva=exception_dir_rva,
-        exception_dir_size=exception_dir_size,
+        image_base=image_base, sections=sections,
+        import_dir_rva=import_dir_rva, import_dir_size=import_dir_size,
+        exception_dir_rva=exception_dir_rva, exception_dir_size=exception_dir_size,
     )
 
 
-def section_for_rva(pe: PEInfo, rva: int) -> Section:
+def _section_for_rva(pe: PEInfo, rva: int) -> Section:
     for s in pe.sections:
         if s.virtual_address <= rva < s.virtual_address + max(s.virtual_size, s.raw_size):
             return s
@@ -210,7 +256,7 @@ def section_for_rva(pe: PEInfo, rva: int) -> Section:
 
 
 def rva_to_file(pe: PEInfo, rva: int) -> int:
-    s = section_for_rva(pe, rva)
+    s = _section_for_rva(pe, rva)
     return rva - s.virtual_address + s.raw_ptr
 
 
@@ -221,58 +267,37 @@ def file_to_rva(pe: PEInfo, file_off: int) -> int:
     raise SystemExit(f"error: file offset {file_off:#x} not in any section")
 
 
-# === Anchor discovery ===
+# --- anchor discovery -------------------------------------------------------
 
-def find_signature(data) -> int:
-    """Return the file offset of the `e9` opcode at SIGNATURE[8]. Enforces
-    that the signature appears exactly once. Works on both bytes and
-    mmap.mmap — mmap.find() exists but mmap.count() does not, so we
-    count via a find loop."""
-    offsets: list[int] = []
-    start = 0
-    while True:
-        idx = data.find(SIGNATURE, start)
-        if idx < 0:
-            break
-        offsets.append(idx)
-        start = idx + 1
-        if len(offsets) > 1:
-            # No need to keep counting — we've already disqualified the binary.
-            break
+def find_signature_offset(f) -> int:
+    """Return the file offset of the `e9` at SIGNATURE[8]. Enforces uniqueness."""
+    offsets = _scan_for_signature(f, SIGNATURE)
     if not offsets:
         raise SystemExit(
-            f"error: signature {SIGNATURE.hex()} not found in binary. "
-            "The target function was likely refactored in this Windrose build; "
-            "auto-derive cannot proceed. This is a refuse-cleanly outcome — the "
-            "patch is inapplicable until someone re-derives against the new code shape."
+            f"error: signature {SIGNATURE.hex()} not found. The target function "
+            "was likely refactored in this build; auto-derive cannot proceed."
         )
     if len(offsets) > 1:
         raise SystemExit(
-            f"error: signature {SIGNATURE.hex()} found at least {len(offsets)} "
-            f"times (first two: {hex(offsets[0])}, {hex(offsets[1])}); expected "
-            "exactly 1. Refusing to guess — fall back to --use-known-offsets "
-            "with a known MD5."
+            f"error: signature {SIGNATURE.hex()} found at {', '.join(hex(o) for o in offsets)}; "
+            "expected exactly 1. Refusing to guess."
         )
     return offsets[0] + 8
 
 
-def find_cc_padding_window(data: bytes, pe: PEInfo, min_size: int = TRAMPOLINE_SIZE) -> int:
-    """Return the file offset of the LARGEST CC-padding run of at least
-    min_size bytes in .text that doesn't overlap any RUNTIME_FUNCTION.
-    Largest-first is deterministic and most robust across rebuilds —
-    a 655-byte inter-function gap survived a Steam update untouched even
-    while smaller windows shuffled around."""
+def find_trampoline_window(f, pe: PEInfo) -> int:
+    """Return the file offset of the largest CC-padding run ≥ TRAMPOLINE_SIZE
+    inside .text that doesn't overlap any RUNTIME_FUNCTION. Largest-first is
+    deterministic and tends to survive linker-driven layout shuffles."""
     text = next((s for s in pe.sections if s.name == ".text"), None)
     if text is None:
-        raise SystemExit("error: no .text section found")
-    if pe.exception_dir_size == 0:
-        ranges = []
-    else:
-        pdata_off = rva_to_file(pe, pe.exception_dir_rva)
+        raise SystemExit("error: no .text section")
+    ranges: list[tuple[int, int]] = []
+    if pe.exception_dir_size > 0:
         n = pe.exception_dir_size // 12
-        ranges = []
+        pdata = _read_at(f, rva_to_file(pe, pe.exception_dir_rva), n * 12)
         for i in range(n):
-            b, e, _ = struct.unpack_from("<III", data, pdata_off + i * 12)
+            b, e, _ = struct.unpack_from("<III", pdata, i * 12)
             if b == 0 and e == 0:
                 break
             ranges.append((b, e))
@@ -280,72 +305,63 @@ def find_cc_padding_window(data: bytes, pe: PEInfo, min_size: int = TRAMPOLINE_S
 
     def covered(rva: int, size: int) -> bool:
         lo, hi = 0, len(ranges)
-        target_end = rva + size
+        end = rva + size
         while lo < hi:
             mid = (lo + hi) // 2
             b, e = ranges[mid]
             if e <= rva:
                 lo = mid + 1
-            elif b >= target_end:
+            elif b >= end:
                 hi = mid
             else:
                 return True
         return False
 
     text_end = text.raw_ptr + min(text.raw_size, text.virtual_size)
-    candidates: list[tuple[int, int]] = []  # (size, file_offset)
-    i = text.raw_ptr
-    while i < text_end:
-        if data[i] != 0xCC:
-            i += 1
-            continue
-        run_start = i
-        while i < text_end and data[i] == 0xCC:
-            i += 1
-        run_size = i - run_start
-        if run_size >= min_size:
-            rva = file_to_rva(pe, run_start)
-            if not covered(rva, min_size):
-                candidates.append((run_size, run_start))
+    runs = _scan_for_cc_runs(f, text.raw_ptr, text_end, TRAMPOLINE_SIZE)
+    candidates = [(size, off) for size, off in runs
+                  if not covered(file_to_rva(pe, off), TRAMPOLINE_SIZE)]
     if not candidates:
         raise SystemExit(
-            f"error: no CC-padding window of {min_size}+ bytes found in .text "
-            "that is not covered by .pdata. Auto-derive cannot proceed."
+            f"error: no CC-padding window of {TRAMPOLINE_SIZE}+ bytes found in "
+            ".text outside .pdata. Auto-derive cannot proceed."
         )
-    # Largest run wins; tiebreak on earliest offset for determinism.
     candidates.sort(key=lambda t: (-t[0], t[1]))
     return candidates[0][1]
 
 
-def find_sleep_iat_va(data: bytes, pe: PEInfo) -> int:
-    """Walk the import directory to find the IAT entry VA for KERNEL32!Sleep."""
+def find_sleep_iat_va(f, pe: PEInfo) -> int:
     if pe.import_dir_size == 0:
-        raise SystemExit("error: no import directory in binary")
-    dir_off = rva_to_file(pe, pe.import_dir_rva)
+        raise SystemExit("error: no import directory")
+    # Import descriptors + directory region — read a bounded window.
+    dir_file = rva_to_file(pe, pe.import_dir_rva)
+    descriptors = _read_at(f, dir_file, max(pe.import_dir_size, 2048))
     i = 0
     while True:
-        desc_off = dir_off + i * 20
-        ilt_rva, _, _, name_rva, iat_rva = struct.unpack_from("<IIIII", data, desc_off)
+        desc = descriptors[i * 20:i * 20 + 20]
+        if len(desc) < 20:
+            break
+        ilt_rva, _, _, name_rva, iat_rva = struct.unpack_from("<IIIII", desc)
         if ilt_rva == 0 and name_rva == 0 and iat_rva == 0:
             break
         name_off = rva_to_file(pe, name_rva)
-        name_end = data.find(b"\x00", name_off)
-        dll_name = data[name_off:name_end].decode("ascii", "replace")
-        if dll_name.lower() == "kernel32.dll":
-            thunk_rva = ilt_rva if ilt_rva != 0 else iat_rva
-            t_off = rva_to_file(pe, thunk_rva)
+        raw_name = _read_at(f, name_off, 64)
+        null = raw_name.find(b"\x00")
+        dll = raw_name[:null if null >= 0 else len(raw_name)].decode("ascii", "replace")
+        if dll.lower() == "kernel32.dll":
+            thunk_rva = ilt_rva or iat_rva
+            thunk_file = rva_to_file(pe, thunk_rva)
             j = 0
             while True:
-                entry = struct.unpack_from("<Q", data, t_off + j * 8)[0]
+                entry_bytes = _read_at(f, thunk_file + j * 8, 8)
+                (entry,) = struct.unpack("<Q", entry_bytes)
                 if entry == 0:
                     break
                 if not (entry & (1 << 63)):
-                    # Name import
-                    hint_off = rva_to_file(pe, entry)
-                    name_start = hint_off + 2
-                    name_end2 = data.find(b"\x00", name_start)
-                    imp_name = data[name_start:name_end2].decode("ascii", "replace")
-                    if imp_name == "Sleep":
+                    hint_bytes = _read_at(f, rva_to_file(pe, entry) + 2, 64)
+                    null2 = hint_bytes.find(b"\x00")
+                    name = hint_bytes[:null2 if null2 >= 0 else len(hint_bytes)].decode("ascii", "replace")
+                    if name == "Sleep":
                         return pe.image_base + iat_rva + j * 8
                 j += 1
             raise SystemExit("error: Sleep not found in KERNEL32.dll imports")
@@ -353,69 +369,55 @@ def find_sleep_iat_va(data: bytes, pe: PEInfo) -> int:
     raise SystemExit("error: KERNEL32.dll not found in imports")
 
 
-# 7-byte prologue of our trampoline: push rdx; push rcx; push rax; push r8; push r9.
-# Used to recognize a binary that's already patched vs one that isn't — if the
-# patch site's JMP lands on these bytes, the caller previously installed this
-# exact trampoline and we should follow it instead of scanning CC windows.
-TRAMPOLINE_PROLOGUE = b"\x52\x51\x50\x41\x50\x41\x51"
+# --- derivation, state, patching --------------------------------------------
 
-
-def derive_offsets(data: bytes) -> Offsets:
-    """Derive patch parameters from the binary. Works on both unpatched
-    and patched binaries: the patch-site signature is still present
-    post-patch (only the rel32 after `e9` changes), so we follow that jump
-    to locate the trampoline directly instead of re-scanning CC windows
-    (which would pick a different window once the original one is partially
-    consumed). Raises SystemExit with a clear message on any failure."""
-    pe = parse_pe(data)
+def derive_offsets(f) -> Offsets:
+    """Derive patch parameters by scanning the binary. Handles both
+    unpatched and already-patched binaries: the patch-site signature is
+    unchanged post-patch, so we follow the rel32 after its `e9`; if it
+    lands on our trampoline prologue the binary's patched and we read
+    loop_top from the trampoline's jmp-back instead of re-scanning CC
+    windows."""
+    pe = parse_pe(f)
     text = next((s for s in pe.sections if s.name == ".text"), None)
     if text is None:
-        raise SystemExit("error: no .text section found")
+        raise SystemExit("error: no .text section")
 
-    patch_site_file = find_signature(data)
-    rel32 = struct.unpack_from("<i", data, patch_site_file + 1)[0]
-    target_rva = file_to_rva(pe, patch_site_file + 5) + rel32
+    patch_site = find_signature_offset(f)
+    rel32 = struct.unpack("<i", _read_at(f, patch_site + 1, 4))[0]
+    target_rva = file_to_rva(pe, patch_site + 5) + rel32
     target_file = rva_to_file(pe, target_rva)
+    target_head = _read_at(f, target_file, len(TRAMPOLINE_PROLOGUE))
 
-    target_prologue = data[target_file:target_file + len(TRAMPOLINE_PROLOGUE)]
-    if target_prologue == TRAMPOLINE_PROLOGUE:
-        # Binary is patched — trampoline is at the jump target; loop top lives
-        # in the trampoline's final `jmp rel32` (last 5 bytes).
-        trampoline_file = target_file
-        jmp_back_off = trampoline_file + TRAMPOLINE_SIZE - 5
-        if data[jmp_back_off] != 0xE9:
+    if target_head == TRAMPOLINE_PROLOGUE:
+        trampoline = target_file
+        jmp_back = trampoline + TRAMPOLINE_SIZE - 5
+        tail = _read_at(f, jmp_back, 5)
+        if tail[0] != 0xE9:
             raise SystemExit(
-                f"error: trampoline at 0x{trampoline_file:x} is missing its JMP-back tail "
-                f"(byte 0x{data[jmp_back_off]:02x} at 0x{jmp_back_off:x}, expected 0xe9). "
-                "Trampoline appears corrupt."
+                f"error: trampoline at 0x{trampoline:x} missing JMP-back tail "
+                f"(got 0x{tail[0]:02x} at 0x{jmp_back:x})"
             )
-        jb_rel = struct.unpack_from("<i", data, jmp_back_off + 1)[0]
-        loop_top_rva = file_to_rva(pe, jmp_back_off + 5) + jb_rel
-        loop_top_file = rva_to_file(pe, loop_top_rva)
+        (jb_rel,) = struct.unpack("<i", tail[1:])
+        loop_top_rva = file_to_rva(pe, jmp_back + 5) + jb_rel
+        loop_top = rva_to_file(pe, loop_top_rva)
     else:
-        # Unpatched — rel32 points to loop top; trampoline goes in a fresh CC window.
-        loop_top_file = target_file
-        trampoline_file = find_cc_padding_window(data, pe)
+        loop_top = target_file
+        trampoline = find_trampoline_window(f, pe)
 
-    sleep_iat_va = find_sleep_iat_va(data, pe)
-
+    sleep_iat_va = find_sleep_iat_va(f, pe)
     return Offsets(
-        patch_site_file=patch_site_file,
-        loop_top_file=loop_top_file,
-        trampoline_file=trampoline_file,
-        sleep_iat_va=sleep_iat_va,
+        patch_site_file=patch_site, loop_top_file=loop_top,
+        trampoline_file=trampoline, sleep_iat_va=sleep_iat_va,
         image_base=pe.image_base,
-        text_raw=text.raw_ptr,
-        text_vaddr=text.virtual_address,
+        text_raw=text.raw_ptr, text_vaddr=text.virtual_address,
     )
 
 
-def binary_state(data: bytes, off: Offsets) -> str:
-    """Return 'unpatched', 'patched', or 'corrupt' based on the bytes at the
-    resolved patch-site and trampoline locations."""
-    site = data[off.patch_site_file:off.patch_site_file + 5]
-    tramp = data[off.trampoline_file:off.trampoline_file + TRAMPOLINE_SIZE]
-    if site[0] != 0xE9:
+def binary_state(f, off: Offsets) -> str:
+    site = _read_at(f, off.patch_site_file, 5)
+    tramp = _read_at(f, off.trampoline_file, TRAMPOLINE_SIZE)
+    if not site or site[0] != 0xE9:
         return "corrupt"
     if tramp == b"\xcc" * TRAMPOLINE_SIZE:
         return "unpatched"
@@ -424,103 +426,73 @@ def binary_state(data: bytes, off: Offsets) -> str:
     return "corrupt"
 
 
-# === Patch compilation ===
-
 def compile_patch(off: Offsets) -> tuple[bytes, bytes]:
-    """Return (patch_bytes, trampoline_bytes).
-    patch_bytes is 5 bytes: JMP rel32 to trampoline.
-    trampoline_bytes is 38 bytes: save volatiles, Sleep(1), restore, JMP back to loop top."""
-    trampoline_base_va = off.file_to_va(off.trampoline_file)
-
+    """Emit (5-byte site jmp, 38-byte trampoline). Trampoline saves Win64
+    volatiles across a KERNEL32!Sleep(1) call, then jmps back to loop top.
+    RDX is the critical save — the loop top reloads %rbx from
+    `lea 0x28(%rdx), %rbx`, so clobbering RDX across Sleep crashes."""
+    tramp_va = off.file_to_va(off.trampoline_file)
     tramp = bytearray()
-    tramp += b"\x52"              # push rdx   — loop-carried; MUST preserve
+    tramp += b"\x52"              # push rdx (loop-carried; MUST preserve)
     tramp += b"\x51"              # push rcx
     tramp += b"\x50"              # push rax
     tramp += b"\x41\x50"          # push r8
     tramp += b"\x41\x51"          # push r9
-    tramp += b"\x48\x83\xec\x20"  # sub $0x20, %rsp  — Win64 shadow space
-    tramp += b"\xb9\x01\x00\x00\x00"  # mov $1, %ecx  — Sleep(1ms)
-
-    call_instr_va = trampoline_base_va + len(tramp)
-    call_next_va = call_instr_va + 6
-    rel_to_sleep = off.sleep_iat_va - call_next_va
-    tramp += b"\xff\x15" + rel_to_sleep.to_bytes(4, "little", signed=True)
-
+    tramp += b"\x48\x83\xec\x20"  # sub $0x20, %rsp  (Win64 shadow space)
+    tramp += b"\xb9\x01\x00\x00\x00"  # mov $1, %ecx  (Sleep arg)
+    call_va = tramp_va + len(tramp)
+    rel = off.sleep_iat_va - (call_va + 6)
+    tramp += b"\xff\x15" + rel.to_bytes(4, "little", signed=True)
     tramp += b"\x48\x83\xc4\x20"  # add $0x20, %rsp
     tramp += b"\x41\x59"          # pop r9
     tramp += b"\x41\x58"          # pop r8
     tramp += b"\x58"              # pop rax
     tramp += b"\x59"              # pop rcx
     tramp += b"\x5a"              # pop rdx
-
-    jmp_top_va = off.file_to_va(off.loop_top_file)
-    jmp_instr_va = trampoline_base_va + len(tramp)
-    rel_top = jmp_top_va - (jmp_instr_va + 5)
+    jmp_va = tramp_va + len(tramp)
+    rel_top = off.file_to_va(off.loop_top_file) - (jmp_va + 5)
     tramp += b"\xe9" + rel_top.to_bytes(4, "little", signed=True)
 
-    patch_site_va = off.file_to_va(off.patch_site_file)
-    rel_fwd = trampoline_base_va - (patch_site_va + 5)
-    patch = b"\xe9" + rel_fwd.to_bytes(4, "little", signed=True)
-
-    assert len(patch) == 5
-    assert len(tramp) == TRAMPOLINE_SIZE, f"trampoline is {len(tramp)} bytes, expected {TRAMPOLINE_SIZE}"
-    return bytes(patch), bytes(tramp)
-
-
-# === Verification ===
-
-# === Revert support ===
-
-def reconstruct_original_site_bytes(data: bytes, off: Offsets) -> bytes:
-    """Given a patched binary, reconstruct what the original 5 bytes at the
-    patch site should have been, by reading the trampoline's jmp-back
-    instruction. Used on revert when we have no pre-patch cache."""
-    jmp_back_off = off.trampoline_file + TRAMPOLINE_SIZE - 5
-    if data[jmp_back_off] != 0xE9:
-        raise SystemExit(
-            f"error: trampoline's final instruction at 0x{jmp_back_off:x} is not "
-            f"JMP rel32 (byte 0x{data[jmp_back_off]:02x}). Trampoline may be corrupt."
-        )
-    rel = struct.unpack_from("<i", data, jmp_back_off + 1)[0]
-    # jmp back's rel32 is relative to (jmp_back_va + 5), resolves to loop_top_va
-    jmp_back_va = off.file_to_va(jmp_back_off)
-    loop_top_va = jmp_back_va + 5 + rel
-    # Original site jump: e9 (loop_top_va - (site_va + 5))
     site_va = off.file_to_va(off.patch_site_file)
-    orig_rel = loop_top_va - (site_va + 5)
+    rel_fwd = tramp_va - (site_va + 5)
+    site = b"\xe9" + rel_fwd.to_bytes(4, "little", signed=True)
+
+    assert len(site) == 5
+    assert len(tramp) == TRAMPOLINE_SIZE
+    return site, bytes(tramp)
+
+
+def reconstruct_original_site_bytes(f, off: Offsets) -> bytes:
+    """Reconstruct the pre-patch 5 bytes from the trampoline's jmp-back."""
+    jmp_back = off.trampoline_file + TRAMPOLINE_SIZE - 5
+    tail = _read_at(f, jmp_back, 5)
+    if tail[0] != 0xE9:
+        raise SystemExit(
+            f"error: trampoline jmp-back at 0x{jmp_back:x} is not JMP "
+            f"(got 0x{tail[0]:02x}); refusing to guess the original bytes."
+        )
+    (rel,) = struct.unpack("<i", tail[1:])
+    loop_top_va = off.file_to_va(jmp_back) + 5 + rel
+    orig_rel = loop_top_va - (off.file_to_va(off.patch_site_file) + 5)
     return b"\xe9" + orig_rel.to_bytes(4, "little", signed=True)
 
 
-# === Mode selection ===
-
-def resolve_offsets(data, md5: str, use_known: bool) -> tuple[Offsets, str]:
-    """Return (offsets, mode_label). mode_label is 'known' or 'derived'.
-
-    Fast path: if MD5 (patched or unpatched) appears in KNOWN_OFFSETS, we
-    return those offsets without running derive_offsets. This is what
-    keeps peak memory bounded in a cgroup-constrained UI sidecar — the
-    300 MB scan only runs for truly unknown builds.
-    """
+def resolve_offsets(f, md5: str, use_known: bool) -> tuple[Offsets, str]:
+    """Return (offsets, mode). Known MD5 short-circuits both paths to
+    an O(1) table lookup — the scan only runs for unknown builds."""
     if md5 in KNOWN_OFFSETS:
         return KNOWN_OFFSETS[md5], "known"
     if use_known:
         raise SystemExit(
-            f"error: --use-known-offsets requested but MD5 {md5} is not in the "
-            f"known-builds table (known: {', '.join(sorted(KNOWN_OFFSETS.keys())) or '(none)'}). "
-            "Drop --use-known-offsets to let auto-derive try."
+            f"error: --use-known-offsets but MD5 {md5} not in table "
+            f"(known: {', '.join(sorted(KNOWN_OFFSETS))})"
         )
-    return derive_offsets(data), "derived"
+    return derive_offsets(f), "derived"
 
 
-# === Apply ===
+# --- subcommands ------------------------------------------------------------
 
 def print_state(path: str) -> None:
-    """Emit a single JSON line describing the binary's patch state.
-    Exits 0 on any outcome that can be reported. Meant for the UI
-    sidecar to poll without parsing text output. Uses mmap + streaming
-    md5 so the 300 MB binary doesn't need to fit in the UI container's
-    memory limit."""
-    import json
     if not os.path.isfile(path):
         print(json.dumps({"state": "missing", "path": path}))
         return
@@ -528,15 +500,11 @@ def print_state(path: str) -> None:
     result = {"path": path, "md5": md5}
     try:
         with open(path, "rb") as f:
-            data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                off, mode = resolve_offsets(data, md5, use_known=False)
-                result["state"] = binary_state(data, off)
-                result["mode"] = mode
-                result["patch_site_file"] = off.patch_site_file
-                result["trampoline_file"] = off.trampoline_file
-            finally:
-                data.close()
+            off, mode = resolve_offsets(f, md5, use_known=False)
+            result["state"] = binary_state(f, off)
+            result["mode"] = mode
+            result["patch_site_file"] = off.patch_site_file
+            result["trampoline_file"] = off.trampoline_file
     except SystemExit as e:
         result["state"] = "inapplicable"
         result["reason"] = str(e).replace("error: ", "")
@@ -548,81 +516,60 @@ def apply_patch(path: str, revert: bool, dry_run: bool, use_known: bool,
     md5 = _file_md5(path)
     print(f"MD5 of {path}: {md5}")
 
-    # mmap the binary for reading — scanning 300 MB via mmap keeps peak
-    # RSS below what a cgroup-constrained UI sidecar can tolerate.
     with open(path, "rb") as f:
-        data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        try:
-            off, mode = resolve_offsets(data, md5, use_known)
-            if verbose or mode == "derived":
-                print(
-                    f"using {mode} offsets: "
-                    f"patch_site=0x{off.patch_site_file:x} "
-                    f"loop_top=0x{off.loop_top_file:x} "
-                    f"trampoline=0x{off.trampoline_file:x} "
-                    f"sleep_iat_va=0x{off.sleep_iat_va:x}"
-                )
+        off, mode = resolve_offsets(f, md5, use_known)
+        if verbose or mode == "derived":
+            print(
+                f"using {mode} offsets: "
+                f"patch_site=0x{off.patch_site_file:x} "
+                f"loop_top=0x{off.loop_top_file:x} "
+                f"trampoline=0x{off.trampoline_file:x} "
+                f"sleep_iat_va=0x{off.sleep_iat_va:x}"
+            )
+        state = binary_state(f, off)
+        site_patch, tramp_patch = compile_patch(off)
+        if revert:
+            if state == "unpatched":
+                _done_or_error(f"binary at {path} is already unpatched", idempotent)
+                return
+            if state != "patched":
+                raise SystemExit(f"error: {path} is in an unexpected state ({state}); refusing to revert")
+            site_bytes = reconstruct_original_site_bytes(f, off)
+            tramp_bytes = b"\xcc" * TRAMPOLINE_SIZE
+            action = "reverted"
+        else:
+            if state == "patched":
+                _done_or_error(f"binary at {path} is already patched; use --revert to undo", idempotent)
+                return
+            if state != "unpatched":
+                raise SystemExit(f"error: {path} is in an unexpected state ({state}); refusing to patch")
+            site_bytes, tramp_bytes = site_patch, tramp_patch
+            action = "patched"
 
-            state = binary_state(data, off)
-            patch, tramp = compile_patch(off)
-
-            if revert:
-                if state == "unpatched":
-                    msg = f"binary at {path} is already unpatched; nothing to revert."
-                    if idempotent:
-                        print(f"info: {msg}")
-                        return
-                    raise SystemExit(f"error: {msg}")
-                if state != "patched":
-                    raise SystemExit(
-                        f"error: binary at {path} is in an unexpected state ({state}); "
-                        "refusing to revert. Restore from backup if you have one."
-                    )
-                site_bytes = reconstruct_original_site_bytes(data, off)
-                tramp_bytes = b"\xcc" * TRAMPOLINE_SIZE
-                action = "reverted"
-            else:
-                if state == "patched":
-                    msg = f"binary at {path} is already patched; use --revert to undo."
-                    if idempotent:
-                        print(f"info: {msg}")
-                        return
-                    raise SystemExit(f"error: {msg}")
-                if state != "unpatched":
-                    raise SystemExit(
-                        f"error: binary at {path} is in an unexpected state ({state}); "
-                        "refusing to patch."
-                    )
-                site_bytes, tramp_bytes = patch, tramp
-                action = "patched"
-        finally:
-            data.close()
-
-    # Atomic write via copy + targeted overwrites. Uses O(1) memory plus
-    # temp-disk space (~binary size) instead of materializing a 300 MB
-    # bytearray copy in the calling container.
-    tmp_path = path + ".tmp.patch"
-    shutil.copyfile(path, tmp_path)
+    tmp = path + ".tmp.patch"
+    shutil.copyfile(path, tmp)
     try:
-        with open(tmp_path, "r+b") as f:
-            f.seek(off.patch_site_file)
-            f.write(site_bytes)
-            f.seek(off.trampoline_file)
-            f.write(tramp_bytes)
-        new_md5 = _file_md5(tmp_path)
+        with open(tmp, "r+b") as f:
+            f.seek(off.patch_site_file); f.write(site_bytes)
+            f.seek(off.trampoline_file); f.write(tramp_bytes)
+        new_md5 = _file_md5(tmp)
         if dry_run:
-            print(f"dry-run: would have {action} binary; new MD5 would be {new_md5}")
-            os.unlink(tmp_path)
+            print(f"dry-run: would have {action}; new MD5 would be {new_md5}")
+            os.unlink(tmp)
             return
-        os.replace(tmp_path, path)
+        os.replace(tmp, path)
     except Exception:
-        # Clean up on any failure so we don't leave a partial .tmp.patch.
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
         raise
     print(f"{action} in place; new MD5 is {new_md5}")
+
+
+def _done_or_error(msg: str, idempotent: bool) -> None:
+    if idempotent:
+        print(f"info: {msg}.")
+    else:
+        raise SystemExit(f"error: {msg}.")
 
 
 def main() -> None:
@@ -636,61 +583,21 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true",
                     help="Print intended changes without modifying the file")
     ap.add_argument("--use-known-offsets", action="store_true",
-                    help="Use the hard-coded known-builds table instead of auto-derive "
-                         "(falls back only — default is auto-derive)")
+                    help="Only use the KNOWN_OFFSETS table; refuse unknown MD5s")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Print resolved offsets even on the known-builds fast path")
     ap.add_argument("--idempotent", action="store_true",
-                    help="Exit 0 with an info message if the binary is already in the "
-                         "desired state (patched for normal mode, unpatched for --revert). "
-                         "Meant for boot scripts that want a no-op on re-run.")
+                    help="Exit 0 if already in target state; for boot scripts")
     ap.add_argument("--print-state", action="store_true",
-                    help="Emit a single JSON line describing the binary's current patch "
-                         "state (md5, state, patch-site offsets) and exit 0. For the UI.")
+                    help="Emit a single JSON line with md5/state/offsets; for the UI")
     args = ap.parse_args()
     if args.print_state:
         print_state(args.path)
         return
-    apply_patch(
-        args.path,
-        revert=args.revert,
-        dry_run=args.dry_run,
-        use_known=args.use_known_offsets,
-        verbose=args.verbose,
-        idempotent=args.idempotent,
-    )
+    apply_patch(args.path, revert=args.revert, dry_run=args.dry_run,
+                use_known=args.use_known_offsets, verbose=args.verbose,
+                idempotent=args.idempotent)
 
 
 if __name__ == "__main__":
     main()
-
-
-# === How auto-derive works ===
-#
-# 1. Parse the PE headers (DOS + PE + COFF + optional + sections + data
-#    directories). Extract: ImageBase, .text section VA + raw offset,
-#    import directory, exception (.pdata) directory.
-#
-# 2. Scan the binary for the 9-byte signature
-#       48 8b 0b        mov    (%rbx),%rcx
-#       8b c7           mov    %edi,%eax
-#       87 41 34        xchg   %eax,0x34(%rcx)
-#       e9              jmp    rel32  <-- patch this
-#    This signature has to be unique across the entire binary; if count
-#    != 1, the script refuses rather than guess. The `e9` byte's file
-#    offset is PATCH_SITE_FILE. The 4 bytes after `e9` are the rel32;
-#    adding that (signed) to (PATCH_SITE_FILE+5) as RVAs gives LOOP_TOP.
-#
-# 3. Scan .text for CC-padding runs ≥38 bytes. For each candidate, check
-#    whether its RVA range overlaps any RUNTIME_FUNCTION entry in .pdata.
-#    Pick the first candidate outside all RUNTIME_FUNCTION coverage —
-#    that's TRAMPOLINE_FILE.
-#
-# 4. Walk the import directory; for each IMAGE_IMPORT_DESCRIPTOR, read
-#    the DLL name. When it matches "KERNEL32.dll", walk the INT/IAT
-#    looking for the name "Sleep". The IAT entry VA for Sleep is
-#    ImageBase + FirstThunk_RVA + index*8.
-#
-# 5. Emit the patch bytes (5-byte e9 jmp to trampoline) and trampoline
-#    bytes (push volatiles, Sleep(1), pop, jmp back to loop top) with
-#    the four derived values; install at the derived offsets.
