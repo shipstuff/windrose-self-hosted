@@ -43,11 +43,11 @@ ui:
   # / app.js — useful when an external nginx (ingress or a sidecar) owns
   # the static assets + auth and only reverse-proxies /api/* here.
   # To bundle the static assets into a ConfigMap for nginx, run once
-  # outside Helm (assets are under image/ui/):
+  # outside Helm (assets are under scripts/ui/):
   #   kubectl -n games create configmap windrose-ui-assets \
-  #     --from-file=index.html=./image/ui/index.html \
-  #     --from-file=app.css=./image/ui/app.css \
-  #     --from-file=app.js=./image/ui/app.js
+  #     --from-file=index.html=./scripts/ui/index.html \
+  #     --from-file=app.css=./scripts/ui/app.css \
+  #     --from-file=app.js=./scripts/ui/app.js
   # and volumeMount that ConfigMap where your nginx serves from.
   serveStatic: true
   # Webhook notifications — Discord + generic JSON. Events are posted
@@ -170,7 +170,7 @@ serverConfig:
   # Default caps the engine tick to 60 FPS. The older 30-FPS default was
   # there as a brake on the idle-CPU spin bug (the main loop was
   # unpaced when no clients were connected and burned whole cores); the
-  # idle-CPU binary patch (see `patchIdleCpu` below + `tools/patch-idle-cpu.py`)
+  # idle-CPU binary patch (see `patchIdleCpu` below + `scripts/patch-idle-cpu.py`)
   # is the real fix, so the cap is no longer needed at 30 and we leave
   # headroom for the server to simulate + replicate at 60. Drop to
   # "-FPS=30" if you prefer the older behavior, or "" to uncap entirely.
@@ -239,7 +239,7 @@ disableSentry: "1"
 # ~5%. Safe to leave off for a conservative default — the patch is
 # tied to a specific build md5 and is a no-op on unknown builds, but
 # operators might still prefer to review the script (in
-# tools/patch-idle-cpu.py) before enabling. See the same file for the
+# scripts/patch-idle-cpu.py) before enabling. See the same file for the
 # reverse-engineering rationale and rollback (--revert).
 patchIdleCpu: "0"
 filesWaitTimeoutSeconds: "0"

@@ -17,9 +17,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
           shellcheck -x -S warning \
-            image/entrypoint.sh \
+            scripts/entrypoint.sh \
             bare-linux/install.sh \
-            tools/pack-windowsserver.sh
+            scripts/pack-windowsserver.sh
 
   python-compile:
     runs-on: ubuntu-latest
@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Syntax-check UI server
-        run: python3 -m py_compile image/ui/server.py
+        run: python3 -m py_compile scripts/ui/server.py scripts/patch-idle-cpu.py
 
   yaml-lint:
     runs-on: ubuntu-latest
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate example JSON
         run: |
-          python3 -c "import json,sys; [json.load(open(f)) for f in ['image/ServerDescription_example.json','image/WorldDescription_example.json']]"
+          python3 -c "import json,sys; [json.load(open(f)) for f in ['scripts/ServerDescription_example.json','scripts/WorldDescription_example.json']]"
 
   kustomize-render:
     runs-on: ubuntu-latest

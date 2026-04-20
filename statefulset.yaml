@@ -84,7 +84,7 @@ spec:
             - name: DISABLE_SENTRY
               value: "1"
             # Opt into the idle-CPU throttle patch: "1" triggers the entry
-            # point to run tools/patch-idle-cpu.py against the shipping EXE
+            # point to run scripts/patch-idle-cpu.py against the shipping EXE
             # before launch, cutting idle CPU from ~200% to ~5%. Leave as
             # "0" to keep the vanilla binary. See the script for derivation
             # and --revert.

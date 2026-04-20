@@ -1,21 +1,15 @@
-# Whitelist approach: everything's excluded except the directories that
-# actually feed the build. Keeps the context small and prevents new
-# top-level files (helm values, k8s manifests, docs) from silently
-# bloating it.
+# Whitelist: only scripts/ feeds the build. Keeps the context small and
+# prevents new top-level files (helm values, k8s manifests, docs) from
+# silently bloating it.
 *
-!image
-!image/**
-!tools
-!tools/**
-# Dockerfile is always sent via -f, but also include for consistency.
+!scripts
+!scripts/**
 !Dockerfile
-# Re-exclude trash even inside allowed paths.
 **/__pycache__/
 **/*.py[cod]
 **/*.log
 **/*.swp
 **/WindowsServer/
-# Gitignored local-only values (also usually secret) — belt-and-braces.
 values-*.yaml
 .env
 .env.*

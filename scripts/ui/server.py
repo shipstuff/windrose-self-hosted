@@ -83,10 +83,10 @@ GAME_MEM_LIMIT_STR    = os.environ.get("WINDROSE_GAME_MEM_LIMIT", "")
 CPU_STATE_PATH        = Path("/tmp/windrose-ui-cpu.state")
 
 # Idle-CPU patch UI override file. Entrypoint consults this on every boot
-# to decide whether to apply or revert the binary patch (see maybe_patch_idle_cpu
-# in image/entrypoint.sh). `disabled` forces OFF (revert on next restart if
-# currently patched); `enabled` forces ON (patch on next restart regardless of
-# WINDROSE_PATCH_IDLE_CPU env). Absent file = follow env.
+# to decide whether to apply or revert the binary patch (see
+# maybe_patch_idle_cpu in scripts/entrypoint.sh). `disabled` forces OFF
+# (revert on next restart if currently patched); `enabled` forces ON
+# (patch regardless of WINDROSE_PATCH_IDLE_CPU env). Absent = follow env.
 IDLE_PATCH_OVERRIDE_FILE = Path(os.environ.get(
     "WINDROSE_PATCH_OVERRIDE_FILE",
     str(R5_DIR / ".idle-patch-override"),

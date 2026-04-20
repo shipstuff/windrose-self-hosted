@@ -33,7 +33,7 @@ services:
       # it off means new operators aren't surprised by a no-op after the
       # game updates. Operators who want the 97% idle-CPU reduction right
       # now on the shipping 0.10.0 build opt in by setting this to 1.
-      # See tools/patch-idle-cpu.py for derivation and rollback.
+      # See scripts/patch-idle-cpu.py for derivation and rollback.
       WINDROSE_PATCH_IDLE_CPU: ${WINDROSE_PATCH_IDLE_CPU:-0}
       DISPLAY: ":99"
     volumes:

@@ -236,7 +236,7 @@ maybe_disable_sentry() {
 # on the canary. Isolated to 43 bytes (5 at the site + 38 in CC padding);
 # auto-derive locates the patch site via a unique 9-byte signature and
 # parses PE imports to find KERNEL32!Sleep; reverts cleanly via
-# `--revert`. See `tools/patch-idle-cpu.py` for the derivation details.
+# `--revert`. See `scripts/patch-idle-cpu.py` for the derivation details.
 #
 # Off by default — operator opts in by setting WINDROSE_PATCH_IDLE_CPU=1.
 # The UI can override this decision without a helm roll by writing
@@ -303,13 +303,11 @@ maybe_patch_idle_cpu() {
 }
 
 _find_patch_script() {
-  # In-image location (installed by Dockerfile to /usr/local/bin) first;
-  # fall back to tools/ adjacent to the entrypoint for bare-Linux repo
-  # checkouts.
+  # In-image location first, then alongside the entrypoint (bare-Linux
+  # installs co-locate them under /opt/windrose/scripts/).
   local candidates=(
     "/usr/local/bin/patch-idle-cpu.py"
     "$(dirname "$0")/patch-idle-cpu.py"
-    "$(dirname "$0")/../tools/patch-idle-cpu.py"
   )
   for c in "${candidates[@]}"; do
     if [ -f "${c}" ]; then
