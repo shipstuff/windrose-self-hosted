@@ -826,7 +826,8 @@ mkdir -p "$(dirname "${R5_LOG}")"
 # top-of-main cleanup block). The tag is exported, so all descendants
 # — including ones wineserver reparents to init — inherit it in their
 # /proc/<pid>/environ.
-export WINDROSE_INSTANCE_TAG="$$-$(date +%s)"
+WINDROSE_INSTANCE_TAG="$$-$(date +%s)"
+export WINDROSE_INSTANCE_TAG
 mkdir -p "$(dirname "${_instance_tag_file}")"
 echo "${WINDROSE_INSTANCE_TAG}" > "${_instance_tag_file}"
 

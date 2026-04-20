@@ -423,6 +423,13 @@ WantedBy=multi-user.target
 # --- Reload + enable --------------------------------------------------
 systemctl daemon-reload
 systemctl enable --now windrose-xvfb.service windrose-ui.service windrose-game.service
+# `enable --now` is a no-op on services that are already running, so
+# re-runs of install.sh (e.g. picking up new UI code) wouldn't restart
+# them — the Python process would keep the old server.py in memory.
+# try-restart bounces only the services that were already running, so
+# fresh installs aren't double-started and upgrades actually pick up
+# new code without the operator having to chase extra systemctl calls.
+systemctl try-restart windrose-ui.service windrose-game.service
 
 log "done."
 echo
