@@ -138,11 +138,37 @@ install_via_steamcmd() {
     validate_arg="validate"
   fi
 
-  local preserve_dir="/tmp/windrose-preserve-$$"
+  # Stash under WINDROSE_PATH (on the PVC), NOT /tmp — /tmp is
+  # container-ephemeral, so a kubelet OOM-kill / eviction / node
+  # preempt between the stash and the restore would wipe user data
+  # forever. Prod data loss 2026-04-20 was this exact failure mode:
+  # container died mid-flow, /tmp got wiped on next container start,
+  # next entrypoint logged "No save version found" and let the game
+  # bootstrap a fresh world on top of missing saves.
+  local preserve_dir="${WINDROSE_PATH}/.steamcmd-preserve-$$"
+  # Resume an abandoned preserve_dir from a prior aborted run. If any
+  # .steamcmd-preserve-* exists, it means a previous entrypoint stashed
+  # data but didn't get to restore it — restore now before doing
+  # anything else. Belt-and-braces for partial-failure recovery.
+  for stray in "${WINDROSE_PATH}"/.steamcmd-preserve-*; do
+    [ -d "${stray}" ] || continue
+    [ "${stray}" = "${preserve_dir}" ] && continue
+    if [ -d "${stray}/Saved" ] && [ ! -d "${WINDROSE_SERVER_DIR}/R5/Saved" ]; then
+      echo "$(timestamp) WARNING: Found abandoned preserve_dir ${stray} from a prior interrupted boot; restoring before proceeding"
+      mkdir -p "${WINDROSE_SERVER_DIR}/R5"
+      mv "${stray}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
+      for f in ServerDescription.json WorldDescription.json; do
+        [ -f "${stray}/${f}" ] && cp -a "${stray}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
+      done
+    fi
+    rm -rf "${stray}"
+  done
   mkdir -p "${preserve_dir}"
 
-  echo "$(timestamp) INFO: Stashing identity + save before SteamCMD app_update"
+  echo "$(timestamp) INFO: Stashing identity + save before SteamCMD app_update (preserve_dir ${preserve_dir})"
+  local had_saved="false"
   if [ -d "${WINDROSE_SERVER_DIR}/R5/Saved" ]; then
+    had_saved="true"
     mv "${WINDROSE_SERVER_DIR}/R5/Saved" "${preserve_dir}/Saved"
   fi
   for f in ServerDescription.json WorldDescription.json; do
@@ -377,9 +403,36 @@ ensure_world_layout() {
   local version
   version="$(detect_save_version)"
   if [ -z "${version}" ]; then
+    # Safety net for prod-data-loss pattern 2026-04-20: if ANY prior boot
+    # left a marker saying "this install already had a world", refuse to
+    # bootstrap a fresh one without explicit operator consent. Prevents
+    # silent data loss when a mid-SteamCMD container kill wipes Saved/.
+    # The marker is dropped below on every successful boot-with-a-world.
+    local had_world_marker="${WINDROSE_PATH}/.had-world-once"
+    if [ -f "${had_world_marker}" ] && [ "${WINDROSE_ALLOW_FRESH_WORLD:-0}" != "1" ]; then
+      cat >&2 <<EOF
+$(timestamp) ERROR: Saved/ is empty but this install previously had a
+  world (marker at ${had_world_marker}). Refusing to bootstrap a fresh
+  world on top of what looks like lost data — that's the very failure
+  mode this guard exists to catch.
+
+  Most likely cause: a prior boot's SteamCMD stash-and-restore was
+  interrupted mid-flow. Check ${WINDROSE_PATH}/.steamcmd-preserve-*
+  for an orphan that might be restorable. Or restore from
+  /home/steam/backups/ via POST /api/backups/<id>/restore.
+
+  To override (e.g. you genuinely want a fresh world on an install
+  that previously had one, and you've already backed anything up):
+  set WINDROSE_ALLOW_FRESH_WORLD=1 in the environment and restart.
+EOF
+      exit 1
+    fi
     echo "$(timestamp) INFO: No save version found; letting the server bootstrap its first world"
     return 0
   fi
+  # Saved/ is populated — drop a marker so the next boot knows this
+  # install has seen a world. The "safety net" above trips on this.
+  touch "${WINDROSE_PATH}/.had-world-once"
   if [ "${WINDROSE_CONFIG_MODE}" != "env" ]; then
     return 0
   fi

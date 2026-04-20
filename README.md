@@ -191,6 +191,16 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` | `false` | Explicit opt-in for destructive endpoints when `UI_PASSWORD` is empty. With a password set, destructive is always allowed. |
 | `UI_SERVE_STATIC` | `true` | Set `false` to have the Python sidecar serve only `/api/*`; pair with an nginx that owns the static bundle. |
 
+**Backups**
+| Env var | Default | Purpose |
+|---|---|---|
+| `WINDROSE_BACKUP_ROOT` | `/home/steam/backups` | Where `create_backup()` drops timestamped snapshots. |
+| `WINDROSE_BACKUP_RETAIN` | `5` | Minimum count of most-recent non-pinned backups to keep. Combined with the age window below via OR — a backup survives if either rule keeps it. |
+| `WINDROSE_BACKUP_RETAIN_DAYS` | `7` | Keep anything younger than this many days, regardless of count. So a burst of manual backups in one hour doesn't push out last week's quiet snapshot. |
+| `WINDROSE_ALLOW_FRESH_WORLD` | `0` | Escape hatch for the entrypoint's "Saved/ is empty but this install used to have a world" data-loss guard. Set `1` only when you genuinely want to start fresh on an install that previously had saves. Usually you want to restore from a backup instead. |
+
+Pinned backups (dirs whose name starts with `manual-`) are exempt from retention and never auto-pruned. Create one via `POST /api/backups` with body `{"pin": true}`, or pin an existing one via `POST /api/backups/{id}/pin`.
+
 **Webhooks (fires from a background poller)**
 | Env var | Default | Purpose |
 |---|---|---|
@@ -278,8 +288,10 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | POST   | `/api/config/validate`                        | authed        | Dry-run schema check for a config body, no side effects.                                 |
 | POST   | `/api/config/apply`                           | *destructive* | Swap staged → live for server + every staged world atomically, then signal restart.      |
 | GET    | `/api/backups`                                | authed        | List of timestamped snapshots under `/home/steam/backups/`.                              |
-| POST   | `/api/backups`                                | *destructive* | Create a manual snapshot now. Fires `backup.created` webhook.                            |
-| POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. Fires `backup.restored`. |
+| POST   | `/api/backups`                                | *destructive* | Create a manual snapshot now. Body `{"pin": true}` prefixes the directory name with `manual-` so it's exempt from retention. Fires `backup.created` webhook. |
+| POST   | `/api/backups/{id}/pin`                       | *destructive* | Rename an existing backup to exempt it from retention. Returns the new id. |
+| POST   | `/api/backups/{id}/unpin`                     | *destructive* | Reverse of pin. |
+| POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. **This is the only supported recovery path — never raw-`cp` parts of a backup in place, the game's internal state under `Saved/` expects the whole tree to be consistent.** Fires `backup.restored`. |
 | GET    | `/api/saves/download`                         | authed        | Stream `R5/Saved/` as a `.tar.gz` (useful for local analysis or backups off-host).       |
 | POST   | `/api/upload`                                 | *destructive* | Stream a `.tar.gz` / `.tar` / `.zip` of a `WindowsServer/` tree onto the PVC. Preserves identity + saves; snapshots the old tree to `backups/`. |
 | GET    | `/api/worlds/{islandId}/config`               | authed        | Live + staged `WorldDescription.json` for one world.                                     |

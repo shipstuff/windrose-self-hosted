@@ -78,6 +78,13 @@ UI_ENABLE_ADMIN_WITHOUT_PASSWORD  = os.environ.get("UI_ENABLE_ADMIN_WITHOUT_PASS
 # the static assets (and possibly auth) and reverse-proxy /api/* here.
 UI_SERVE_STATIC       = os.environ.get("UI_SERVE_STATIC", "true").lower() not in ("0", "false", "no")
 BACKUP_RETAIN         = int(os.environ.get("WINDROSE_BACKUP_RETAIN", "5"))
+BACKUP_RETAIN_DAYS    = float(os.environ.get("WINDROSE_BACKUP_RETAIN_DAYS", "7"))
+# Backup dir names starting with this prefix are exempt from the
+# retention sweep — operators can pin important snapshots by naming
+# them with this prefix (`POST /api/backups {"pin": true}` does the
+# rename automatically). Prevents rapid automated backups from pushing
+# out a known-good recovery snapshot.
+BACKUP_PIN_PREFIX     = "manual-"
 GAME_CPU_LIMIT_STR    = os.environ.get("WINDROSE_GAME_CPU_LIMIT", "")
 GAME_MEM_LIMIT_STR    = os.environ.get("WINDROSE_GAME_MEM_LIMIT", "")
 
@@ -621,9 +628,18 @@ def list_backups() -> list[dict]:
         })
     return out
 
-def create_backup() -> dict:
+def create_backup(pin: bool = False) -> dict:
+    """Snapshot the current R5/Saved tree + identity files into a
+    timestamped backup directory, then run retention.
+
+    Do NOT use raw `cp` or piecewise file swaps to recover from a backup
+    — RocksDB + the game's internal book-keeping under Saved/ expect
+    the whole subtree to be consistent. Use `restore_backup()` /
+    `POST /api/backups/{id}/restore`.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    dst = BACKUP_ROOT / ts
+    dir_name = (BACKUP_PIN_PREFIX + ts) if pin else ts
+    dst = BACKUP_ROOT / dir_name
     dst.mkdir(parents=True, exist_ok=True)
     saved = R5_DIR / "Saved"
     if saved.is_dir():
@@ -632,13 +648,88 @@ def create_backup() -> dict:
         src = R5_DIR / name
         if src.is_file():
             shutil.copy2(src, dst / name)
-    # Retention: keep most-recent N
-    backups = sorted([p for p in BACKUP_ROOT.iterdir() if p.is_dir()], reverse=True)
-    for old in backups[BACKUP_RETAIN:]:
-        shutil.rmtree(old, ignore_errors=True)
-    return {"id": ts, "path": str(dst)}
+    _prune_backups()
+    return {"id": dir_name, "path": str(dst), "pinned": pin}
+
+
+def _prune_backups() -> None:
+    """Retention policy, evaluated per call to `create_backup()`:
+
+      1. Directories whose name starts with BACKUP_PIN_PREFIX are never
+         pruned ("pinned"). Operators use this to protect a known-good
+         snapshot from being auto-evicted.
+      2. Among the non-pinned, keep the most-recent BACKUP_RETAIN by
+         name-sort (timestamp dirs sort chronologically by design).
+      3. Also keep anything mtime-younger than BACKUP_RETAIN_DAYS,
+         regardless of count — so a burst of backups in one hour
+         doesn't push out last week's quiet snapshot.
+
+    A backup survives if EITHER (2) or (3) keeps it. Rule (1) overrides
+    everything else.
+    """
+    if not BACKUP_ROOT.is_dir():
+        return
+    now = time.time()
+    age_cutoff = now - BACKUP_RETAIN_DAYS * 86400
+    entries = [p for p in BACKUP_ROOT.iterdir() if p.is_dir()]
+    unpinned = [p for p in entries if not p.name.startswith(BACKUP_PIN_PREFIX)]
+    # Rule 2: top-N by name-sort descending.
+    keep_names = {p.name for p in sorted(unpinned, key=lambda p: p.name, reverse=True)[:BACKUP_RETAIN]}
+    # Rule 3: keep anything within the age window.
+    for p in unpinned:
+        try:
+            if p.stat().st_mtime >= age_cutoff:
+                keep_names.add(p.name)
+        except OSError:
+            keep_names.add(p.name)  # If we can't stat, don't be the one to delete it.
+    for p in unpinned:
+        if p.name not in keep_names:
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def pin_backup(bid: str) -> str:
+    """Rename an existing backup dir with BACKUP_PIN_PREFIX so retention
+    skips it. Returns the new id. No-op if already pinned."""
+    src = BACKUP_ROOT / bid
+    if not src.is_dir():
+        raise FileNotFoundError(bid)
+    if bid.startswith(BACKUP_PIN_PREFIX):
+        return bid
+    new_name = BACKUP_PIN_PREFIX + bid
+    dst = BACKUP_ROOT / new_name
+    if dst.exists():
+        raise FileExistsError(new_name)
+    src.rename(dst)
+    return new_name
+
+
+def unpin_backup(bid: str) -> str:
+    """Strip BACKUP_PIN_PREFIX from a backup dir name so retention treats
+    it normally. No-op if not currently pinned."""
+    src = BACKUP_ROOT / bid
+    if not src.is_dir():
+        raise FileNotFoundError(bid)
+    if not bid.startswith(BACKUP_PIN_PREFIX):
+        return bid
+    new_name = bid[len(BACKUP_PIN_PREFIX):]
+    dst = BACKUP_ROOT / new_name
+    if dst.exists():
+        raise FileExistsError(new_name)
+    src.rename(dst)
+    return new_name
+
 
 def restore_backup(bid: str) -> None:
+    """Atomic, whole-tree restore of a backup over the live R5/ state.
+
+    This is the ONLY supported recovery primitive for world data loss.
+    Partial recovery (cp of just `Saved/.../Worlds/<id>/`) leaves game
+    internal state inconsistent — Saved/SaveProfiles/Default_Backups,
+    document-manager caches, and RocksDB manifest pointers all need to
+    match the world payload they reference. This function rm -rf's the
+    entire live Saved/ tree first, then drops in the backup's full
+    Saved/ tree + ServerDescription/WorldDescription JSON.
+    """
     src = BACKUP_ROOT / bid
     if not src.is_dir():
         raise FileNotFoundError(bid)
@@ -1187,6 +1278,11 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and m:
             self._api_backups_restore(m.group(1))
             return
+        # Dynamic: /api/backups/{id}/pin + /unpin
+        m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/(pin|unpin)$", path)
+        if method == "POST" and m:
+            self._api_backups_set_pin(m.group(1), m.group(2) == "pin")
+            return
         # Dynamic: /api/worlds/{islandId}/upload
         m = re.match(r"^/api/worlds/([0-9A-Fa-f]{32})/upload$", path)
         if method == "POST" and m:
@@ -1626,9 +1722,31 @@ class Handler(BaseHTTPRequestHandler):
     def _api_backups_create(self):
         if not allow_destructive():
             self._forbidden(); return
-        bkp = create_backup()
+        pin = False
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > 0:
+            body = self.rfile.read(length)
+            try:
+                payload = json.loads(body) if body else {}
+                pin = bool(payload.get("pin"))
+            except json.JSONDecodeError:
+                pass  # treat as unpinned; don't fail just because body is junk
+        if "pin=1" in (self.headers.get("X-Query-String", "") or ""):
+            pin = True
+        bkp = create_backup(pin=pin)
         fire_event("backup.created", backupId=bkp.get("id", ""))
         self._json(HTTPStatus.OK, bkp)
+
+    def _api_backups_set_pin(self, bid: str, pin: bool):
+        if not allow_destructive():
+            self._forbidden(); return
+        try:
+            new_id = pin_backup(bid) if pin else unpin_backup(bid)
+        except FileNotFoundError:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such backup\n"); return
+        except FileExistsError as e:
+            self._send(HTTPStatus.CONFLICT, "text/plain", f"target exists: {e}\n".encode()); return
+        self._json(HTTPStatus.OK, {"id": new_id, "pinned": new_id.startswith(BACKUP_PIN_PREFIX)})
 
     def _api_backups_restore(self, bid: str):
         if not allow_destructive():
