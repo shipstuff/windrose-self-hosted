@@ -419,59 +419,71 @@ reconcile_server_config() {
         *) protected_bool="false" ;;
       esac
 
-      # Shadow-stamp: only overwrite a key if the current on-disk value
-      # matches what we wrote last boot. If it differs, the operator (or
+      # Shadow-stamp: only overwrite a key if the on-disk value matches
+      # what we wrote for it last boot. If it differs, the operator (or
       # the UI config editor, or an ldb edit) changed it — respect that
-      # and skip the re-stamp. First boot with no shadow: stamp
-      # everything. Shadow lives at ServerDescription.last-env-stamp.json
-      # and is rewritten at the end with the post-stamp state.
+      # and skip the re-stamp. Shadow lives at
+      # ServerDescription.last-env-stamp.json. For SKIPPED keys we
+      # preserve the old shadow value — this keeps the divergence marker
+      # alive across boots so we don't re-capture the operator's value
+      # into shadow and then clobber it the *following* boot.
       local shadow="${WINDROSE_SERVER_CONFIG%.*}.last-env-stamp.json"
       local first_boot="false"
       [ -f "${shadow}" ] || first_boot="true"
 
+      # Decide per-key: should we skip (operator diverged) or stamp?
+      # Output: "true" = skip, "false" = stamp.
       _env_keep_key() {
-        # echo "true" to skip re-stamping this key; "false" to stamp it.
-        # Args: jq-path, env-value, cast-as (string|bool|number).
-        local path="$1" env_val="$2" kind="$3"
+        local path="$1" kind="$2"
         if [ "${first_boot}" = "true" ]; then echo "false"; return; fi
         local live shadowed
         case "${kind}" in
-          string) live="$(jq -r "${path}" "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
-                  shadowed="$(jq -r "${path}" "${shadow}" 2>/dev/null)" ;;
-          bool|number) live="$(jq -c "${path}" "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
-                  shadowed="$(jq -c "${path}" "${shadow}" 2>/dev/null)" ;;
+          string)
+            live="$(jq -r "${path}" "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
+            shadowed="$(jq -r "${path}" "${shadow}" 2>/dev/null)"
+            ;;
+          bool|number)
+            live="$(jq -c "${path}" "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
+            shadowed="$(jq -c "${path}" "${shadow}" 2>/dev/null)"
+            ;;
         esac
-        # live differs from what we stamped → someone else edited; keep theirs.
-        if [ "${live}" != "${shadowed}" ]; then echo "true"; return; fi
-        echo "false"
+        if [ "${live}" != "${shadowed}" ]; then echo "true"; else echo "false"; fi
       }
 
-      # Build the jq filter conditionally, dropping clauses the shadow
-      # says we should leave alone.
+      # Per-key stamp decisions. bash-3-compatible parallel arrays
+      # (associative arrays would need bash 4 declare -A, which we
+      # have but prefer not to require).
       local jq_filter=''
-      _add_clause() {
-        if [ "$1" = "false" ]; then
-          jq_filter="${jq_filter}${jq_filter:+ | }$2"
+      local stamp_pwprotected="false" stamp_password="false" stamp_name="false"
+      local stamp_max="false" stamp_proxy="false" stamp_invite="false" stamp_island="false"
+      _decide() {
+        # Args: flag-var, jq-path, kind, clause, log-label.
+        local flag_var="$1" path="$2" kind="$3" clause="$4" label="$5"
+        local keep
+        keep="$(_env_keep_key "${path}" "${kind}")"
+        if [ "${keep}" = "false" ]; then
+          printf -v "${flag_var}" 'true'
+          jq_filter="${jq_filter}${jq_filter:+ | }${clause}"
         else
-          echo "$(timestamp) INFO: env-mode: keeping operator-modified $3"
+          echo "$(timestamp) INFO: env-mode: keeping operator-modified ${label}"
         fi
       }
-      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.IsPasswordProtected' "${protected_bool}" bool)" \
+      _decide stamp_pwprotected '.ServerDescription_Persistent.IsPasswordProtected' bool \
         '.ServerDescription_Persistent.IsPasswordProtected = $protected' 'IsPasswordProtected'
-      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.Password' "${SERVER_PASSWORD}" string)" \
+      _decide stamp_password '.ServerDescription_Persistent.Password' string \
         '.ServerDescription_Persistent.Password = $password' 'Password'
-      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.ServerName' "${SERVER_NAME}" string)" \
+      _decide stamp_name '.ServerDescription_Persistent.ServerName' string \
         '.ServerDescription_Persistent.ServerName = $name' 'ServerName'
-      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.MaxPlayerCount' "${MAX_PLAYER_COUNT}" number)" \
+      _decide stamp_max '.ServerDescription_Persistent.MaxPlayerCount' number \
         '.ServerDescription_Persistent.MaxPlayerCount = $maxPlayers' 'MaxPlayerCount'
-      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.P2pProxyAddress' "${P2P_PROXY_ADDRESS}" string)" \
+      _decide stamp_proxy '.ServerDescription_Persistent.P2pProxyAddress' string \
         '.ServerDescription_Persistent.P2pProxyAddress = $proxy' 'P2pProxyAddress'
       if [ -n "${INVITE_CODE}" ]; then
-        _add_clause "$(_env_keep_key '.ServerDescription_Persistent.InviteCode' "${INVITE_CODE}" string)" \
+        _decide stamp_invite '.ServerDescription_Persistent.InviteCode' string \
           '.ServerDescription_Persistent.InviteCode = $invite' 'InviteCode'
       fi
       if [ -n "${WORLD_ISLAND_ID}" ] && [ "${WORLD_ISLAND_ID}" != "default-world" ]; then
-        _add_clause "$(_env_keep_key '.ServerDescription_Persistent.WorldIslandId' "${WORLD_ISLAND_ID}" string)" \
+        _decide stamp_island '.ServerDescription_Persistent.WorldIslandId' string \
           '.ServerDescription_Persistent.WorldIslandId = $islandId' 'WorldIslandId'
       fi
 
@@ -488,9 +500,41 @@ reconcile_server_config() {
           "${WINDROSE_SERVER_CONFIG}" > "${WINDROSE_SERVER_CONFIG}.tmp" \
           && mv "${WINDROSE_SERVER_CONFIG}.tmp" "${WINDROSE_SERVER_CONFIG}"
       fi
-      # Refresh the shadow with the post-stamp state so the next boot
-      # can distinguish "we wrote it" from "operator wrote it".
-      cp "${WINDROSE_SERVER_CONFIG}" "${shadow}"
+
+      # Refresh shadow: for each key we STAMPED, record the env value we
+      # wrote. For each key we SKIPPED, preserve the old shadow value so
+      # the divergence marker survives. On first boot we seed every key.
+      local shadow_base='{}'
+      [ -f "${shadow}" ] && shadow_base="$(cat "${shadow}")"
+      jq -n \
+        --argjson base "${shadow_base}" \
+        --arg name "${SERVER_NAME}" \
+        --arg invite "${INVITE_CODE}" \
+        --argjson protected "${protected_bool}" \
+        --arg password "${SERVER_PASSWORD}" \
+        --arg islandId "${WORLD_ISLAND_ID}" \
+        --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
+        --arg proxy "${P2P_PROXY_ADDRESS}" \
+        --arg first "${first_boot}" \
+        --arg s_pwp "${stamp_pwprotected}" \
+        --arg s_pw "${stamp_password}" \
+        --arg s_name "${stamp_name}" \
+        --arg s_max "${stamp_max}" \
+        --arg s_proxy "${stamp_proxy}" \
+        --arg s_invite "${stamp_invite}" \
+        --arg s_island "${stamp_island}" '
+        ($base.ServerDescription_Persistent // {}) as $b
+        | ($first == "true") as $seed
+        | { ServerDescription_Persistent: (
+            $b
+            | (if $seed or $s_pwp   == "true" then .IsPasswordProtected = $protected else . end)
+            | (if $seed or $s_pw    == "true" then .Password            = $password  else . end)
+            | (if $seed or $s_name  == "true" then .ServerName          = $name      else . end)
+            | (if $seed or $s_max   == "true" then .MaxPlayerCount      = $maxPlayers else . end)
+            | (if $seed or $s_proxy == "true" then .P2pProxyAddress     = $proxy     else . end)
+            | (if $s_invite == "true"                then .InviteCode    = $invite   else . end)
+            | (if $s_island == "true"                then .WorldIslandId = $islandId else . end)
+          ) }' > "${shadow}.tmp" && mv "${shadow}.tmp" "${shadow}"
       ;;
     managed)
       : "${WINDROSE_MANAGED_CONFIG_TEMPLATE:?managed mode requires WINDROSE_MANAGED_CONFIG_TEMPLATE}"
