@@ -63,8 +63,8 @@ by hand.
 
 Plan:
 1. **Tagged artifact bundle.** On every `v*` tag, CI builds a
-   `windrose-ui-<version>.tar.gz` (just `image/ui/*` + `image/entrypoint.sh`
-   + `image/*_example.json`) and attaches it as a GitHub release
+   `windrose-ui-<version>.tar.gz` (just `scripts/ui/*` + `scripts/entrypoint.sh`
+   + `scripts/*_example.json`) and attaches it as a GitHub release
    asset (or publishes as a GHCR OCI artifact alongside the chart).
 2. **`install.sh --update [<version>]` flag.** Downloads the tagged
    bundle to a temp dir, invokes the normal install flow pointed at
@@ -97,7 +97,7 @@ kills the game process to trigger kubelet / systemd restart.
   stock Windrose now; this is only useful if a Windrose update ever goes
   behind auth. Steam 2FA makes scripted `+login` painful. Leave alone
   unless forced.
-- **Stats API as a sidecar**. `tools/services/api/` is a stub. Could host
+- **Stats API as a sidecar**. `scripts/services/api/` is a stub. Could host
   a Prometheus `/metrics` endpoint driven by the same R5.log tail the UI
   uses. Low priority; Grafana etc. aren't typical for a 4-player game.
 - **RocksDB hot-merge** for save imports without a restart. Complex; the

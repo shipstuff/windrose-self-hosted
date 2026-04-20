@@ -1,13 +1,15 @@
-.git
-.github
+# Whitelist: only scripts/ feeds the build. Keeps the context small and
+# prevents new top-level files (helm values, k8s manifests, docs) from
+# silently bloating it.
+*
+!scripts
+!scripts/**
+!Dockerfile
 **/__pycache__/
 **/*.py[cod]
+**/*.log
+**/*.swp
+**/WindowsServer/
+values-*.yaml
 .env
 .env.*
-*.log
-*.pid
-*.swp
-*.tgz
-*.tar.gz
-WindowsServer/
-PERF_BASELINE.md

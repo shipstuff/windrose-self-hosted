@@ -226,6 +226,100 @@ maybe_disable_sentry() {
   fi
 }
 
+# Optional: patch the shipping EXE to throttle the idle-spin loop in
+# `boost::asio::detail::socket_select_interrupter::reset()`. Without this,
+# two game threads burn ~91% CPU each when no player is connected (pure
+# userspace busy-loop on an Asio socket-pair drain; confirmed via
+# strace showing 0 syscalls in 3 s on either thread). The patch injects
+# a `Sleep(1)` call at the loop-continue tail — each iteration now
+# yields to the kernel via pselect6, cutting idle CPU from ~200% to ~5%
+# on the canary. Isolated to 43 bytes (5 at the site + 38 in CC padding);
+# auto-derive locates the patch site via a unique 9-byte signature and
+# parses PE imports to find KERNEL32!Sleep; reverts cleanly via
+# `--revert`. See `scripts/patch-idle-cpu.py` for the derivation details.
+#
+# Off by default — operator opts in by setting WINDROSE_PATCH_IDLE_CPU=1.
+# The UI can override this decision without a helm roll by writing
+# `disabled` to `$WINDROSE_PATCH_OVERRIDE_FILE` (default
+# `$WINDROSE_SERVER_DIR/R5/.idle-patch-override`); that takes effect on
+# next container restart. Failures (missing python3, signature not
+# found, etc.) are warnings — we'd rather boot with a busy server than
+# not boot at all.
+maybe_patch_idle_cpu() {
+  : "${WINDROSE_PATCH_IDLE_CPU:=0}"
+  local exe="${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
+  local override_file="${WINDROSE_PATCH_OVERRIDE_FILE:-${WINDROSE_SERVER_DIR}/R5/.idle-patch-override}"
+
+  # UI override takes precedence over env var so operators can flip the
+  # patch off without a helm/values round-trip. `disabled` forces OFF;
+  # `enabled` forces ON (on top of env=0); any other content is ignored.
+  local override=""
+  if [ -f "${override_file}" ]; then
+    override="$(tr -d '[:space:]' < "${override_file}" | head -c 16)"
+  fi
+  local effective="${WINDROSE_PATCH_IDLE_CPU}"
+  if [ "${override}" = "disabled" ]; then
+    effective="0"
+    echo "$(timestamp) INFO: Idle-CPU patch override='disabled' at ${override_file}; forcing OFF"
+  elif [ "${override}" = "enabled" ]; then
+    effective="1"
+    echo "$(timestamp) INFO: Idle-CPU patch override='enabled' at ${override_file}; forcing ON"
+  fi
+
+  if [ "${effective}" != "1" ]; then
+    # Whenever the effective mode is OFF, try to revert so a previously
+    # patched binary doesn't stay patched through env changes / override
+    # flips / a fresh SteamCMD pull landing onto an already-patched tree.
+    # --revert --idempotent is a no-op on an unpatched binary, so it's
+    # safe to invoke unconditionally.
+    if [ -f "${exe}" ]; then
+      local script
+      script="$(_find_patch_script)"
+      if [ -n "${script}" ] && command -v python3 >/dev/null 2>&1; then
+        python3 "${script}" "${exe}" --revert --idempotent 2>&1 | \
+          sed "s/^/$(timestamp) patch: /" || true
+      fi
+    fi
+    return 0
+  fi
+
+  local script
+  script="$(_find_patch_script)"
+  if [ ! -f "${exe}" ]; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but ${exe} is missing"
+    return 0
+  fi
+  if [ -z "${script}" ]; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but patch-idle-cpu.py not found"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "$(timestamp) WARNING: Idle-CPU patch requested but python3 not available"
+    return 0
+  fi
+
+  echo "$(timestamp) INFO: Applying idle-CPU patch via ${script} (auto-derive; drops idle CPU from ~200% to ~5%)"
+  if ! python3 "${script}" "${exe}" --idempotent; then
+    echo "$(timestamp) WARNING: Idle-CPU patch failed; binary left unmodified"
+  fi
+}
+
+_find_patch_script() {
+  # In-image location first, then alongside the entrypoint (bare-Linux
+  # installs co-locate them under /opt/windrose/scripts/).
+  local candidates=(
+    "/usr/local/bin/patch-idle-cpu.py"
+    "$(dirname "$0")/patch-idle-cpu.py"
+  )
+  for c in "${candidates[@]}"; do
+    if [ -f "${c}" ]; then
+      echo "${c}"
+      return 0
+    fi
+  done
+  echo ""
+}
+
 detect_save_version() {
   local root="${WINDROSE_SAVE_ROOT}"
   [ -d "${root}" ] || { echo ""; return; }
@@ -395,6 +489,7 @@ migrate_saves_on_version_change
 ensure_world_layout
 reconcile_server_config
 maybe_disable_sentry
+maybe_patch_idle_cpu
 
 # Seed Engine.ini with the project default net tick rate on first
 # boot only. Windrose uses UR5NetDriver, not stock UIpNetDriver, so
@@ -458,13 +553,12 @@ if [ ! -S "/tmp/.X11-unix/X${display_num}" ]; then
 fi
 
 # Extra launch args for the game binary. Default caps the engine tick to
-# 30 FPS — without a connected client the main loop has no pacing source
-# and burns whole cores on dispatch overhead. `-FPS=N` tells UE to sleep
-# between ticks. When a client is connected, NetServerMaxTickRate (30Hz
-# UE default) already paces the loop and this cap is a no-op. Set to
-# empty string to disable, or to a different arg list (e.g.
-# "-FPS=60 -ExecCmds=..." ) for experimentation.
-: "${SERVER_LAUNCH_ARGS:=-FPS=30}"
+# 60 FPS — the patch (scripts/patch-idle-cpu.py) is the real fix for the
+# unpaced-main-loop spin; this cap is belt-and-braces for hosts that
+# don't run the patch. Matches the Helm chart default so compose /
+# plain-manifest / bare-Linux deployments all behave identically. Set
+# empty to uncap, or to "-FPS=30" for the older behavior.
+: "${SERVER_LAUNCH_ARGS:=-FPS=60}"
 read -r -a launch_args <<< "${SERVER_LAUNCH_ARGS}"
 
 # Stream R5.log to this container's stderr so `kubectl logs` / `docker logs`

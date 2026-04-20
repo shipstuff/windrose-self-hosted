@@ -8,13 +8,15 @@
 #
 # Overrides:
 #   WINDROSE_USER                user that owns the install (default: steam)
-#   WINDROSE_INSTALL_DIR         where image/* lands        (default: /opt/windrose)
+#   WINDROSE_INSTALL_DIR         where scripts/* land       (default: /opt/windrose)
 #   UI_BIND                      UI listen interface        (default: 0.0.0.0)
 #   UI_PORT                      UI listen port             (default: 28080)
 #   UI_PASSWORD                  HTTP basic-auth password   (default: empty)
 #   UI_ENABLE_ADMIN_WITHOUT_PASSWORD
 #                                 explicit opt-in for destructive routes when
 #                                 UI_PASSWORD is empty      (default: false)
+#   WINDROSE_PATCH_IDLE_CPU       opt in to the idle-CPU binary patch
+#                                 (default: 0; flip to "1" to apply on boot)
 #   SERVER_NAME, MAX_PLAYER_COUNT, WORLD_NAME, WORLD_PRESET_TYPE,
 #   P2P_PROXY_ADDRESS, WINDROSE_SERVER_SOURCE, etc. — any env var the
 #   entrypoint understands can be seeded here too; anything unset falls
@@ -35,7 +37,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-IMAGE_SRC="${REPO_ROOT}/image"
+SCRIPTS_SRC="${REPO_ROOT}/scripts"
 
 WINDROSE_USER="${WINDROSE_USER:-steam}"
 WINDROSE_INSTALL_DIR="${WINDROSE_INSTALL_DIR:-/opt/windrose}"
@@ -117,35 +119,41 @@ log "target user ${WINDROSE_USER}:${WINDROSE_GROUP} home=${WINDROSE_HOME}"
 # --- File layout ------------------------------------------------------
 log "laying down files under ${WINDROSE_INSTALL_DIR}"
 install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}"
-install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/image"
-install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/image/ui"
+install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/scripts"
+install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/scripts/ui"
 
 install -m 0755 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
-  "${IMAGE_SRC}/entrypoint.sh" "${WINDROSE_INSTALL_DIR}/image/entrypoint.sh"
+  "${SCRIPTS_SRC}/entrypoint.sh" "${WINDROSE_INSTALL_DIR}/scripts/entrypoint.sh"
 install -m 0644 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
-  "${IMAGE_SRC}/ServerDescription_example.json" \
-  "${WINDROSE_INSTALL_DIR}/image/ServerDescription_example.json"
+  "${SCRIPTS_SRC}/ServerDescription_example.json" \
+  "${WINDROSE_INSTALL_DIR}/scripts/ServerDescription_example.json"
 install -m 0644 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
-  "${IMAGE_SRC}/WorldDescription_example.json" \
-  "${WINDROSE_INSTALL_DIR}/image/WorldDescription_example.json"
+  "${SCRIPTS_SRC}/WorldDescription_example.json" \
+  "${WINDROSE_INSTALL_DIR}/scripts/WorldDescription_example.json"
 # The entrypoint copies example configs from /usr/local/share/ when it
 # can't find them in $HOME yet — mirror the Docker layout there too so
 # the same code path works with no env twist.
 install -d /usr/local/share
-install -m 0644 "${IMAGE_SRC}/ServerDescription_example.json" \
+install -m 0644 "${SCRIPTS_SRC}/ServerDescription_example.json" \
   /usr/local/share/ServerDescription_example.json
-install -m 0644 "${IMAGE_SRC}/WorldDescription_example.json" \
+install -m 0644 "${SCRIPTS_SRC}/WorldDescription_example.json" \
   /usr/local/share/WorldDescription_example.json
 
 for f in server.py index.html app.js app.css; do
   install -m 0644 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
-    "${IMAGE_SRC}/ui/${f}" "${WINDROSE_INSTALL_DIR}/image/ui/${f}"
+    "${SCRIPTS_SRC}/ui/${f}" "${WINDROSE_INSTALL_DIR}/scripts/ui/${f}"
 done
-chmod 0755 "${WINDROSE_INSTALL_DIR}/image/ui/server.py"
+chmod 0755 "${WINDROSE_INSTALL_DIR}/scripts/ui/server.py"
 # server.py expects /opt/windrose-ui/ when referenced from k8s; add a
 # symlink so the UI path matches the container path. Harmless if it's
 # already there from a previous install.
-ln -snf "${WINDROSE_INSTALL_DIR}/image/ui" /opt/windrose-ui
+ln -snf "${WINDROSE_INSTALL_DIR}/scripts/ui" /opt/windrose-ui
+
+# Idle-CPU patch script — install at /usr/local/bin/ to match the
+# Docker image layout so the entrypoint's _find_patch_script hits
+# the fast-path candidate. Opt in via WINDROSE_PATCH_IDLE_CPU=1 in
+# the env file; the UI Idle-CPU card toggles the runtime override.
+install -m 0755 "${SCRIPTS_SRC}/patch-idle-cpu.py" /usr/local/bin/patch-idle-cpu.py
 
 # --- Xvfb socket dir --------------------------------------------------
 install -d -m 1777 /tmp/.X11-unix
@@ -175,7 +183,8 @@ _MANAGED_KEYS=" \
   DISPLAY WINDROSE_SERVER_SOURCE SERVER_NAME MAX_PLAYER_COUNT \
   IS_PASSWORD_PROTECTED SERVER_PASSWORD WORLD_ISLAND_ID WORLD_NAME \
   WORLD_PRESET_TYPE P2P_PROXY_ADDRESS DISABLE_SENTRY PROTON_USE_XALIA \
-  FILES_WAIT_TIMEOUT_SECONDS UI_BIND UI_PORT UI_PASSWORD \
+  FILES_WAIT_TIMEOUT_SECONDS WINDROSE_PATCH_IDLE_CPU \
+  UI_BIND UI_PORT UI_PASSWORD \
   UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
   WINDROSE_DISCORD_WEBHOOK_URL WINDROSE_WEBHOOK_URL \
   WINDROSE_WEBHOOK_EVENTS WINDROSE_WEBHOOK_POLL_SECONDS \
@@ -245,6 +254,10 @@ P2P_PROXY_ADDRESS=${P2P_PROXY_ADDRESS:-}
 DISABLE_SENTRY=${DISABLE_SENTRY:-1}
 PROTON_USE_XALIA=${PROTON_USE_XALIA:-0}
 FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
+# Opt in to the idle-CPU binary patch (scripts/patch-idle-cpu.py).
+# "1" -> entrypoint patches the EXE on every start (idempotent).
+# The UI Idle-CPU card can flip this per-host without editing this file.
+WINDROSE_PATCH_IDLE_CPU=${WINDROSE_PATCH_IDLE_CPU:-0}
 UI_BIND=${UI_BIND}
 UI_PORT=${UI_PORT}
 UI_PASSWORD=${UI_PASSWORD}
@@ -321,7 +334,7 @@ User=${WINDROSE_USER}
 Group=${WINDROSE_GROUP}
 WorkingDirectory=${WINDROSE_HOME}
 EnvironmentFile=${WINDROSE_ENV_FILE}
-ExecStart=${WINDROSE_INSTALL_DIR}/image/entrypoint.sh
+ExecStart=${WINDROSE_INSTALL_DIR}/scripts/entrypoint.sh
 # KillMode=control-group (default) makes Apply+Restart and unit stops
 # also take wineserver/umu-run children with them — the game's shutdown
 # path is a SIGTERM fan-out cascade that can leave zombies otherwise.
@@ -348,7 +361,7 @@ EnvironmentFile=${WINDROSE_ENV_FILE}
 # works. The k8s side gets this via shareProcessNamespace; on bare
 # Linux the UI already sees the whole host PID namespace by default,
 # so no twist needed — this just confirms the expectation.
-ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/image/ui/server.py
+ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/scripts/ui/server.py
 Restart=always
 RestartSec=5
 

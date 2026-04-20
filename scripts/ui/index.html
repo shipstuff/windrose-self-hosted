@@ -245,6 +245,25 @@
       </div>
     </div>
 
+    <div class="card admin-only hidden" id="idlePatchCard">
+      <h2>Idle CPU patch</h2>
+      <p class="muted">Community binary patch that throttles the Boost.Asio drain-loop spin in <code>socket_select_interrupter::reset()</code>. Drops idle CPU from ~200% to ~5% on a canary. Applied by the entrypoint on next container restart when enabled; revertable byte-for-byte. <strong>See <a href="https://github.com/shipstuff/windrose-self-hosted/blob/main/tools/patch-idle-cpu.py#L24" target="_blank" rel="noopener">the script docstring</a> for disclaimer and derivation details.</strong></p>
+      <dl class="kv">
+        <dt>Binary state</dt><dd id="ipBinaryState">-</dd>
+        <dt>Binary MD5</dt><dd id="ipBinaryMd5" class="mono">-</dd>
+        <dt>Configured via env</dt><dd id="ipEnvRequested">-</dd>
+        <dt>UI override</dt><dd id="ipOverride">-</dd>
+        <dt>Effective on next restart</dt><dd id="ipEffective">-</dd>
+      </dl>
+      <div id="ipNeedsRestart" class="warn-inline row hidden">Binary state will change on next game-container restart.</div>
+      <div class="row">
+        <button id="ipEnableBtn" class="danger" type="button">Force enable</button>
+        <button id="ipDisableBtn" class="danger" type="button">Force disable</button>
+        <button id="ipAutoBtn" type="button">Follow env (clear override)</button>
+        <button id="ipApplyRestartBtn" class="danger hidden" type="button">Apply + restart game</button>
+      </div>
+    </div>
+
     <!-- Manual update — advanced, collapsed by default -->
     <details class="card admin-only hidden" id="updateCard">
       <summary><h2><span id="importTitle">Manual WindowsServer Update</span></h2></summary>

@@ -43,11 +43,11 @@ ui:
   # / app.js — useful when an external nginx (ingress or a sidecar) owns
   # the static assets + auth and only reverse-proxies /api/* here.
   # To bundle the static assets into a ConfigMap for nginx, run once
-  # outside Helm (assets are under image/ui/):
+  # outside Helm (assets are under scripts/ui/):
   #   kubectl -n games create configmap windrose-ui-assets \
-  #     --from-file=index.html=./image/ui/index.html \
-  #     --from-file=app.css=./image/ui/app.css \
-  #     --from-file=app.js=./image/ui/app.js
+  #     --from-file=index.html=./scripts/ui/index.html \
+  #     --from-file=app.css=./scripts/ui/app.css \
+  #     --from-file=app.js=./scripts/ui/app.js
   # and volumeMount that ConfigMap where your nginx serves from.
   serveStatic: true
   # Webhook notifications — Discord + generic JSON. Events are posted
@@ -167,12 +167,14 @@ serverConfig:
   # before +app_update and restores after.
   source: steamcmd
   # Appended after the required `-log` on the game binary's command line.
-  # Default caps the engine tick to 30 FPS. Without this, idle (no
-  # clients) burns whole cores because the main loop has no NetDriver
-  # pacing it. With a client the cap is redundant (NetServerMaxTickRate
-  # already throttles to 30Hz) but also harmless. Set to "" to disable
-  # or override with e.g. "-FPS=60 -ExecCmds=t.MaxFPS 60".
-  launchArgs: "-FPS=30"
+  # Default caps the engine tick to 60 FPS. The older 30-FPS default was
+  # there as a brake on the idle-CPU spin bug (the main loop was
+  # unpaced when no clients were connected and burned whole cores); the
+  # idle-CPU binary patch (see `patchIdleCpu` below + `scripts/patch-idle-cpu.py`)
+  # is the real fix, so the cap is no longer needed at 30 and we leave
+  # headroom for the server to simulate + replicate at 60. Drop to
+  # "-FPS=30" if you prefer the older behavior, or "" to uncap entirely.
+  launchArgs: "-FPS=60"
   # Applied in env mode.
   serverName: "Windrose Server"
   inviteCode: ""
@@ -230,6 +232,16 @@ worldConfig:
 
 protonUseXalia: "0"
 disableSentry: "1"
+# Binary-patch the shipping EXE at boot to throttle the idle-CPU busy-
+# loop (boost::asio socket_select_interrupter::reset spinning under
+# Wine). When set to "1", the entrypoint runs `patch-idle-cpu.py`
+# against the game binary before launch. Drops idle CPU from ~200% to
+# ~5%. Safe to leave off for a conservative default — the patch is
+# tied to a specific build md5 and is a no-op on unknown builds, but
+# operators might still prefer to review the script (in
+# scripts/patch-idle-cpu.py) before enabling. See the same file for the
+# reverse-engineering rationale and rollback (--revert).
+patchIdleCpu: "0"
 filesWaitTimeoutSeconds: "0"
 
 resources:
@@ -240,33 +252,11 @@ resources:
       memory: 4Gi
     limits:
       memory: 16Gi
-      # Strongly recommended: uncomment a CPU limit. Windrose has an
-      # upstream idle-CPU bug: two UE5 TaskGraph worker threads busy-
-      # spin in userspace before any client is connected (strace shows
-      # zero syscalls for 5 s on the hot threads — pure busy-wait,
-      # unreachable from engine config). The cgroup CPU limit is the
-      # only working mitigation until the devs ship a fix; 14 plausible
-      # Engine.ini / ConsoleVariables.ini / launch-arg / Proton-env
-      # knobs have been tested, none move the idle number off 2 cores.
-      # See memory/windrose_idle_cpu_known_bug.md for the full list +
-      # root-cause notes.
-      #
-      # Sizing (measured 2026-04-17 on AMD Ryzen 9 9955HX @ 4.7 GHz,
-      # x86-64, hostNetwork:true, 1 map, defaults):
-      #   0 players: wants 2 cores; gets capped to whatever you set
-      #   1 player:  ~125 mcpu (NetDriver paces, game genuinely low)
-      #   2-3 players: ~200 mcpu (sublinear; shared simulation amortizes)
-      # Expect ~250-300 mcpu for 4 players, ~400-500 mcpu for 10. Scale
-      # up proportionally on slower CPUs (halve GHz ≈ double mcpu).
-      # Recommended caps (also adjust requests.cpu above to match/less):
-      #   1 player (solo):    300m
-      #   2-4 players:        500m
-      #   10 players:         1000m
-      #
-      # Throttle is real (nr_throttled is high while empty) but harmless
-      # — the game's cycles during idle are non-productive busy-spin.
-      # With a client connected, actual usage stays well below the cap
-      # so gameplay isn't throttled.
+      # Unpatched idle: ~2 cores (upstream spin bug). Mitigate with
+      # patchIdleCpu: "1" (preferred) or a cgroup cap below. Gameplay
+      # CPU scales ~125 mcpu per player (sublinear past the first);
+      # budget 300m for solo, 500m for 2-4, 1000m for 10. A CPU cap
+      # is safe to layer on top of the patch as belt-and-braces.
       # cpu: 500m
   xvfb:
     requests:
@@ -279,7 +269,7 @@ resources:
       cpu: 10m
       memory: 32Mi
     limits:
-      memory: 128Mi
+      memory: 256Mi
 
 securityContext:
   runAsUser: 10000

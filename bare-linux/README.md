@@ -3,15 +3,17 @@
 Run Windrose directly on a spare Linux box (Ubuntu 22.04+ / Debian 12+) as
 three systemd system services: game + Xvfb + admin UI. Validated on an
 Ubuntu 24.04 DigitalOcean droplet with 2 cores / 4 GiB RAM; should run
-anywhere the [`image/Dockerfile`](../image/Dockerfile) deps are available.
+anywhere the [`Dockerfile`](../Dockerfile) deps are available.
 
 ## Sizing
 
-An upstream idle-CPU bug in the dedicated server (UE5 task-worker
-busy-spin, tracked on the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/))
-eats ~1.82 cores before any player is connected. Until that's fixed
-upstream, the box needs real headroom above it. Validated on
-DigitalOcean droplets 2026-04-18/19:
+An upstream idle-CPU bug in the dedicated server eats ~1.82 cores
+before any player is connected (UE5 task-worker busy-spin, tracked on
+the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/)).
+The community binary patch at `scripts/patch-idle-cpu.py` (opt in via
+`WINDROSE_PATCH_IDLE_CPU=1` in `/etc/windrose/windrose.env`) drops that
+to ~5% — if you apply it, a 1 vCPU host becomes viable. Without the
+patch the box needs real headroom above the idle floor:
 
 | Box                | Verdict                                                                 |
 | ------------------ | ----------------------------------------------------------------------- |
@@ -240,9 +242,9 @@ the game's RSS spikes on world load + backend handshake.
 ## Files And Services Layout
 
 ```
-/opt/windrose/image/entrypoint.sh          # game launcher
-/opt/windrose/image/ui/server.py           # admin console
-/opt/windrose/image/ui/{index.html,app.js,app.css}
+/opt/windrose/scripts/entrypoint.sh        # game launcher
+/opt/windrose/scripts/ui/server.py         # admin console
+/opt/windrose/scripts/ui/{index.html,app.js,app.css}
 /etc/windrose/windrose.env                 # runtime env (root-rw, group-r for steam)
 /home/steam/windrose/                      # game data (WindowsServer/, saves, backups)
 /home/steam/steamcmd/                      # SteamCMD + GE-Proton compat data

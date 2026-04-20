@@ -58,16 +58,17 @@ RUN mkdir -p "${GE_PROTON_SEED_ROOT}" \
     && echo "Baking GE-Proton${GE_PROTON_VERSION} into image seed cache..." \
     && curl -fsSL "${GE_PROTON_URL}" | tar zxf - -C "${GE_PROTON_SEED_ROOT}"
 
-COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY ServerDescription_example.json /usr/local/share/ServerDescription_example.json
-COPY WorldDescription_example.json /usr/local/share/WorldDescription_example.json
+COPY --chmod=755 scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY scripts/ServerDescription_example.json /usr/local/share/ServerDescription_example.json
+COPY scripts/WorldDescription_example.json /usr/local/share/WorldDescription_example.json
+# Optional idle-CPU patch — off by default, opt in with
+# WINDROSE_PATCH_IDLE_CPU=1. The entrypoint only invokes it when set.
+COPY --chmod=755 scripts/patch-idle-cpu.py /usr/local/bin/patch-idle-cpu.py
 
-# Admin console. Python stdlib-only HTTP server — no pip deps. Baked
-# into the same image as the game binary so the UI sidecar runs via a
-# command override. Previously this was a separate `windrose-ui` image
-# with busybox httpd + CGI scripts; consolidated into one image to drop
-# the build + version complexity.
-COPY --chown=10000:10000 ui/ /opt/windrose-ui/
+# Admin console (stdlib Python HTTP server + static assets). Baked into
+# the same image as the game binary; the UI sidecar runs via a command
+# override at /opt/windrose-ui/server.py.
+COPY --chown=10000:10000 scripts/ui/ /opt/windrose-ui/
 RUN chmod 755 /opt/windrose-ui/server.py
 
 USER steam

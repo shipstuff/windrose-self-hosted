@@ -21,4 +21,4 @@ Follow-up work for this path:
 
 Until this lands, the UI sidecar at port 28080 surfaces the invite code,
 file-presence, server-process state, and save-version via `/cgi-bin/status.sh`
-— see [`ui/`](../../../ui/).
+— see [`ui/`](../../ui/).
