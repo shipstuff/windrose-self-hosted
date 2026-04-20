@@ -429,13 +429,23 @@ reconcile_server_config() {
       # into shadow and then clobber it the *following* boot.
       local shadow="${WINDROSE_SERVER_CONFIG%.*}.last-env-stamp.json"
       local first_boot="false"
-      [ -f "${shadow}" ] || first_boot="true"
+      if [ ! -f "${shadow}" ]; then
+        first_boot="true"
+        echo "$(timestamp) INFO: env-mode: no shadow stamp present — treating live values as operator-owned and seeding shadow from env intent. Future boots will re-stamp keys that still match env."
+      fi
 
       # Decide per-key: should we skip (operator diverged) or stamp?
       # Output: "true" = skip, "false" = stamp.
+      #
+      # Upgrade-safety: on a first boot (no shadow yet) we treat every
+      # key as "skip" so we don't clobber whatever the operator may have
+      # customized on an existing install. The shadow still gets seeded
+      # with env values below, so on the SECOND boot we have a baseline
+      # to compare live against: if live still matches env intent, we
+      # stamp normally; if operator diverged, we preserve.
       _env_keep_key() {
         local path="$1" kind="$2"
-        if [ "${first_boot}" = "true" ]; then echo "false"; return; fi
+        if [ "${first_boot}" = "true" ]; then echo "true"; return; fi
         local live shadowed
         case "${kind}" in
           string)
@@ -464,6 +474,8 @@ reconcile_server_config() {
         if [ "${keep}" = "false" ]; then
           printf -v "${flag_var}" 'true'
           jq_filter="${jq_filter}${jq_filter:+ | }${clause}"
+        elif [ "${first_boot}" = "true" ]; then
+          : # First boot noise — skip logging per-key on upgrade.
         else
           echo "$(timestamp) INFO: env-mode: keeping operator-modified ${label}"
         fi
