@@ -909,9 +909,36 @@ backupCreateBtn.addEventListener("click", async () => {
   loadBackups();
 });
 
-ipEnableBtn.addEventListener("click", () => setIdlePatchOverride("enabled"));
+const IDLE_PATCH_DISCLAIMER =
+  "You are enabling the EXPERIMENTAL idle-CPU binary patch.\n\n" +
+  "It modifies the Windrose dedicated-server binary in place. NO warranty — " +
+  "it may break at any time (especially after a Windrose update), may conflict " +
+  "with the Windrose EULA or Steam Subscriber Agreement, may corrupt saves, " +
+  "and the authors do not distribute or authorize redistributing modified " +
+  "binaries. Full risk rests with you.\n\n" +
+  "Type 'I ACCEPT' to continue.";
+
+function confirmEnableIdlePatch() {
+  // sessionStorage flag lets a signed-in operator toggle back and forth
+  // within a session without retyping each time; cleared on reload.
+  if (sessionStorage.getItem("ipAckRisk") === "1") return true;
+  const answer = prompt(IDLE_PATCH_DISCLAIMER, "");
+  if (answer !== "I ACCEPT") return false;
+  sessionStorage.setItem("ipAckRisk", "1");
+  return true;
+}
+
+ipEnableBtn.addEventListener("click", () => {
+  if (!confirmEnableIdlePatch()) { log("idle-patch enable cancelled"); return; }
+  setIdlePatchOverride("enabled");
+});
 ipDisableBtn.addEventListener("click", () => setIdlePatchOverride("disabled"));
-ipAutoBtn.addEventListener("click", () => setIdlePatchOverride(null));
+ipAutoBtn.addEventListener("click", () => {
+  // "auto" follows the env — if env=1, clearing the override re-enables
+  // the patch on next restart, so guard this too.
+  if (!confirmEnableIdlePatch()) { log("clear override cancelled"); return; }
+  setIdlePatchOverride(null);
+});
 ipApplyRestartBtn.addEventListener("click", async () => {
   if (!confirm("Restart the game container now so the patch change takes effect?")) return;
   // Re-send the current override to trigger the server-side restart flow.

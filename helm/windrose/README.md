@@ -198,3 +198,115 @@ helm -n games uninstall windrose
 # PVC survives the helm uninstall by default — delete it explicitly if desired:
 kubectl -n games delete pvc windrose-data
 ```
+
+## Values Reference
+
+Every value the chart accepts, what it does, and its default. The runtime
+env vars these map to are also documented in the main
+[README § Configure Server Runtime](../../README.md#configure-server-runtime) —
+the chart is a thin wrapper around those vars plus Kubernetes-level knobs
+(resources, ingress, etc.).
+
+### Deployment topology
+
+| Value | Default | Purpose |
+|---|---|---|
+| `namespace` | `games` | Target namespace (used when `createNamespace: true`). |
+| `createNamespace` | `true` | Let the chart create the namespace. Turn off when installing alongside other charts that own it. |
+| `replicaCount` | `1` | Always 1 — the dedicated server is stateful + backend-registered. |
+| `terminationGracePeriodSeconds` | `45` | How long kubelet waits after SIGTERM for Proton's save-on-exit cascade to finish. |
+| `hostNetwork` | `true` | Needed so the game's NAT-punched UDP binds to the node's real IP, not an overlay. |
+| `nodeSelector` | `{}` | Pin to a node when the PVC is node-local (e.g. `local-path-provisioner`). |
+| `hostAliases` | `[]` | Literal DNS pinning; not needed in most setups. |
+| `blackholeRegions` | `[]` | Subset of `["kr","eu","ru"]` — the chart adds a `hostAliases` entry routing each listed region's gateway to `192.0.2.1` so the game's region-picker skips it. Revert after the flaky gateway recovers. |
+| `imagePullSecrets` | `[]` | Standard k8s; needed for private registries. |
+
+### Image
+
+| Value | Default | Purpose |
+|---|---|---|
+| `image.repository` | `ghcr.io/shipstuff/windrose-server` | Single image for game + UI + xvfb sidecars. |
+| `image.tag` | `latest` | |
+| `image.pullPolicy` | `Always` | |
+| `uiImage.{repository,tag,pullPolicy}` | `""` | Deprecated override; leave empty to reuse `image.*` for the UI sidecar. |
+
+### Persistence
+
+| Value | Default | Purpose |
+|---|---|---|
+| `persistence.existingClaim` | `""` | If set, use an existing PVC instead of creating one. |
+| `persistence.size` | `20Gi` | New-PVC size request. `WindowsServer/` is ~3 GiB; saves + backups + GE-Proton cache add headroom. |
+| `persistence.accessMode` | `ReadWriteOnce` | |
+| `persistence.storageClassName` | `""` | `""` = cluster default. |
+| `persistence.subPath` | `steam-root` | Mount subdir; gives the pod a clean `/home/steam` view. |
+
+### Service + Ingress
+
+| Value | Default | Purpose |
+|---|---|---|
+| `service.type` | `ClusterIP` | UI reaches clients via Ingress or port-forward by default. |
+| `service.port` | `28080` | Listening port for the UI. |
+| `service.publishNotReadyAddresses` | `true` | Keep UI reachable while the game container restarts. |
+| `ingress.enabled` | `true` | |
+| `ingress.className` | `nginx` | |
+| `ingress.hosts` | `[windrose.local]` | |
+| `ingress.annotations` | nginx tuning for 8 GiB upload cap, 1h upstream timeout, streaming bodies | Sized for the UI upload + saves-download endpoints. |
+| `ingress.tls` | `[]` | Standard k8s TLS block. |
+
+### Game runtime
+
+| Value | Default | Purpose |
+|---|---|---|
+| `serverConfig.mode` | `env` | See main README. |
+| `serverConfig.launchStrategy` | `shipping` | `shipping` or `launcher`. |
+| `serverConfig.source` | `steamcmd` | `steamcmd` or `files`. |
+| `serverConfig.launchArgs` | `-FPS=60` | Extra args passed to the game binary after `-log`. |
+| `serverConfig.serverName` | `Windrose Server` | |
+| `serverConfig.inviteCode` | `""` | Empty = backend mints one. |
+| `serverConfig.isPasswordProtected` | `false` | |
+| `serverConfig.maxPlayerCount` | `4` | |
+| `serverConfig.p2pProxyAddress` | `""` | Empty = entrypoint auto-detects. Override to a literal IP only for multi-homed / air-gapped hosts. |
+| `serverConfig.passwordSecret.{name,key}` | `""`, `password` | Source the server password from a k8s Secret instead of inline. |
+| `serverConfig.inlineJson` | partial seed | Only read when `mode: managed`. |
+| `worldConfig.islandId` | `default-world` | |
+| `worldConfig.name` | `Default Windrose World` | |
+| `worldConfig.presetType` | `Medium` | `Easy` / `Medium` / `Hard` / `Custom`. |
+| `protonUseXalia` | `"0"` | Keep off; Xalia crashes on headless Proton. |
+| `disableSentry` | `"1"` | Keep on; Crashpad hard-aborts under Wine. |
+| `patchIdleCpu` | `"0"` | **Experimental.** `"1"` enables the idle-CPU binary patch at boot. See [main README § Caveats](../../README.md) for the disclaimer. |
+| `filesWaitTimeoutSeconds` | `"0"` | 0 = wait forever. |
+| `xvfb.enabled` | `true` | Keep on; the game container requires a display. |
+| `xvfb.display` | `99` | Canary releases should use a different number (:98, :97…) to avoid hostNetwork collisions. |
+
+### Admin UI
+
+| Value | Default | Purpose |
+|---|---|---|
+| `ui.password` | `""` | Inline HTTP basic auth password. Prefer `passwordSecret` for anything more than a lab. |
+| `ui.passwordSecret.{name,key}` | `""`, `password` | Secret-backed password. Chart reads `key` from the named Secret. |
+| `ui.enableAdminWithoutPassword` | `false` | LAN-only / firewalled escape hatch for destructive routes when no password is set. |
+| `ui.serveStatic` | `true` | `false` = only `/api/*` from the Python server; bring your own nginx for the bundle. |
+| `ui.webhooks.events` | `server.online,server.offline,player.join,player.leave` | Comma-separated; add `backup.created`, `backup.restored`, `config.applied` as needed. |
+| `ui.webhooks.pollSeconds` | `15` | Event detector polling cadence. |
+| `ui.webhooks.timeout` | `5` | HTTP POST timeout. |
+| `ui.webhooks.url` / `.urlSecret.{name,key}` | `""` | Generic JSON POST target (inline or Secret-backed). |
+| `ui.webhooks.discordUrl` / `.discordUrlSecret.{name,key}` | `""` | Discord embed URL (inline or Secret-backed). |
+
+### Resources
+
+| Value | Default | Purpose |
+|---|---|---|
+| `resources.game.requests` | `cpu: 2000m`, `memory: 4Gi` | Scheduling floor. |
+| `resources.game.limits.memory` | `16Gi` | Matches the official 10-player ceiling. |
+| `resources.game.limits.cpu` | *(unset)* | Leave unset to let the patch pace the idle loop; set a cap (e.g. `500m`) as belt-and-braces. |
+| `resources.xvfb.{requests,limits}` | `cpu: 50m`/`memory: 32Mi` → `memory: 256Mi` | Xvfb is tiny. |
+| `resources.ui.{requests,limits}` | `cpu: 10m`/`memory: 32Mi` → `memory: 256Mi` | 256Mi covers `/api/idle-cpu-patch` scanning an unknown-MD5 binary; steady state is ~20 MB. |
+
+### Security
+
+| Value | Default | Purpose |
+|---|---|---|
+| `securityContext.{runAsUser,runAsGroup,fsGroup}` | `10000` | Non-root throughout; `fsGroup` lets the PVC be owned by the same id. |
+| `containerSecurityContext.allowPrivilegeEscalation` | `false` | |
+| `containerSecurityContext.readOnlyRootFilesystem` | `false` | SteamCMD writes to `$HOME`; can't be read-only. |
+| `containerSecurityContext.capabilities.drop` | `[ALL]` | The UI sidecar re-adds `CAP_KILL` in its own spec (needed to signal the sibling game process under shared PID namespace). |

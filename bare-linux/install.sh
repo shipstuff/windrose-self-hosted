@@ -74,6 +74,57 @@ fi
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '\033[33m[install] WARN: %s\033[0m\n' "$*" >&2; }
 
+# Idle-CPU patch confirmation. When the operator is about to enable the
+# patch (either on a fresh install or by flipping an existing "0" to "1"),
+# print the experimental / no-warranty disclaimer and require explicit
+# acknowledgement. WINDROSE_PATCH_ACK_RISK=1 bypasses the prompt for
+# headless / automation contexts.
+if [ "${WINDROSE_PATCH_IDLE_CPU:-}" = "1" ]; then
+  # Only prompt if this is a NEW enable — existing env file with =1 already
+  # means the operator acknowledged on a prior run. Re-confirm only on the
+  # transition 0 → 1 (or first-ever enable).
+  _prev="0"
+  if [ -f "${WINDROSE_ENV_FILE}" ]; then
+    _prev="$(sed -n 's/^WINDROSE_PATCH_IDLE_CPU=\(.*\)$/\1/p' "${WINDROSE_ENV_FILE}" | tr -d '"' | head -n1)"
+    _prev="${_prev:-0}"
+  fi
+  if [ "${_prev}" != "1" ] && [ "${WINDROSE_PATCH_ACK_RISK:-}" != "1" ]; then
+    cat >&2 <<'EOF'
+
+[install] ⚠️  You are enabling the idle-CPU binary patch.
+
+  This is an EXPERIMENTAL community workaround that modifies the Windrose
+  dedicated-server binary in place. It is provided AS IS, with NO warranty
+  of any kind:
+
+    * It may break at any time — especially after a Windrose game update.
+    * It may conflict with the Windrose EULA or Steam Subscriber Agreement.
+    * It may corrupt saves or cause undefined behavior under conditions we
+      haven't tested.
+    * The authors do not distribute modified binaries and do not authorize
+      redistribution of any binary this patch produces.
+
+  Full risk — functional, legal, and otherwise — rests with you. Review
+  scripts/patch-idle-cpu.py before proceeding.
+
+EOF
+    # Non-interactive stdin (piped install, CI, etc.) → refuse unless ACK bypass.
+    if [ ! -t 0 ]; then
+      printf '[install] ERROR: non-interactive shell and WINDROSE_PATCH_ACK_RISK is not "1".\n' >&2
+      printf '[install]        Re-run with WINDROSE_PATCH_ACK_RISK=1 to enable the patch, or omit\n' >&2
+      printf '[install]        WINDROSE_PATCH_IDLE_CPU=1 to install without it.\n' >&2
+      exit 1
+    fi
+    printf '[install] Type "I ACCEPT" (exactly) to enable the patch: ' >&2
+    read -r _ack
+    if [ "${_ack}" != "I ACCEPT" ]; then
+      printf '[install] aborted: patch not enabled.\n' >&2
+      exit 1
+    fi
+    printf '[install] acknowledged — patch will be enabled in %s\n' "${WINDROSE_ENV_FILE}"
+  fi
+fi
+
 # --- Memory / swap preflight -----------------------------------------
 # Windrose idles around 850 MiB RSS but spikes during world load + ICE
 # negotiation; a constrained box with no swap OOMs silently mid-join.

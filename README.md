@@ -150,6 +150,9 @@ and the pre-loaded-world workflow (recommended for small VPSes).
 
 The server config lives at `/home/steam/windrose/WindowsServer/R5/ServerDescription.json`. In `env` mode the entrypoint patches known keys from env on every start.
 
+Every variable below is consumed by the container entrypoint, so it applies identically across Helm (via `values.yaml`), plain manifests / compose (via the container env), and bare-Linux (via `/etc/windrose/windrose.env` written by `install.sh`). See [`helm/windrose/README.md`](helm/windrose/README.md#values-reference) for the full Helm-values table (which wraps these and adds chart-level knobs like `resources`, `ingress`, `blackholeRegions`).
+
+**Server identity + world**
 | Env var | Default | Purpose |
 |---|---|---|
 | `SERVER_NAME` | `Windrose Server` | Informational |
@@ -157,17 +160,45 @@ The server config lives at `/home/steam/windrose/WindowsServer/R5/ServerDescript
 | `IS_PASSWORD_PROTECTED` | `false` | Toggle password gate |
 | `SERVER_PASSWORD` | `` | Password when `IS_PASSWORD_PROTECTED=true` |
 | `MAX_PLAYER_COUNT` | `4` | 4 per official guide; up to 10 with more RAM |
-| `WORLD_ISLAND_ID` | `default-world` | Matches folder under `Saved/.../RocksDB/<GameVersion>/Worlds/`. See caveat below — backend assigns the real ID. |
+| `WORLD_ISLAND_ID` | `default-world` | Matches folder under `Saved/.../RocksDB/<GameVersion>/Worlds/`. See caveat — backend assigns the real ID. |
 | `WORLD_NAME` | `Default Windrose World` | Display name |
 | `WORLD_PRESET_TYPE` | `Medium` | `Easy`, `Medium`, `Hard`, `Custom` |
 | `P2P_PROXY_ADDRESS` | auto-detected (UDP-connect getsockname trick; falls back to `0.0.0.0` if the trick fails) | The ICE host candidate advertised to clients. Override only if auto-detect picks the wrong interface. |
-| `WINDROSE_CONFIG_MODE` | `env` | `env`, `managed`, or `mutable` |
-| `WINDROSE_LAUNCH_STRATEGY` | `shipping` | `shipping` (headless, recommended) or `launcher` (`WindroseServer.exe`) |
-| `FILES_WAIT_TIMEOUT_SECONDS` | `0` | 0 = wait forever for WindowsServer files |
-| `PROTON_USE_XALIA` | `0` | Xalia crashes on our headless Proton; leave off. |
-| `DISABLE_SENTRY` | `1` | Crashpad hard-aborts under wine; keep Sentry disabled unless you're debugging. |
-| `UI_BIND` | `127.0.0.1` (compose) / `0.0.0.0` (k8s) | UI httpd bind address |
-| `UI_PORT` | `28080` | UI httpd port |
+
+**Runtime behavior**
+| Env var | Default | Purpose |
+|---|---|---|
+| `WINDROSE_CONFIG_MODE` | `env` | `env` (stamp `ServerDescription.json` from env on every boot), `managed` (render from chart inlineJson + Secret), `mutable` (leave operator's on-disk file alone; recommended for UI-driven edits). |
+| `WINDROSE_LAUNCH_STRATEGY` | `shipping` | `shipping` (headless, recommended) or `launcher` (`WindroseServer.exe`). |
+| `WINDROSE_SERVER_SOURCE` | `steamcmd` | `steamcmd` (anonymous `app_update 4129620` on every boot) or `files` (operator populates `WindowsServer/` via UI upload / `kubectl cp`). |
+| `SERVER_LAUNCH_ARGS` | `-FPS=60` | Extra args appended after `-log` on the game binary's command line. Empty uncaps, `-FPS=30` matches older behavior. |
+| `FILES_WAIT_TIMEOUT_SECONDS` | `0` | 0 = wait forever for `WindowsServer/` to appear before launching. Only relevant when `WINDROSE_SERVER_SOURCE=files`. |
+| `PROTON_USE_XALIA` | `0` | Xalia crashes on headless Proton; leave off. |
+| `DISABLE_SENTRY` | `1` | Crashpad hard-aborts under Wine; keep Sentry disabled unless you're debugging. |
+
+**Idle-CPU patch**
+| Env var | Default | Purpose |
+|---|---|---|
+| `WINDROSE_PATCH_IDLE_CPU` | `0` | `1` → entrypoint runs `scripts/patch-idle-cpu.py` against the game binary on every start. **Experimental, no warranty.** See the Caveats section and the script header for the disclaimer. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
+| `WINDROSE_PATCH_OVERRIDE_FILE` | `$R5_DIR/.idle-patch-override` | Path the entrypoint consults for a runtime override written by the admin UI's Idle-CPU card. `disabled` forces OFF and triggers a revert on next boot; `enabled` forces ON. Absent = follow `WINDROSE_PATCH_IDLE_CPU`. |
+
+**Admin UI (`windrose-ui` sidecar)**
+| Env var | Default | Purpose |
+|---|---|---|
+| `UI_BIND` | `127.0.0.1` (compose / bare-Linux) / `0.0.0.0` (k8s) | UI httpd bind address. Flip to `0.0.0.0` + set `UI_PASSWORD` to expose outside loopback. |
+| `UI_PORT` | `28080` | UI httpd port. |
+| `UI_PASSWORD` | `` | HTTP basic-auth password; empty = no auth (only safe on LAN-only / firewalled hosts). Username is ignored. |
+| `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` | `false` | Explicit opt-in for destructive endpoints when `UI_PASSWORD` is empty. With a password set, destructive is always allowed. |
+| `UI_SERVE_STATIC` | `true` | Set `false` to have the Python sidecar serve only `/api/*`; pair with an nginx that owns the static bundle. |
+
+**Webhooks (fires from a background poller)**
+| Env var | Default | Purpose |
+|---|---|---|
+| `WINDROSE_WEBHOOK_URL` | `` | Generic JSON `POST` target. |
+| `WINDROSE_DISCORD_WEBHOOK_URL` | `` | Discord embed target. |
+| `WINDROSE_WEBHOOK_EVENTS` | `server.online,server.offline,player.join,player.leave` | Comma-separated subset. Additional events: `backup.created`, `backup.restored`, `config.applied`. |
+| `WINDROSE_WEBHOOK_POLL_SECONDS` | `15` | Poll cadence for the event detector thread. |
+| `WINDROSE_WEBHOOK_TIMEOUT` | `5` | HTTP POST timeout (seconds). |
 
 ## Update The Server On Game Patch
 
