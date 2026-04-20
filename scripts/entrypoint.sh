@@ -418,27 +418,79 @@ reconcile_server_config() {
         true|True|TRUE|1|yes) protected_bool="true" ;;
         *) protected_bool="false" ;;
       esac
-      local jq_filter='.ServerDescription_Persistent.IsPasswordProtected = $protected
-        | .ServerDescription_Persistent.Password = $password
-        | .ServerDescription_Persistent.ServerName = $name
-        | .ServerDescription_Persistent.MaxPlayerCount = $maxPlayers
-        | .ServerDescription_Persistent.P2pProxyAddress = $proxy'
+
+      # Shadow-stamp: only overwrite a key if the current on-disk value
+      # matches what we wrote last boot. If it differs, the operator (or
+      # the UI config editor, or an ldb edit) changed it — respect that
+      # and skip the re-stamp. First boot with no shadow: stamp
+      # everything. Shadow lives at ServerDescription.last-env-stamp.json
+      # and is rewritten at the end with the post-stamp state.
+      local shadow="${WINDROSE_SERVER_CONFIG%.*}.last-env-stamp.json"
+      local first_boot="false"
+      [ -f "${shadow}" ] || first_boot="true"
+
+      _env_keep_key() {
+        # echo "true" to skip re-stamping this key; "false" to stamp it.
+        # Args: jq-path, env-value, cast-as (string|bool|number).
+        local path="$1" env_val="$2" kind="$3"
+        if [ "${first_boot}" = "true" ]; then echo "false"; return; fi
+        local live shadowed
+        case "${kind}" in
+          string) live="$(jq -r "${path}" "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
+                  shadowed="$(jq -r "${path}" "${shadow}" 2>/dev/null)" ;;
+          bool|number) live="$(jq -c "${path}" "${WINDROSE_SERVER_CONFIG}" 2>/dev/null)"
+                  shadowed="$(jq -c "${path}" "${shadow}" 2>/dev/null)" ;;
+        esac
+        # live differs from what we stamped → someone else edited; keep theirs.
+        if [ "${live}" != "${shadowed}" ]; then echo "true"; return; fi
+        echo "false"
+      }
+
+      # Build the jq filter conditionally, dropping clauses the shadow
+      # says we should leave alone.
+      local jq_filter=''
+      _add_clause() {
+        if [ "$1" = "false" ]; then
+          jq_filter="${jq_filter}${jq_filter:+ | }$2"
+        else
+          echo "$(timestamp) INFO: env-mode: keeping operator-modified $3"
+        fi
+      }
+      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.IsPasswordProtected' "${protected_bool}" bool)" \
+        '.ServerDescription_Persistent.IsPasswordProtected = $protected' 'IsPasswordProtected'
+      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.Password' "${SERVER_PASSWORD}" string)" \
+        '.ServerDescription_Persistent.Password = $password' 'Password'
+      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.ServerName' "${SERVER_NAME}" string)" \
+        '.ServerDescription_Persistent.ServerName = $name' 'ServerName'
+      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.MaxPlayerCount' "${MAX_PLAYER_COUNT}" number)" \
+        '.ServerDescription_Persistent.MaxPlayerCount = $maxPlayers' 'MaxPlayerCount'
+      _add_clause "$(_env_keep_key '.ServerDescription_Persistent.P2pProxyAddress' "${P2P_PROXY_ADDRESS}" string)" \
+        '.ServerDescription_Persistent.P2pProxyAddress = $proxy' 'P2pProxyAddress'
       if [ -n "${INVITE_CODE}" ]; then
-        jq_filter="${jq_filter} | .ServerDescription_Persistent.InviteCode = \$invite"
+        _add_clause "$(_env_keep_key '.ServerDescription_Persistent.InviteCode' "${INVITE_CODE}" string)" \
+          '.ServerDescription_Persistent.InviteCode = $invite' 'InviteCode'
       fi
       if [ -n "${WORLD_ISLAND_ID}" ] && [ "${WORLD_ISLAND_ID}" != "default-world" ]; then
-        jq_filter="${jq_filter} | .ServerDescription_Persistent.WorldIslandId = \$islandId"
+        _add_clause "$(_env_keep_key '.ServerDescription_Persistent.WorldIslandId' "${WORLD_ISLAND_ID}" string)" \
+          '.ServerDescription_Persistent.WorldIslandId = $islandId' 'WorldIslandId'
       fi
-      jq \
-        --arg name "${SERVER_NAME}" \
-        --arg invite "${INVITE_CODE}" \
-        --argjson protected "${protected_bool}" \
-        --arg password "${SERVER_PASSWORD}" \
-        --arg islandId "${WORLD_ISLAND_ID}" \
-        --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
-        --arg proxy "${P2P_PROXY_ADDRESS}" \
-        "${jq_filter}" \
-        "${WINDROSE_SERVER_CONFIG}" > "${WINDROSE_SERVER_CONFIG}.tmp" && mv "${WINDROSE_SERVER_CONFIG}.tmp" "${WINDROSE_SERVER_CONFIG}"
+
+      if [ -n "${jq_filter}" ]; then
+        jq \
+          --arg name "${SERVER_NAME}" \
+          --arg invite "${INVITE_CODE}" \
+          --argjson protected "${protected_bool}" \
+          --arg password "${SERVER_PASSWORD}" \
+          --arg islandId "${WORLD_ISLAND_ID}" \
+          --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
+          --arg proxy "${P2P_PROXY_ADDRESS}" \
+          "${jq_filter}" \
+          "${WINDROSE_SERVER_CONFIG}" > "${WINDROSE_SERVER_CONFIG}.tmp" \
+          && mv "${WINDROSE_SERVER_CONFIG}.tmp" "${WINDROSE_SERVER_CONFIG}"
+      fi
+      # Refresh the shadow with the post-stamp state so the next boot
+      # can distinguish "we wrote it" from "operator wrote it".
+      cp "${WINDROSE_SERVER_CONFIG}" "${shadow}"
       ;;
     managed)
       : "${WINDROSE_MANAGED_CONFIG_TEMPLATE:?managed mode requires WINDROSE_MANAGED_CONFIG_TEMPLATE}"
@@ -485,6 +537,23 @@ case "${WINDROSE_SERVER_SOURCE}" in
 esac
 
 wait_for_files
+
+# Maintenance mode: UI can toggle this to keep the server stopped
+# across restarts without touching values / systemd / docker-compose.
+# We loop-sleep so the container stays up but the game binary never
+# launches — operator clears the flag (UI button or rm the file) and
+# the next restart boots normally.
+maint_flag="${WINDROSE_MAINTENANCE_FLAG_FILE:-${WINDROSE_SERVER_DIR}/R5/.maintenance-mode}"
+if [ -f "${maint_flag}" ]; then
+  echo "$(timestamp) INFO: Maintenance mode active (${maint_flag} present); not launching the game. Clear the flag from the admin UI or 'rm ${maint_flag}' and restart."
+  # Stay in the foreground so systemd/kubelet/docker doesn't mark the
+  # service failed and restart-loop. SIGTERM from the supervisor wakes
+  # us up cleanly.
+  trap 'echo "$(timestamp) INFO: SIGTERM received in maintenance mode; exiting."; exit 0' TERM INT
+  while [ -f "${maint_flag}" ]; do sleep 30 & wait $!; done
+  echo "$(timestamp) INFO: Maintenance flag cleared; proceeding with normal boot."
+fi
+
 migrate_saves_on_version_change
 ensure_world_layout
 reconcile_server_config

@@ -288,6 +288,10 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | POST   | `/api/worlds/{islandId}/upload`               | *destructive* | Upload a world tarball into `R5/Saved/.../Worlds/{id}/`. Requires the game to be stopped. |
 | POST   | `/api/server/restart`                         | *destructive* | SIGTERM the game process; supervisor brings it back. No config changes applied.          |
 | POST   | `/api/server/stop`                            | *destructive* | SIGTERM the game process. Kubelet / Docker / systemd restarts the container per usual.   |
+| GET    | `/api/maintenance`                            | authed        | `{active, flagFile}` — whether the entrypoint will sleep on next boot instead of launching. |
+| POST   | `/api/maintenance`                            | *destructive* | `{active: bool, restart?: bool}` — toggle the flag file; `restart: true` also signals the game to stop now so it takes effect immediately. |
+| GET    | `/api/idle-cpu-patch`                         | authed        | Full state of the opt-in binary patch: MD5, detected patch state, env + override, needs-restart hint. |
+| POST   | `/api/idle-cpu-patch`                         | *destructive* | `{override: "enabled"|"disabled"|null, restart?: bool}` — write/clear the runtime override file; optional restart. |
 
 `islandId` is the 32-character hex folder name under `RocksDB/<GameVersion>/Worlds/`. Backup `id` is the UTC timestamp folder name under `/home/steam/backups/` (format `YYYYMMDDTHHMMSSZ`).
 

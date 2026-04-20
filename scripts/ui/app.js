@@ -76,6 +76,9 @@ const importTitle    = document.getElementById("importTitle");
 const importBlurb    = document.getElementById("importBlurb");
 const restartHint    = document.getElementById("restartHint");
 const statusEl       = document.getElementById("status");
+const mmState        = document.getElementById("mmState");
+const mmEnableBtn    = document.getElementById("mmEnableBtn");
+const mmDisableBtn   = document.getElementById("mmDisableBtn");
 const ipBinaryState     = document.getElementById("ipBinaryState");
 const ipBinaryMd5       = document.getElementById("ipBinaryMd5");
 const ipEnvRequested    = document.getElementById("ipEnvRequested");
@@ -562,13 +565,14 @@ function applyStatus(data) {
   // modal before our sign-in button is even clicked).
   if (showAdmin && !window._adminHydrated) {
     window._adminHydrated = true;
-    loadConfig(); loadBackups(); loadIdlePatch();
+    loadConfig(); loadBackups(); loadIdlePatch(); loadMaintenance();
   } else if (!showAdmin) {
     window._adminHydrated = false;
   }
   [uploadBtn, configSaveBtn, configRevertBtn, backupCreateBtn, worldUploadBtn,
    restartServerBtn, discardAllStagedBtn, worldStageBtn, worldDiscardBtn,
-   ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn].forEach(b => {
+   ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn,
+   mmEnableBtn, mmDisableBtn].forEach(b => {
     if (b) b.disabled = !destructive;
   });
   stagedTag.classList.toggle("hidden", !data.stagedConfigPending);
@@ -665,6 +669,33 @@ async function loadBackups() {
   } catch (err) { log("backups load failed: " + err); }
 }
 
+async function loadMaintenance() {
+  try {
+    const res = await authFetch("/api/maintenance");
+    if (!res.ok) return;
+    const s = await res.json();
+    mmState.textContent = s.active ? "ACTIVE — server will stay stopped across restarts" : "inactive (normal boot)";
+    mmEnableBtn.disabled = s.active;
+    mmDisableBtn.disabled = !s.active;
+  } catch (err) { log("maintenance load failed: " + err); }
+}
+
+async function setMaintenance(active) {
+  const verb = active ? "enable" : "disable";
+  if (!confirm(`${active ? "Enable" : "Disable"} maintenance mode and ${active ? "stop" : "restart"} the game now?`)) return;
+  log(`maintenance ${verb}...`);
+  const res = await authFetch("/api/maintenance", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ active, restart: true }),
+  });
+  if (!res.ok) { log(`maintenance ${verb} failed: ${await res.text()}`); return; }
+  const s = await res.json();
+  log(`maintenance now ${s.active ? "ACTIVE" : "inactive"}${s.restartRequested ? " (restart signaled)" : ""}`);
+  loadMaintenance();
+  loadStatus();
+}
+
 async function loadIdlePatch() {
   try {
     const res = await authFetch("/api/idle-cpu-patch");
@@ -719,7 +750,7 @@ async function stageConfig(json) {
 }
 
 // --- Event wiring -------------------------------------------------
-refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadIdlePatch(); });
+refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadIdlePatch(); loadMaintenance(); });
 downloadSavesBtn.addEventListener("click", () => { window.location.href = "/api/saves/download"; });
 
 uploadBtn.addEventListener("click", async () => {
@@ -928,6 +959,9 @@ function confirmEnableIdlePatch() {
   return true;
 }
 
+mmEnableBtn.addEventListener("click", () => setMaintenance(true));
+mmDisableBtn.addEventListener("click", () => setMaintenance(false));
+
 ipEnableBtn.addEventListener("click", () => {
   if (!confirmEnableIdlePatch()) { log("idle-patch enable cancelled"); return; }
   setIdlePatchOverride("enabled");
@@ -1068,3 +1102,4 @@ loadStatus();
 setInterval(loadStatus, 5000);
 setInterval(() => { if (window._adminHydrated) loadBackups(); }, 30000);
 setInterval(() => { if (window._adminHydrated) loadIdlePatch(); }, 30000);
+setInterval(() => { if (window._adminHydrated) loadMaintenance(); }, 30000);

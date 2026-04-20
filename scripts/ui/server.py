@@ -92,6 +92,15 @@ IDLE_PATCH_OVERRIDE_FILE = Path(os.environ.get(
     str(R5_DIR / ".idle-patch-override"),
 ))
 GAME_EXE_PATH = WINDROSE_SERVER_DIR / "R5" / "Binaries" / "Win64" / "WindroseServer-Win64-Shipping.exe"
+# Maintenance-mode flag. Entrypoint loop-sleeps instead of launching Proton
+# when this file exists, so the container stays up but the game stays stopped.
+# Operator clears the flag (UI toggle or manual rm) and the next restart
+# boots normally. Matches the entrypoint's default path so overriding the
+# env var on either side moves both endpoints together.
+MAINTENANCE_FLAG_FILE = Path(os.environ.get(
+    "WINDROSE_MAINTENANCE_FLAG_FILE",
+    str(R5_DIR / ".maintenance-mode"),
+))
 # First: the Docker / bare-Linux install target. Second: alongside the
 # UI server file for repo-checkout + source-run scenarios (scripts/ui/server.py
 # -> scripts/patch-idle-cpu.py).
@@ -1117,6 +1126,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/backups",            "_api_backups_create"),
         ("GET",    "/api/idle-cpu-patch",     "_api_idle_patch_get"),
         ("POST",   "/api/idle-cpu-patch",     "_api_idle_patch_post"),
+        ("GET",    "/api/maintenance",        "_api_maintenance_get"),
+        ("POST",   "/api/maintenance",        "_api_maintenance_post"),
         # /api/backups/{id}/restore, /api/worlds/{id}/upload, and
         # /api/worlds/{id}/config handled in _dispatch dynamically.
     ]
@@ -1309,13 +1320,28 @@ class Handler(BaseHTTPRequestHandler):
         saved = R5_DIR / "Saved"
         if not saved.is_dir():
             self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no save dir\n"); return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/gzip")
-        self.send_header("Content-Disposition", 'attachment; filename="windrose-saves.tar.gz"')
-        self.end_headers()
-        # Stream tarball directly to socket.
-        with tarfile.open(fileobj=self.wfile, mode="w|gz") as tf:
-            tf.add(saved, arcname="Saved")
+        # Streaming tarfile.add() over the LIVE Saved directory races with
+        # RocksDB compactions (log → sst renames mid-walk). Reported
+        # symptom: world fails to load on next boot, game falls back to
+        # generating a fresh one. Snapshot to a scratch dir first — that
+        # detaches our I/O from the live DB — then tar and stream the
+        # snapshot. Scratch lives in /tmp so it doesn't bloat backups/.
+        with tempfile.TemporaryDirectory(prefix="windrose-dl-", dir="/tmp") as scratch:
+            scratch_root = Path(scratch)
+            try:
+                shutil.copytree(saved, scratch_root / "Saved",
+                                dirs_exist_ok=False, symlinks=True)
+            except Exception as e:
+                self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain",
+                           f"snapshot failed: {e}\n".encode())
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="windrose-saves.tar.gz"')
+            self.end_headers()
+            with tarfile.open(fileobj=self.wfile, mode="w|gz") as tf:
+                tf.add(scratch_root / "Saved", arcname="Saved")
 
     def _api_config_get(self):
         live    = load_json(CONFIG_PATH) or {}
@@ -1590,6 +1616,45 @@ class Handler(BaseHTTPRequestHandler):
         request_restart()
         fire_event("backup.restored", backupId=bid)
         self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True})
+
+    def _api_maintenance_get(self):
+        self._json(HTTPStatus.OK, {
+            "active": MAINTENANCE_FLAG_FILE.is_file(),
+            "flagFile": str(MAINTENANCE_FLAG_FILE),
+        })
+
+    def _api_maintenance_post(self):
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"invalid JSON body\n"); return
+        want_active = bool(payload.get("active"))
+        if want_active:
+            MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
+            tmp.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii")
+            tmp.replace(MAINTENANCE_FLAG_FILE)
+        else:
+            try:
+                MAINTENANCE_FLAG_FILE.unlink()
+            except FileNotFoundError:
+                pass
+        status = {"active": MAINTENANCE_FLAG_FILE.is_file(), "flagFile": str(MAINTENANCE_FLAG_FILE)}
+        # Optional: if caller asks, also signal the running game so the
+        # maintenance state takes effect immediately instead of on the
+        # next organic restart. Entering maintenance = stop the game now;
+        # exiting = restart so the entrypoint rechecks the flag.
+        if payload.get("restart"):
+            try:
+                request_restart()
+                status["restartRequested"] = True
+            except Exception as e:
+                status["restartError"] = str(e)
+        self._json(HTTPStatus.OK, status)
 
     def _api_idle_patch_get(self):
         self._json(HTTPStatus.OK, idle_patch_full_status())

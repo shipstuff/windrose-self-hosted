@@ -182,7 +182,7 @@
     <!-- Server config — form by default, raw JSON on demand -->
     <div class="card admin-only hidden">
       <h2>Server Config <span id="stagedTag" class="tag hidden">pending changes</span></h2>
-      <p class="muted">Edit fields then Stage — changes apply on next server restart. Identity (PersistentServerId) and world data are preserved.</p>
+      <p class="muted">Edit fields then Stage — changes apply on next server restart. Identity (PersistentServerId) and world data are preserved. Under the default <code>env</code> config mode, the entrypoint only re-stamps a field if its current on-disk value matches the last stamp; edits made here diverge from that, so they persist across restarts.</p>
       <div id="configDiffBox" class="hidden">
         <p class="muted row"><strong>Staged vs Live diff:</strong> lines added in green, removed in red.</p>
         <div id="configDiff" class="diff"></div>
@@ -242,6 +242,18 @@
       </table>
       <div class="row">
         <button id="backupCreateBtn" class="danger">Create backup now</button>
+      </div>
+    </div>
+
+    <div class="card admin-only hidden" id="maintenanceCard">
+      <h2>Maintenance mode</h2>
+      <p class="muted">When on, the entrypoint sleeps instead of launching the game, so the server stays stopped through container/service restarts without editing values or touching systemd. Toggle off to boot normally on the next restart.</p>
+      <dl class="kv">
+        <dt>Current state</dt><dd id="mmState">-</dd>
+      </dl>
+      <div class="row">
+        <button id="mmEnableBtn" class="danger" type="button">Enable + stop now</button>
+        <button id="mmDisableBtn" class="danger" type="button">Disable + restart now</button>
       </div>
     </div>
 
