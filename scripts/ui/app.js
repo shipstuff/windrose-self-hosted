@@ -69,6 +69,22 @@ const backupsBody    = document.getElementById("backupsBody");
 const backupsTable   = document.getElementById("backupsTable");
 const backupsEmpty   = document.getElementById("backupsEmpty");
 const backupCreateBtn= document.getElementById("backupCreateBtn");
+const backupTabUi      = document.getElementById("backupTabUi");
+const backupTabGame    = document.getElementById("backupTabGame");
+const backupPaneUi     = document.getElementById("backupPaneUi");
+const backupPaneGame   = document.getElementById("backupPaneGame");
+const gameBackupsBody  = document.getElementById("gameBackupsBody");
+const gameBackupsTable = document.getElementById("gameBackupsTable");
+const gameBackupsEmpty = document.getElementById("gameBackupsEmpty");
+const bsIdleMin       = document.getElementById("bsIdleMin");
+const bsFloorHr       = document.getElementById("bsFloorHr");
+const bsRetainCount   = document.getElementById("bsRetainCount");
+const bsRetainDays    = document.getElementById("bsRetainDays");
+const bsLastAt        = document.getElementById("bsLastAt");
+const bsLastResult    = document.getElementById("bsLastResult");
+const bsOverride      = document.getElementById("bsOverride");
+const bsSaveBtn       = document.getElementById("bsSaveBtn");
+const bsRevertBtn     = document.getElementById("bsRevertBtn");
 const updateCard     = document.getElementById("updateCard");
 const archiveInput   = document.getElementById("archiveFile");
 const uploadBtn      = document.getElementById("uploadBtn");
@@ -358,9 +374,14 @@ function renderBackups(backups) {
     const display = b.createdAt
       ? new Date(b.createdAt).toISOString().replace(/\.\d+Z$/, "Z")
       : parseBackupId(b.id);
+    const src = b.source || (b.pinned ? "manual-pinned" : "manual");
+    const srcLabel = src === "auto" ? "auto" : (src === "manual-pinned" ? "pinned" : "manual");
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="mono" title="${escapeHtml(b.id)}">${escapeHtml(display)}</td>
+      <td class="mono" title="${escapeHtml(b.id)}">
+        <span class="tag tag-${escapeHtml(src)}">${escapeHtml(srcLabel)}</span>
+        ${escapeHtml(display)}
+      </td>
       <td>${formatBytes(b.sizeBytes)}</td>
       <td><button class="danger restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button></td>`;
     backupsBody.appendChild(tr);
@@ -371,6 +392,40 @@ function renderBackups(backups) {
       log(`restoring ${b.dataset.id}...`);
       const res = await authFetch(`/api/backups/${b.dataset.id}/restore`, { method: "POST" });
       log(`${res.ok ? "restore ok" : "restore failed"}: ${await res.text()}`);
+    });
+  });
+}
+
+function renderGameBackups(backups) {
+  if (!backups.length) {
+    gameBackupsTable.classList.add("hidden"); gameBackupsEmpty.classList.remove("hidden"); return;
+  }
+  gameBackupsTable.classList.remove("hidden"); gameBackupsEmpty.classList.add("hidden");
+  gameBackupsBody.innerHTML = "";
+  const destructive = lastStatus?.allowDestructive !== false;
+  backups.forEach(b => {
+    const display = b.createdAt
+      ? new Date(b.createdAt).toISOString().replace(/\.\d+Z$/, "Z")
+      : b.id;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono" title="${escapeHtml(b.id)}">${escapeHtml(display)}</td>
+      <td>${formatBytes(b.sizeBytes)}</td>
+      <td><button class="danger game-restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button></td>`;
+    gameBackupsBody.appendChild(tr);
+  });
+  gameBackupsBody.querySelectorAll(".game-restore-btn").forEach(b => {
+    b.addEventListener("click", async () => {
+      if (!confirm(
+        `Restore game auto-backup ${b.dataset.id}?\n\n` +
+        `This merges the game's Default_Backups snapshot onto the live RocksDB tree. ` +
+        `A pinned safety snapshot of current state is taken first so you can roll back.\n\n` +
+        `Note: game backups are world-only — they don't restore ServerDescription or WorldDescription.`
+      )) return;
+      log(`restoring game backup ${b.dataset.id}...`);
+      const res = await authFetch(`/api/game-backups/${b.dataset.id}/restore`, { method: "POST" });
+      log(`${res.ok ? "game restore ok" : "game restore failed"}: ${await res.text()}`);
+      loadBackups(); loadGameBackups();
     });
   });
 }
@@ -565,7 +620,7 @@ function applyStatus(data) {
   // modal before our sign-in button is even clicked).
   if (showAdmin && !window._adminHydrated) {
     window._adminHydrated = true;
-    loadConfig(); loadBackups(); loadIdlePatch(); loadMaintenance();
+    loadConfig(); loadBackups(); loadBackupConfig(); loadIdlePatch(); loadMaintenance();
   } else if (!showAdmin) {
     window._adminHydrated = false;
   }
@@ -669,6 +724,75 @@ async function loadBackups() {
   } catch (err) { log("backups load failed: " + err); }
 }
 
+async function loadGameBackups() {
+  try {
+    const res = await authFetch("/api/game-backups");
+    if (!res.ok) return;
+    renderGameBackups((await res.json()).backups || []);
+  } catch (err) { log("game backups load failed: " + err); }
+}
+
+let lastBackupConfig = null;
+async function loadBackupConfig() {
+  try {
+    const res = await authFetch("/api/backup-config");
+    if (!res.ok) return;
+    const cfg = await res.json();
+    lastBackupConfig = cfg;
+    bsIdleMin.value     = cfg.idleMinutes;
+    bsFloorHr.value     = cfg.floorHours;
+    bsRetainCount.value = cfg.retainCount;
+    bsRetainDays.value  = cfg.retainDays;
+    bsLastAt.textContent = cfg.lastAutoBackupAt
+      ? new Date(cfg.lastAutoBackupAt).toISOString().replace(/\.\d+Z$/, "Z")
+      : "(never / since UI restart)";
+    bsLastResult.textContent = cfg.lastResult || "(no run yet)";
+    bsOverride.textContent = `${cfg.overridePath} (${cfg.overrideExists ? "present" : "absent — using defaults"})`;
+  } catch (err) { log("backup-config load failed: " + err); }
+}
+
+bsSaveBtn.addEventListener("click", async () => {
+  const payload = {
+    idleMinutes: Number(bsIdleMin.value),
+    floorHours:  Number(bsFloorHr.value),
+    retainCount: Number(bsRetainCount.value),
+    retainDays:  Number(bsRetainDays.value),
+  };
+  log("saving auto-backup config...");
+  const res = await authFetch("/api/backup-config", {
+    method: "PUT",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    log("auto-backup config saved");
+    loadBackupConfig();
+  } else {
+    log("save failed: " + await res.text());
+  }
+});
+
+bsRevertBtn.addEventListener("click", () => {
+  if (!lastBackupConfig) { loadBackupConfig(); return; }
+  bsIdleMin.value     = lastBackupConfig.idleMinutes;
+  bsFloorHr.value     = lastBackupConfig.floorHours;
+  bsRetainCount.value = lastBackupConfig.retainCount;
+  bsRetainDays.value  = lastBackupConfig.retainDays;
+});
+
+function setBackupTab(which) {
+  const uiActive = which === "ui";
+  backupTabUi.classList.toggle("active", uiActive);
+  backupTabGame.classList.toggle("active", !uiActive);
+  backupTabUi.setAttribute("aria-selected", String(uiActive));
+  backupTabGame.setAttribute("aria-selected", String(!uiActive));
+  backupPaneUi.classList.toggle("hidden", !uiActive);
+  backupPaneGame.classList.toggle("hidden", uiActive);
+  if (!uiActive) loadGameBackups();
+}
+backupTabUi.addEventListener("click", () => setBackupTab("ui"));
+backupTabGame.addEventListener("click", () => setBackupTab("game"));
+
 async function loadMaintenance() {
   try {
     const res = await authFetch("/api/maintenance");
@@ -750,7 +874,7 @@ async function stageConfig(json) {
 }
 
 // --- Event wiring -------------------------------------------------
-refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadIdlePatch(); loadMaintenance(); });
+refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadBackupConfig(); loadIdlePatch(); loadMaintenance(); });
 downloadSavesBtn.addEventListener("click", () => { window.location.href = "/api/saves/download"; });
 
 uploadBtn.addEventListener("click", async () => {
@@ -1100,6 +1224,6 @@ signOutBtn.addEventListener("click", () => {
 // an unauth'd page load would 401-spam /api/config and /api/backups.
 loadStatus();
 setInterval(loadStatus, 5000);
-setInterval(() => { if (window._adminHydrated) loadBackups(); }, 30000);
+setInterval(() => { if (window._adminHydrated) { loadBackups(); loadBackupConfig(); } }, 30000);
 setInterval(() => { if (window._adminHydrated) loadIdlePatch(); }, 30000);
 setInterval(() => { if (window._adminHydrated) loadMaintenance(); }, 30000);

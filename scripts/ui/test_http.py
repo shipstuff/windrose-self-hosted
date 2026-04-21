@@ -225,6 +225,129 @@ def test_auth_gate_on_destructive_route():
             srv.shutdown()
 
 
+def test_list_game_backups_empty_when_absent():
+    """GET /api/game-backups returns [] when Default_Backups/ doesn't exist."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        # Point GAME_BACKUPS_DIR at a non-existent path so list returns [].
+        srv = _TestServer(r5, backup_root)
+        server.GAME_BACKUPS_DIR = r5 / "Saved" / "SaveProfiles" / "Default_Backups"
+        try:
+            code, resp = _json_req("GET", f"{srv.base}/api/game-backups")
+            assert code == 200, f"expected 200, got {code}: {resp}"
+            assert resp["backups"] == [], f"expected empty list, got {resp}"
+        finally:
+            srv.shutdown()
+
+
+def test_list_and_restore_game_backup():
+    """Seed a fake Default_Backups/<ts>/ dir, list it, then restore it.
+    Verifies GET /api/game-backups surfaces it and POST .../restore merges
+    it onto the live RocksDB tree + creates a pinned safety snapshot."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        # Seed a fake game auto-backup mirroring the real layout:
+        # SaveProfiles/Default_Backups/<ts>/<gameVersion>/Worlds/<islandId>/
+        game_backups = r5 / "Saved" / "SaveProfiles" / "Default_Backups"
+        ts = "20260420T120000Z"
+        fake_world = game_backups / ts / "0.10.0" / "Worlds" / "RECOVERED"
+        fake_world.mkdir(parents=True)
+        (fake_world / "MANIFEST-000001").write_bytes(b"recovered-manifest")
+        (fake_world / "CURRENT").write_text("MANIFEST-000001\n")
+        srv = _TestServer(r5, backup_root)
+        server.GAME_BACKUPS_DIR = game_backups
+        server.GAME_ROCKSDB_DIR = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB"
+        try:
+            code, resp = _json_req("GET", f"{srv.base}/api/game-backups")
+            assert code == 200, f"list failed: {code} {resp}"
+            ids = [b["id"] for b in resp["backups"]]
+            assert ts in ids, f"{ts} not in listed: {ids}"
+
+            # Restore it; verify live RocksDB now contains RECOVERED world,
+            # and a pinned safety snapshot was created first.
+            code, resp = _json_req("POST", f"{srv.base}/api/game-backups/{ts}/restore")
+            assert code == 200, f"restore failed: {code} {resp}"
+            recovered = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / "RECOVERED"
+            assert recovered.is_dir(), f"RECOVERED world not merged onto live tree"
+            assert (recovered / "MANIFEST-000001").read_bytes() == b"recovered-manifest"
+            # Safety snapshot should be pinned (manual- prefix).
+            pinned = [p for p in backup_root.iterdir() if p.name.startswith("manual-")]
+            assert pinned, f"no pinned safety snapshot created; got {list(backup_root.iterdir())}"
+        finally:
+            srv.shutdown()
+
+
+def test_backup_config_get_put_roundtrip():
+    """GET returns defaults; PUT validates + persists; GET sees the update.
+    Exercises the full UI edit-save-refresh loop."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, cfg = _json_req("GET", f"{srv.base}/api/backup-config")
+            assert code == 200, f"get failed: {code} {cfg}"
+            # Defaults present + zero-state runtime fields.
+            for k in ("idleMinutes", "floorHours", "retainCount", "retainDays", "overridePath"):
+                assert k in cfg, f"missing {k}: {cfg}"
+            # PUT a new config, expect it reflected.
+            code, updated = _json_req("PUT", f"{srv.base}/api/backup-config",
+                                      {"idleMinutes": 3.5, "floorHours": 12,
+                                       "retainCount": 20, "retainDays": 30})
+            assert code == 200, f"put failed: {code} {updated}"
+            assert updated["idleMinutes"] == 3.5, updated
+            assert updated["retainCount"] == 20, updated
+            # File should exist on disk.
+            assert (r5 / ".backup-config.json").is_file()
+            # Fresh GET should echo it back.
+            code, refetch = _json_req("GET", f"{srv.base}/api/backup-config")
+            assert refetch["idleMinutes"] == 3.5, refetch
+            assert refetch["overrideExists"] is True, refetch
+        finally:
+            srv.shutdown()
+
+
+def test_backup_config_put_rejects_bad_shape():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, _ = _json_req("PUT", f"{srv.base}/api/backup-config",
+                                {"idleMinutes": -5})
+            assert code == 400, f"expected 400 for negative idle; got {code}"
+            code, _ = _json_req("PUT", f"{srv.base}/api/backup-config",
+                                {"retainCount": "not-a-number"})
+            assert code == 400, f"expected 400 for non-numeric retain; got {code}"
+        finally:
+            srv.shutdown()
+
+
+def test_restore_unknown_game_backup_returns_404():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        server.GAME_BACKUPS_DIR = r5 / "Saved" / "SaveProfiles" / "Default_Backups"
+        try:
+            code, _ = _json_req("POST", f"{srv.base}/api/game-backups/20260420T999999Z/restore")
+            assert code == 404, f"expected 404, got {code}"
+        finally:
+            srv.shutdown()
+
+
 def test_malformed_json_body_returns_400():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
@@ -256,4 +379,9 @@ if __name__ == "__main__":
     _run("restore unknown id returns 404", test_restore_unknown_id_returns_404)
     _run("auth gate on destructive route", test_auth_gate_on_destructive_route)
     _run("malformed JSON body — create tolerates", test_malformed_json_body_returns_400)
+    _run("list game backups empty when absent", test_list_game_backups_empty_when_absent)
+    _run("list + restore game backup round-trip", test_list_and_restore_game_backup)
+    _run("restore unknown game backup returns 404", test_restore_unknown_game_backup_returns_404)
+    _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
+    _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
     print("\nall HTTP integration tests passed")

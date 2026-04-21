@@ -77,14 +77,45 @@ UI_ENABLE_ADMIN_WITHOUT_PASSWORD  = os.environ.get("UI_ENABLE_ADMIN_WITHOUT_PASS
 # pod "/api/*-only" so an nginx in front (ingress or sidecar) can own
 # the static assets (and possibly auth) and reverse-proxy /api/* here.
 UI_SERVE_STATIC       = os.environ.get("UI_SERVE_STATIC", "true").lower() not in ("0", "false", "no")
-BACKUP_RETAIN         = int(os.environ.get("WINDROSE_BACKUP_RETAIN", "5"))
+BACKUP_RETAIN         = int(os.environ.get("WINDROSE_BACKUP_RETAIN", "10"))
 BACKUP_RETAIN_DAYS    = float(os.environ.get("WINDROSE_BACKUP_RETAIN_DAYS", "7"))
+# Auto-backup scheduler defaults. Zero on either disables that trigger.
+# Both defaults can be overridden per-install via the admin UI, which
+# writes an atomic JSON override file at $R5_DIR/.backup-config.json
+# (see effective_backup_config() below). Env vars only seed the initial
+# values until the operator saves from the UI.
+#
+# Semantics:
+#   - idleMinutes: N min after last player disconnects → take a backup.
+#     The idle clock resets every time the player count becomes non-zero.
+#   - floorHours: if the server has been continuously active (any players
+#     connected) for M hours with no auto-backup, take one.
+#   - Manual backups do NOT reset either of these clocks (separate systems,
+#     like in-game auto-saves vs manual saves).
+AUTO_BACKUP_IDLE_MINUTES_DEFAULT = float(os.environ.get("WINDROSE_AUTO_BACKUP_IDLE_MINUTES", "1"))
+AUTO_BACKUP_FLOOR_HOURS_DEFAULT  = float(os.environ.get("WINDROSE_AUTO_BACKUP_FLOOR_HOURS", "6"))
+# Poll cadence for the scheduler thread. Fast enough that an idle
+# trigger of 1 min fires within ~15s of the threshold; piggybacks on
+# the existing event-detector cadence.
+AUTO_BACKUP_POLL_SECONDS         = float(os.environ.get("WINDROSE_AUTO_BACKUP_POLL_SECONDS", "15"))
+AUTO_BACKUP_MARKER_NAME          = ".auto"
 # Backup dir names starting with this prefix are exempt from the
 # retention sweep — operators can pin important snapshots by naming
 # them with this prefix (`POST /api/backups {"pin": true}` does the
 # rename automatically). Prevents rapid automated backups from pushing
 # out a known-good recovery snapshot.
 BACKUP_PIN_PREFIX     = "manual-"
+# Windrose itself writes a per-launch backup under
+# R5/Saved/SaveProfiles/Default_Backups/<timestamp>/ (up to 30, auto-
+# rotated — behavior documented in the game's 2026-04 release notes).
+# We surface them alongside our own backups in the UI so operators have
+# one more recovery path. Read-only from our side — we never write
+# into this tree.
+GAME_BACKUPS_DIR      = Path(os.environ.get(
+    "WINDROSE_GAME_BACKUPS_DIR",
+    str(R5_DIR / "Saved" / "SaveProfiles" / "Default_Backups"),
+))
+GAME_ROCKSDB_DIR      = R5_DIR / "Saved" / "SaveProfiles" / "Default" / "RocksDB"
 GAME_CPU_LIMIT_STR    = os.environ.get("WINDROSE_GAME_CPU_LIMIT", "")
 GAME_MEM_LIMIT_STR    = os.environ.get("WINDROSE_GAME_MEM_LIMIT", "")
 
@@ -624,10 +655,14 @@ def list_backups() -> list[dict]:
             size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
         except OSError:
             size = 0; st = None
+        pinned = d.name.startswith(BACKUP_PIN_PREFIX)
+        auto = (d / AUTO_BACKUP_MARKER_NAME).is_file()
         out.append({
             "id": d.name,
             "createdAt": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat() if st else "",
             "sizeBytes": size,
+            "pinned": pinned,
+            "source": "auto" if auto else ("manual-pinned" if pinned else "manual"),
         })
     return out
 
@@ -647,7 +682,15 @@ def create_backup(pin: bool = False) -> dict:
     saved = R5_DIR / "Saved"
     if saved.is_dir():
         shutil.copytree(saved, dst / "Saved", dirs_exist_ok=True)
-    for name in ("ServerDescription.json", "WorldDescription.json"):
+    # Identity + operator-owned runtime settings. Staged configs are
+    # intentionally NOT captured — those represent pending intent, not
+    # live state, and mixing them into restore semantics gets confusing.
+    for name in (
+        "ServerDescription.json",
+        "WorldDescription.json",
+        ".backup-config.json",
+        ".idle-patch-override",
+    ):
         src = R5_DIR / name
         if src.is_file():
             shutil.copy2(src, dst / name)
@@ -672,8 +715,11 @@ def _prune_backups() -> None:
     """
     if not BACKUP_ROOT.is_dir():
         return
+    cfg = effective_backup_config()
+    retain_count = int(cfg["retainCount"])
+    retain_days  = float(cfg["retainDays"])
     now = time.time()
-    age_cutoff = now - BACKUP_RETAIN_DAYS * 86400
+    age_cutoff = now - retain_days * 86400
     # Python 3.13's Path.is_dir() stopped swallowing OSError, so a single
     # unreadable entry during iterdir() would abort the entire prune sweep.
     # Guard each is_dir() call so the sweep still completes.
@@ -686,7 +732,7 @@ def _prune_backups() -> None:
             pass  # can't read — leave it alone, move on
     unpinned = [p for p in entries if not p.name.startswith(BACKUP_PIN_PREFIX)]
     # Rule 2: top-N by name-sort descending.
-    keep_names = {p.name for p in sorted(unpinned, key=lambda p: p.name, reverse=True)[:BACKUP_RETAIN]}
+    keep_names = {p.name for p in sorted(unpinned, key=lambda p: p.name, reverse=True)[:retain_count]}
     # Rule 3: keep anything within the age window.
     for p in unpinned:
         try:
@@ -731,6 +777,254 @@ def unpin_backup(bid: str) -> str:
     return new_name
 
 
+def list_game_backups() -> list[dict]:
+    """Enumerate Windrose's own Default_Backups/ entries. Same shape as
+    list_backups() plus `source="game"` so the UI can tag the row."""
+    out: list[dict] = []
+    if not GAME_BACKUPS_DIR.is_dir():
+        return out
+    for d in sorted(GAME_BACKUPS_DIR.iterdir(), reverse=True):
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue
+        try:
+            st = d.stat()
+            size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+        except OSError:
+            size = 0; st = None
+        out.append({
+            "id": d.name,
+            "createdAt": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat() if st else "",
+            "sizeBytes": size,
+            "source": "game",
+        })
+    return out
+
+
+def restore_game_backup(ts: str) -> None:
+    """Merge-restore a Default_Backups/<ts>/ entry onto the live RocksDB
+    tree. Follows the recipe in the Windrose release notes: copy the
+    backup contents on top of SaveProfiles/Default/RocksDB/ replacing
+    matching files. Not a wipe-and-replace — the game's own Default_Backups
+    layout is scoped per-version/per-world, and we merge so multiple
+    worlds in other subtrees aren't inadvertently wiped.
+
+    Creates a snapshot of the current live state via create_backup()
+    FIRST (with a pin prefix so it survives retention) — if this restore
+    lands wrong, operator has a one-click rollback in the UI backup list.
+    """
+    src = GAME_BACKUPS_DIR / ts
+    if not src.is_dir():
+        raise FileNotFoundError(ts)
+    # Pre-restore safety snapshot — pinned so retention can't evict it.
+    create_backup(pin=True)
+    GAME_ROCKSDB_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, GAME_ROCKSDB_DIR, dirs_exist_ok=True)
+
+
+def _backup_config_path() -> Path:
+    return R5_DIR / ".backup-config.json"
+
+
+def effective_backup_config() -> dict:
+    """Resolve the runtime backup config. File (UI-owned) wins over env.
+    Always returns a fully-populated dict so callers can pull fields
+    without defensive `.get` noise.
+    """
+    cfg = {
+        "idleMinutes": AUTO_BACKUP_IDLE_MINUTES_DEFAULT,
+        "floorHours":  AUTO_BACKUP_FLOOR_HOURS_DEFAULT,
+        "retainCount": BACKUP_RETAIN,
+        "retainDays":  BACKUP_RETAIN_DAYS,
+    }
+    path = _backup_config_path()
+    try:
+        if path.is_file():
+            overrides = json.loads(path.read_text())
+            for k in list(cfg.keys()):
+                if k in overrides and overrides[k] is not None:
+                    cfg[k] = type(cfg[k])(overrides[k])
+    except Exception as e:  # noqa: BLE001 — bad file shouldn't brick pruning
+        print(f"[backup-config] failed to load overrides: {e}", file=sys.stderr, flush=True)
+    return cfg
+
+
+def _validate_backup_config(payload: dict) -> dict:
+    """Coerce + clamp incoming config PUT body. Raises ValueError on shape errors."""
+    if not isinstance(payload, dict):
+        raise ValueError("body must be an object")
+    out: dict = {}
+    for k, lo, hi, caster in (
+        ("idleMinutes", 0.0, 24 * 60,   float),
+        ("floorHours",  0.0, 24 * 30,   float),
+        ("retainCount", 0,   10_000,    int),
+        ("retainDays",  0.0, 365.0 * 5, float),
+    ):
+        if k not in payload:
+            continue
+        try:
+            v = caster(payload[k])
+        except (TypeError, ValueError):
+            raise ValueError(f"{k} must be a number")
+        if v < lo or v > hi:
+            raise ValueError(f"{k} out of range [{lo}, {hi}]")
+        out[k] = v
+    return out
+
+
+def save_backup_config(overrides: dict) -> dict:
+    """Atomic-replace the override file with the given dict. Caller should
+    pre-validate via _validate_backup_config. Returns the effective config
+    after the write."""
+    path = _backup_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(overrides, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return effective_backup_config()
+
+
+def _mark_auto_backup(bkp_dir: Path) -> None:
+    """Drop the marker file inside a backup dir so list_backups() can tag it."""
+    try:
+        (bkp_dir / AUTO_BACKUP_MARKER_NAME).write_text(
+            datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii"
+        )
+    except Exception as e:  # noqa: BLE001 — cosmetic tag, don't fail the backup over it
+        print(f"[auto-backup] failed to drop marker: {e}", file=sys.stderr, flush=True)
+
+
+# In-memory state for the scheduler thread. Reset on UI container restart;
+# _bootstrap_auto_backup_state() re-derives the last-backup timestamp from
+# on-disk markers so restarts don't cause spurious immediate backups.
+_auto_state_lock = threading.Lock()
+_auto_state: dict = {
+    "lastAutoBackupAt": None,   # epoch float or None
+    "playersZeroSince": None,   # epoch float or None
+    "lastResult": "",
+}
+
+
+def _bootstrap_auto_backup_state() -> None:
+    """On process start, scan BACKUP_ROOT for the newest .auto-marked dir
+    and seed lastAutoBackupAt from it. Prevents the scheduler from firing
+    immediately after a UI container restart."""
+    latest = 0.0
+    try:
+        if BACKUP_ROOT.is_dir():
+            for d in BACKUP_ROOT.iterdir():
+                try:
+                    if d.is_dir() and (d / AUTO_BACKUP_MARKER_NAME).is_file():
+                        latest = max(latest, d.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    with _auto_state_lock:
+        _auto_state["lastAutoBackupAt"] = latest or None
+
+
+def trigger_auto_backup(reason: str) -> dict | None:
+    """Create an auto-backup and record state. Returns the backup dict or
+    None on failure. Reason goes into stderr log + webhook payload so
+    operators can distinguish idle vs floor triggers."""
+    try:
+        bkp = create_backup(pin=False)
+    except Exception as e:  # noqa: BLE001 — log, don't crash scheduler
+        msg = f"auto-backup failed: {e}"
+        print(f"[auto-backup] {msg}", file=sys.stderr, flush=True)
+        with _auto_state_lock:
+            _auto_state["lastResult"] = msg
+        return None
+    bkp_dir = Path(bkp["path"])
+    _mark_auto_backup(bkp_dir)
+    now = time.time()
+    with _auto_state_lock:
+        _auto_state["lastAutoBackupAt"] = now
+        _auto_state["lastResult"] = f"ok ({reason}) at {datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec='seconds')}"
+    print(f"[auto-backup] created {bkp['id']} reason={reason}", file=sys.stderr, flush=True)
+    fire_event("backup.created", backupId=bkp["id"], source="auto", reason=reason)
+    return bkp
+
+
+class AutoBackupScheduler(threading.Thread):
+    """Polling thread that implements the idle + floor triggers.
+
+    State machine:
+      players == 0:
+        - mark playersZeroSince = first poll that saw zero
+        - if (now - playersZeroSince) >= idleMinutes*60 AND no auto-backup
+          has fired since the zero-streak started → fire, then wait for
+          players to come back before firing again.
+      players > 0:
+        - playersZeroSince = None (reset)
+        - if floorHours > 0 AND (now - lastAutoBackupAt) >= floorHours*3600
+          → fire once and keep waiting.
+
+    Manual backups DO NOT update lastAutoBackupAt — two independent clocks
+    by design (cf. in-game manual vs auto saves).
+    """
+
+    def __init__(self):
+        super().__init__(daemon=True, name="windrose-auto-backup")
+
+    def _current_players(self) -> int:
+        try:
+            pid, _ = find_game_pid()
+            if pid is None:
+                return 0
+            return sum(1 for _ in parse_active_players())
+        except Exception:
+            return 0
+
+    def run(self) -> None:
+        _bootstrap_auto_backup_state()
+        while True:
+            time.sleep(AUTO_BACKUP_POLL_SECONDS)
+            try:
+                self._tick()
+            except Exception as e:  # noqa: BLE001
+                print(f"[auto-backup] tick error: {e}", file=sys.stderr, flush=True)
+
+    def _tick(self) -> None:
+        cfg = effective_backup_config()
+        idle_s  = float(cfg["idleMinutes"]) * 60.0
+        floor_s = float(cfg["floorHours"])  * 3600.0
+        now     = time.time()
+        players = self._current_players()
+
+        with _auto_state_lock:
+            last_auto  = _auto_state["lastAutoBackupAt"]
+            zero_since = _auto_state["playersZeroSince"]
+
+        if players == 0:
+            # Floor trigger is for active sessions only; cancel any
+            # running "active streak" here. Idle path takes over.
+            if idle_s <= 0:
+                return  # operator disabled the idle trigger
+            if zero_since is None:
+                with _auto_state_lock:
+                    _auto_state["playersZeroSince"] = now
+                return
+            if (now - zero_since) < idle_s:
+                return  # not idle long enough yet
+            # Fire only once per zero-streak: skip if we already took an
+            # auto-backup after zero_since.
+            if last_auto is not None and last_auto >= zero_since:
+                return
+            trigger_auto_backup("idle")
+        else:
+            with _auto_state_lock:
+                _auto_state["playersZeroSince"] = None
+            if floor_s <= 0:
+                return
+            if last_auto is not None and (now - last_auto) < floor_s:
+                return
+            trigger_auto_backup("floor")
+
+
 def restore_backup(bid: str) -> None:
     """Atomic, whole-tree restore of a backup over the live R5/ state.
 
@@ -749,7 +1043,12 @@ def restore_backup(bid: str) -> None:
         dst = R5_DIR / "Saved"
         shutil.rmtree(dst, ignore_errors=True)
         shutil.copytree(src / "Saved", dst)
-    for name in ("ServerDescription.json", "WorldDescription.json"):
+    for name in (
+        "ServerDescription.json",
+        "WorldDescription.json",
+        ".backup-config.json",
+        ".idle-patch-override",
+    ):
         s = src / name
         if s.is_file():
             shutil.copy2(s, R5_DIR / name)
@@ -1250,6 +1549,9 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/server/restart",     "_api_server_restart"),
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
+        ("GET",    "/api/backup-config",      "_api_backup_config_get"),
+        ("PUT",    "/api/backup-config",      "_api_backup_config_put"),
+        ("GET",    "/api/game-backups",       "_api_game_backups_list"),
         ("GET",    "/api/idle-cpu-patch",     "_api_idle_patch_get"),
         ("POST",   "/api/idle-cpu-patch",     "_api_idle_patch_post"),
         ("GET",    "/api/maintenance",        "_api_maintenance_get"),
@@ -1294,6 +1596,12 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/(pin|unpin)$", path)
         if method == "POST" and m:
             self._api_backups_set_pin(m.group(1), m.group(2) == "pin")
+            return
+        # Dynamic: /api/game-backups/{ts}/restore — restore one of
+        # Windrose's own Default_Backups/ entries onto the live tree.
+        m = re.match(r"^/api/game-backups/([A-Za-z0-9\-_T.Z]+)/restore$", path)
+        if method == "POST" and m:
+            self._api_game_backups_restore(m.group(1))
             return
         # Dynamic: /api/worlds/{islandId}/upload
         m = re.match(r"^/api/worlds/([0-9A-Fa-f]{32})/upload$", path)
@@ -1773,6 +2081,54 @@ class Handler(BaseHTTPRequestHandler):
         fire_event("backup.restored", backupId=bid)
         self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True})
 
+    def _api_backup_config_get(self):
+        cfg = effective_backup_config()
+        with _auto_state_lock:
+            last = _auto_state["lastAutoBackupAt"]
+            result = _auto_state["lastResult"]
+        self._json(HTTPStatus.OK, {
+            **cfg,
+            "defaults": {
+                "idleMinutes": AUTO_BACKUP_IDLE_MINUTES_DEFAULT,
+                "floorHours":  AUTO_BACKUP_FLOOR_HOURS_DEFAULT,
+                "retainCount": BACKUP_RETAIN,
+                "retainDays":  BACKUP_RETAIN_DAYS,
+            },
+            "overridePath":      str(_backup_config_path()),
+            "overrideExists":    _backup_config_path().is_file(),
+            "lastAutoBackupAt":  datetime.fromtimestamp(last, tz=timezone.utc).isoformat() if last else None,
+            "lastResult":        result,
+        })
+
+    def _api_backup_config_put(self):
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(body) if body else {}
+            validated = _validate_backup_config(payload)
+        except (json.JSONDecodeError, ValueError) as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode()); return
+        cfg = save_backup_config(validated)
+        self._json(HTTPStatus.OK, cfg)
+
+    def _api_game_backups_list(self):
+        self._json(HTTPStatus.OK, {"backups": list_game_backups()})
+
+    def _api_game_backups_restore(self, ts: str):
+        if not allow_destructive():
+            self._forbidden(); return
+        try:
+            restore_game_backup(ts)
+        except FileNotFoundError:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such game backup\n"); return
+        except Exception as e:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
+        request_restart()
+        fire_event("backup.restored", backupId=f"game:{ts}")
+        self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True, "source": "game"})
+
     def _api_maintenance_get(self):
         self._json(HTTPStatus.OK, {
             "active": MAINTENANCE_FLAG_FILE.is_file(),
@@ -1860,6 +2216,16 @@ def main():
         print(f"  webhooks:       {', '.join(hooks)}", flush=True)
         print(f"  webhook events: {sorted(WEBHOOK_EVENTS)}", flush=True)
         EventDetector().start()
+    # Auto-backup scheduler runs regardless of webhook config — it's the
+    # safety net operators asked for (idle trigger after last player leaves,
+    # floor trigger for long continuous sessions). Both triggers can be
+    # disabled by setting their threshold to 0 in the admin UI.
+    _cfg_preview = effective_backup_config()
+    print(f"  auto-backup:    idle={_cfg_preview['idleMinutes']}min "
+          f"floor={_cfg_preview['floorHours']}h "
+          f"retain={_cfg_preview['retainCount']}/{_cfg_preview['retainDays']}d",
+          flush=True)
+    AutoBackupScheduler().start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

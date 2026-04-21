@@ -195,11 +195,15 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | Env var | Default | Purpose |
 |---|---|---|
 | `WINDROSE_BACKUP_ROOT` | `/home/steam/backups` | Where `create_backup()` drops timestamped snapshots. |
-| `WINDROSE_BACKUP_RETAIN` | `5` | Minimum count of most-recent non-pinned backups to keep. Combined with the age window below via OR — a backup survives if either rule keeps it. |
-| `WINDROSE_BACKUP_RETAIN_DAYS` | `7` | Keep anything younger than this many days, regardless of count. So a burst of manual backups in one hour doesn't push out last week's quiet snapshot. |
+| `WINDROSE_BACKUP_RETAIN` | `10` | Minimum count of most-recent non-pinned backups to keep. Combined with the age window below via OR — a backup survives if either rule keeps it. Acts as a hard floor: even if no new backups happen for a year, the newest N survive. |
+| `WINDROSE_BACKUP_RETAIN_DAYS` | `7` | Keep anything younger than this many days, regardless of count. Age rule only **adds** to the keep set — never subtracts — so if the auto-backup scheduler stalls, the most-recent N from the count rule still stick around. |
+| `WINDROSE_AUTO_BACKUP_IDLE_MINUTES` | `1` | Idle trigger: take an auto-backup N minutes after the last player disconnects. Set `0` to disable. |
+| `WINDROSE_AUTO_BACKUP_FLOOR_HOURS` | `6` | Floor trigger: if the server has been continuously active (players connected) for M hours with no auto-backup, take one. Set `0` to disable. |
 | `WINDROSE_ALLOW_FRESH_WORLD` | `0` | Escape hatch for the entrypoint's "Saved/ is empty but this install used to have a world" data-loss guard. Set `1` only when you genuinely want to start fresh on an install that previously had saves. Usually you want to restore from a backup instead. |
 
-Pinned backups (dirs whose name starts with `manual-`) are exempt from retention and never auto-pruned. Create one via `POST /api/backups` with body `{"pin": true}`, or pin an existing one via `POST /api/backups/{id}/pin`.
+**Runtime override.** Once an operator edits the auto-backup schedule in the admin UI, the values are persisted atomically to `$R5_DIR/.backup-config.json` and **the file is authoritative thereafter** — the env vars above only seed the initial values until the file exists. Delete the file to fall back to env-driven defaults.
+
+**Manual vs auto.** Two independent systems, like in-game manual saves vs auto-saves. Clicking *Create backup now* does **not** reset either auto-backup clock. Pinned backups (dirs whose name starts with `manual-`) are exempt from retention and never auto-pruned. Create one via `POST /api/backups` with body `{"pin": true}`, or pin an existing one via `POST /api/backups/{id}/pin`. Auto-created backups land in unprefixed timestamped dirs with a hidden `.auto` marker file inside — the admin UI tags their rows accordingly and webhook payloads include `source: "auto"`.
 
 **Webhooks (fires from a background poller)**
 | Env var | Default | Purpose |
@@ -292,6 +296,10 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | POST   | `/api/backups/{id}/pin`                       | *destructive* | Rename an existing backup to exempt it from retention. Returns the new id. |
 | POST   | `/api/backups/{id}/unpin`                     | *destructive* | Reverse of pin. |
 | POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. **This is the only supported recovery path — never raw-`cp` parts of a backup in place, the game's internal state under `Saved/` expects the whole tree to be consistent.** Fires `backup.restored`. |
+| GET    | `/api/backup-config`                          | authed        | Current effective auto-backup config (idleMinutes, floorHours, retainCount, retainDays) + the env-seeded defaults + last-run status. |
+| PUT    | `/api/backup-config`                          | *destructive* | Persist auto-backup config atomically to `$R5_DIR/.backup-config.json`. Validates range + type; file is authoritative thereafter. |
+| GET    | `/api/game-backups`                           | authed        | Windrose's own auto-backups under `SaveProfiles/Default_Backups/` (world-only snapshots on the game's own schedule). |
+| POST   | `/api/game-backups/{ts}/restore`              | *destructive* | Merge a selected game auto-backup onto the live RocksDB tree. Creates a pinned safety snapshot first. Note: game auto-backups don't contain ServerDescription/WorldDescription — they're world-only. |
 | GET    | `/api/saves/download`                         | authed        | Stream `R5/Saved/` as a `.tar.gz` (useful for local analysis or backups off-host).       |
 | POST   | `/api/upload`                                 | *destructive* | Stream a `.tar.gz` / `.tar` / `.zip` of a `WindowsServer/` tree onto the PVC. Preserves identity + saves; snapshots the old tree to `backups/`. |
 | GET    | `/api/worlds/{islandId}/config`               | authed        | Live + staged `WorldDescription.json` for one world.                                     |
@@ -341,8 +349,8 @@ Event types:
 | `server.offline`  | The game process goes away (crash, `stop`, pod eviction).          |
 | `player.join`     | A new `AccountId` appears in the connected-players snapshot.       |
 | `player.leave`    | An `AccountId` drops out of the connected-players snapshot.        |
-| `backup.created`  | The admin console's **Create backup now** or `POST /api/backups`.  |
-| `backup.restored` | A backup is restored via `POST /api/backups/{id}/restore`.         |
+| `backup.created`  | The admin console's **Create backup now**, `POST /api/backups`, or an auto-backup from the scheduler (payload includes `source: "auto"` + `reason: "idle"` or `"floor"`). |
+| `backup.restored` | A backup is restored via `POST /api/backups/{id}/restore` or a game auto-backup is merged via `POST /api/game-backups/{ts}/restore`. |
 | `config.applied`  | Config changes are applied via **Apply + restart**.                |
 
 Restrict the fired set with `WINDROSE_WEBHOOK_EVENTS` (comma-separated). Empty URLs disable delivery entirely — leave both URLs unset to suppress webhooks even if the event list is populated.
