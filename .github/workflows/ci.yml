@@ -52,6 +52,8 @@ jobs:
         run: python3 tests/test_http.py
       - name: install.sh env-merge regression
         run: bash tests/test_install_env_merge.sh
+      - name: Engine.ini reconcile (NetServerMaxTickRate + t.MaxFPS)
+        run: bash tests/test_engine_ini_reconcile.sh
 
   yaml-lint:
     runs-on: ubuntu-latest

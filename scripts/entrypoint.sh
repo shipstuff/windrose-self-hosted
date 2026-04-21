@@ -838,28 +838,45 @@ reconcile_server_config
 maybe_disable_sentry
 maybe_patch_idle_cpu
 
-# Seed Engine.ini with the project default net tick rate on first
-# boot only. Windrose uses UR5NetDriver, not stock UIpNetDriver, so
-# we target /Script/R5SocketSubsystem.R5NetDriver. Stock IpNetDriver
-# section mirrored as belt-and-suspenders. Does NOT overwrite an
-# operator-customized file.
-engine_ini="${WINDROSE_SERVER_DIR}/R5/Saved/Config/WindowsServer/Engine.ini"
-if [ ! -f "${engine_ini}" ]; then
-  mkdir -p "$(dirname "${engine_ini}")"
-  cat > "${engine_ini}" <<EOF
-; Seeded by windrose-self-hosted entrypoint on $(date -uIseconds).
-; Default R5NetDriver tick rate — 60 Hz is the project-wide default
-; (2x smoother than stock 30 Hz, low CPU/bandwidth cost on co-op
-; workloads). Override via NET_SERVER_MAX_TICK_RATE env var on the
-; next pristine install, or edit this file directly — the entrypoint
-; only seeds when the file is absent.
-[/Script/R5SocketSubsystem.R5NetDriver]
-NetServerMaxTickRate=${NET_SERVER_MAX_TICK_RATE}
-
-[/Script/OnlineSubsystemUtils.IpNetDriver]
-NetServerMaxTickRate=${NET_SERVER_MAX_TICK_RATE}
-EOF
-  echo "$(timestamp) INFO: Seeded ${engine_ini} with NetServerMaxTickRate=${NET_SERVER_MAX_TICK_RATE}"
+# Reconcile Engine.ini's NetServerMaxTickRate + t.MaxFPS from
+# NET_SERVER_MAX_TICK_RATE env on every boot. Uses a shadow-stamp
+# pattern identical to the ServerDescription.json reconcile: we remember
+# the value we last wrote; if the live file still matches the shadow
+# we stamp the new env value, otherwise we assume the operator hand-
+# edited Engine.ini and leave their value alone.
+#
+# Why reconcile instead of seed-once: earlier builds only seeded when
+# Engine.ini was absent, so NET_SERVER_MAX_TICK_RATE was a dead knob
+# on any existing install — a bug, not a feature. Operators couldn't
+# change tick rate via env/helm without hand-editing on disk.
+#
+# Windrose's actual driver is UR5NetDriver (under /Script/
+# R5SocketSubsystem.R5NetDriver); the stock UIpNetDriver section is
+# mirrored as belt-and-suspenders so pre-init reads pick up either.
+# t.MaxFPS (in [ConsoleVariables]) caps the main loop frequency —
+# on a dedicated server with no rendering, THAT is what drives the
+# game tick, so we bump it together with NetServerMaxTickRate to
+# avoid "ticks rate capped at t.MaxFPS despite NetServerMaxTickRate
+# being higher".
+# Delegate to reconcile-engine-ini.sh (sibling script) so the logic
+# is unit-testable in isolation — see tests/test_engine_ini_reconcile.sh.
+# Uses shadow-stamp semantics: the env value is written every boot but
+# operator hand-edits to the same keys are preserved once detected.
+_reconcile_script="${WINDROSE_RECONCILE_ENGINE_INI:-$(dirname "$0")/reconcile-engine-ini.sh}"
+# Docker image layout installs under /usr/local/bin/; fall back to that.
+if [ ! -x "${_reconcile_script}" ]; then
+  _reconcile_script="/usr/local/bin/reconcile-engine-ini.sh"
+fi
+if [ -x "${_reconcile_script}" ] && [ -n "${NET_SERVER_MAX_TICK_RATE:-}" ]; then
+  # Shadow lives next to Engine.ini so it travels with the PVC. R5/ is
+  # the canonical save-root path (${WINDROSE_SERVER_DIR}/R5 is the same
+  # thing server.py calls R5_DIR — don't use that name here, entrypoint
+  # doesn't define it and set -u would blow up).
+  "${_reconcile_script}" \
+    "${WINDROSE_SERVER_DIR}/R5/Saved/Config/WindowsServer/Engine.ini" \
+    "${WINDROSE_SERVER_DIR}/R5/.engine-ini-shadow" 2>&1 | while IFS= read -r _line; do
+      echo "$(timestamp) ${_line}"
+    done
 fi
 
 if [ "${WINDROSE_LAUNCH_STRATEGY}" = "launcher" ]; then

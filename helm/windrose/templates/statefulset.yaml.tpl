@@ -107,6 +107,8 @@ spec:
               value: {{ .Values.filesWaitTimeoutSeconds | quote }}
             - name: SERVER_LAUNCH_ARGS
               value: {{ .Values.serverConfig.launchArgs | quote }}
+            - name: NET_SERVER_MAX_TICK_RATE
+              value: {{ .Values.serverConfig.networkTickRate | quote }}
             - name: WINDROSE_SERVER_SOURCE
               value: {{ .Values.serverConfig.source | default "steamcmd" | quote }}
             - name: DISPLAY

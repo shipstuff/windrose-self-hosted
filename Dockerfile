@@ -64,6 +64,7 @@ COPY scripts/WorldDescription_example.json /usr/local/share/WorldDescription_exa
 # Optional idle-CPU patch — off by default, opt in with
 # WINDROSE_PATCH_IDLE_CPU=1. The entrypoint only invokes it when set.
 COPY --chmod=755 scripts/patch-idle-cpu.py /usr/local/bin/patch-idle-cpu.py
+COPY --chmod=755 scripts/reconcile-engine-ini.sh /usr/local/bin/reconcile-engine-ini.sh
 
 # Admin console (stdlib Python HTTP server + static assets). Baked into
 # the same image as the game binary; the UI sidecar runs via a command

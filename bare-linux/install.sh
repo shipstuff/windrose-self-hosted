@@ -209,6 +209,10 @@ ln -snf "${WINDROSE_INSTALL_DIR}" /opt/windrose-ui
 # the fast-path candidate. Opt in via WINDROSE_PATCH_IDLE_CPU=1 in
 # the env file; the UI Idle-CPU card toggles the runtime override.
 install -m 0755 "${SCRIPTS_SRC}/patch-idle-cpu.py" /usr/local/bin/patch-idle-cpu.py
+# Engine.ini reconciler — keeps NetServerMaxTickRate + t.MaxFPS in
+# sync with NET_SERVER_MAX_TICK_RATE across boots. Same path as the
+# Docker image so the entrypoint's _reconcile_script lookup hits.
+install -m 0755 "${SCRIPTS_SRC}/reconcile-engine-ini.sh" /usr/local/bin/reconcile-engine-ini.sh
 
 # --- Polkit rule ------------------------------------------------------
 # Narrowly grant the steam user systemctl start/stop/restart access on
@@ -258,6 +262,7 @@ _MANAGED_KEYS=" \
   WORLD_PRESET_TYPE P2P_PROXY_ADDRESS DISABLE_SENTRY PROTON_USE_XALIA \
   USE_DIRECT_CONNECTION DIRECT_CONNECTION_SERVER_ADDRESS \
   DIRECT_CONNECTION_SERVER_PORT DIRECT_CONNECTION_PROXY_ADDRESS \
+  NET_SERVER_MAX_TICK_RATE \
   FILES_WAIT_TIMEOUT_SECONDS WINDROSE_PATCH_IDLE_CPU \
   UI_BIND UI_PORT UI_PASSWORD \
   UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
@@ -333,6 +338,10 @@ USE_DIRECT_CONNECTION=${USE_DIRECT_CONNECTION:-}
 DIRECT_CONNECTION_SERVER_ADDRESS=${DIRECT_CONNECTION_SERVER_ADDRESS:-}
 DIRECT_CONNECTION_SERVER_PORT=${DIRECT_CONNECTION_SERVER_PORT:-7777}
 DIRECT_CONNECTION_PROXY_ADDRESS=${DIRECT_CONNECTION_PROXY_ADDRESS:-0.0.0.0}
+# Server tick rate (stat srvfps) — stamped into Engine.ini's
+# NetServerMaxTickRate + t.MaxFPS on every boot. 30 for weak hosts,
+# 120 for beefy LAN setups. Shadow-stamp preserves hand-edits.
+NET_SERVER_MAX_TICK_RATE=${NET_SERVER_MAX_TICK_RATE:-60}
 DISABLE_SENTRY=${DISABLE_SENTRY:-1}
 PROTON_USE_XALIA=${PROTON_USE_XALIA:-0}
 FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}

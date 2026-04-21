@@ -167,14 +167,29 @@ serverConfig:
   # before +app_update and restores after.
   source: steamcmd
   # Appended after the required `-log` on the game binary's command line.
-  # Default caps the engine tick to 60 FPS. The older 30-FPS default was
-  # there as a brake on the idle-CPU spin bug (the main loop was
-  # unpaced when no clients were connected and burned whole cores); the
-  # idle-CPU binary patch (see `patchIdleCpu` below + `scripts/patch-idle-cpu.py`)
-  # is the real fix, so the cap is no longer needed at 30 and we leave
-  # headroom for the server to simulate + replicate at 60. Drop to
-  # "-FPS=30" if you prefer the older behavior, or "" to uncap entirely.
+  # Pinned to match networkTickRate below so command-line + Engine.ini
+  # agree. Empty uncaps the render loop entirely.
   launchArgs: "-FPS=60"
+  # --- networkTickRate -------------------------------------------------
+  # Server tick rate (srvfps) — stamped into Engine.ini's
+  # NetServerMaxTickRate + t.MaxFPS on every boot. This is the knob
+  # that actually moves the `stat srvfps` needle in-game.
+  #
+  # 60 Hz is the project default: 2x smoother positional replication
+  # than stock 30 without the CPU/bandwidth cost of 120. Headroom is
+  # there once the idle-CPU patch (patchIdleCpu: "1") is on — the main
+  # loop used to burn whole cores regardless of clients connected.
+  #
+  # Lower to 30 on weak hosts (1-2 vCPU VPSes, older NAS hardware) —
+  # halves per-tick CPU + replication bandwidth at the cost of visibly
+  # choppier movement in combat. Raise to 120 on hosts with real
+  # headroom and LAN/low-latency clients where the smoothness pays off.
+  #
+  # The reconcile uses a shadow-stamp: if you hand-edit Engine.ini to a
+  # different value, that edit survives subsequent helm upgrades (we
+  # only overwrite when the on-disk value matches the one we last
+  # wrote). See scripts/reconcile-engine-ini.sh + the unit tests.
+  networkTickRate: 60
   # Applied in env mode.
   serverName: "Windrose Server"
   inviteCode: ""
