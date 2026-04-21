@@ -84,6 +84,11 @@
              "Apply + restart" when any staged changes exist (server
              config or per-world). Plain "Restart server" otherwise. -->
         <button id="restartServerBtn" class="danger admin-only hidden" type="button">Restart server</button>
+        <!-- Stop + Start: only meaningful on bare-Linux (polkit + systemctl).
+             On k8s/compose the container supervisor owns the lifecycle,
+             so these stay hidden via serverControlMode check in app.js. -->
+        <button id="stopServerBtn" class="danger admin-only hidden" type="button">Stop</button>
+        <button id="startServerBtn" class="danger admin-only hidden" type="button">Start</button>
         <button id="discardAllStagedBtn" class="admin-only hidden" type="button">Discard all staged</button>
       </div>
     </div>

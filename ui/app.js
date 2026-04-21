@@ -45,6 +45,8 @@ const configDiff          = document.getElementById("configDiff");
 const configSaveBtn       = document.getElementById("configSaveBtn");
 const configRevertBtn     = document.getElementById("configRevertBtn");
 const restartServerBtn    = document.getElementById("restartServerBtn");
+const stopServerBtn       = document.getElementById("stopServerBtn");
+const startServerBtn      = document.getElementById("startServerBtn");
 const discardAllStagedBtn = document.getElementById("discardAllStagedBtn");
 const worldsStagedTag     = document.getElementById("worldsStagedTag");
 const worldEditorInline   = document.getElementById("worldEditorInline");
@@ -625,7 +627,8 @@ function applyStatus(data) {
     window._adminHydrated = false;
   }
   [uploadBtn, configSaveBtn, configRevertBtn, backupCreateBtn, worldUploadBtn,
-   restartServerBtn, discardAllStagedBtn, worldStageBtn, worldDiscardBtn,
+   restartServerBtn, stopServerBtn, startServerBtn, discardAllStagedBtn,
+   worldStageBtn, worldDiscardBtn,
    ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn,
    mmEnableBtn, mmDisableBtn].forEach(b => {
     if (b) b.disabled = !destructive;
@@ -639,6 +642,18 @@ function applyStatus(data) {
   const anyStaged = !!data.stagedConfigPending || stagedWorldCount > 0;
   restartServerBtn.textContent = anyStaged ? "Apply + restart" : "Restart server";
   discardAllStagedBtn.classList.toggle("hidden", !anyStaged);
+
+  // Stop + Start visibility: only show on bare-Linux where the polkit
+  // rule lets the UI drive systemctl. Everywhere else the container
+  // supervisor owns lifecycle and "Start" is meaningless.
+  const canSystemctl = data.serverControlMode === "systemctl";
+  stopServerBtn.classList.toggle("hidden", !canSystemctl || !showAdmin);
+  startServerBtn.classList.toggle("hidden", !canSystemctl || !showAdmin);
+  // Start only enabled when game isn't running; Stop only when it is.
+  if (canSystemctl) {
+    startServerBtn.disabled = !!data.serverRunning || !destructive;
+    stopServerBtn.disabled  = !data.serverRunning || !destructive;
+  }
 
   // H1 flips between a neutral "Status" title in the public view and
   // the full "Admin Console" label once signed in — so anons see a
@@ -923,6 +938,21 @@ restartServerBtn.addEventListener("click", async () => {
   const res = await authFetch(url, { method: "POST" });
   log(`${res.ok ? "ok" : "failed"}: ${await res.text()}`);
   setTimeout(() => { loadStatus(); loadConfig(); }, 1500);
+});
+
+stopServerBtn.addEventListener("click", async () => {
+  if (!confirm("Stop the game server? Service will stay stopped until you click Start.")) return;
+  log("stopping server...");
+  const res = await authFetch("/api/server/stop", { method: "POST" });
+  log(`${res.ok ? "stop ok" : "stop failed"}: ${await res.text()}`);
+  setTimeout(loadStatus, 1500);
+});
+
+startServerBtn.addEventListener("click", async () => {
+  log("starting server...");
+  const res = await authFetch("/api/server/start", { method: "POST" });
+  log(`${res.ok ? "start ok" : "start failed"}: ${await res.text()}`);
+  setTimeout(loadStatus, 1500);
 });
 discardAllStagedBtn.addEventListener("click", async () => {
   if (!confirm("Discard all staged changes (server config + every world)?")) return;

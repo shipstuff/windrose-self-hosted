@@ -1063,13 +1063,70 @@ def restore_backup(bid: str) -> None:
 # --- Restart / stop signaling ----------------------------------------------
 RESTART_SENTINEL = Path("/tmp/windrose-restart-requested")
 
+# Name of the systemd unit that owns the game process on bare-Linux.
+# When present AND systemctl is on PATH AND the polkit rule from
+# bare-linux/polkit/50-windrose.rules is installed, the UI prefers a
+# clean `systemctl stop/restart` over a SIGTERM so systemd reflects the
+# real state. Falls back transparently on k8s / compose (no systemd in
+# the relevant namespace).
+WINDROSE_UNIT_NAME = os.environ.get("WINDROSE_UNIT_NAME", "windrose-game.service")
+
+
+def _systemctl_available() -> bool:
+    """True if this host has a systemctl we can drive and the windrose
+    unit exists. Caching would be nice but state can change mid-run
+    (install.sh re-run, unit rename), and the list-unit-files call is
+    cheap — ~5ms on a warm host."""
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        r = subprocess.run(
+            ["systemctl", "list-unit-files", "--no-legend", WINDROSE_UNIT_NAME],
+            capture_output=True, text=True, timeout=3,
+        )
+        return WINDROSE_UNIT_NAME in r.stdout
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def systemctl_dispatch(verb: str) -> tuple[bool, str]:
+    """Run `systemctl <verb> windrose-game.service` as whatever user
+    the UI runs as. Relies on the polkit rule shipped in
+    bare-linux/polkit/50-windrose.rules to grant the 'steam' user
+    access to manage the windrose-* units without sudo. Returns
+    (ok, message)."""
+    try:
+        r = subprocess.run(
+            ["systemctl", verb, WINDROSE_UNIT_NAME],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return True, r.stdout.strip() or f"systemctl {verb} ok"
+        return False, (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+    except subprocess.TimeoutExpired:
+        return False, f"systemctl {verb} timed out"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
 def request_restart() -> None:
     """Request a server restart without hard-killing here.
 
-    Writes a sentinel the game-container entrypoint watches; also best-
-    effort signals the running game process (requires CAP_KILL on the
-    UI container — see chart).
+    On bare-Linux with the polkit rule installed, prefers a clean
+    `systemctl restart windrose-game.service` so systemd's state
+    reflects reality. Otherwise writes the sentinel file the game-
+    container entrypoint watches + best-effort SIGTERMs the running
+    game process (kubelet / compose / systemd restarts it on exit).
     """
+    if _systemctl_available():
+        ok, msg = systemctl_dispatch("restart")
+        if ok:
+            return
+        # Fall through to the SIGTERM path if the polkit rule isn't in
+        # place or systemctl refused. Don't raise — operators in a
+        # half-configured state should still see *something* happen.
+        print(f"[restart] systemctl restart failed ({msg}); falling back to SIGTERM",
+              file=sys.stderr, flush=True)
     RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
     signal_game(signal.SIGTERM)
 
@@ -1554,6 +1611,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/config/apply",       "_api_config_apply"),
         ("POST",   "/api/server/stop",        "_api_server_stop"),
         ("POST",   "/api/server/restart",     "_api_server_restart"),
+        ("POST",   "/api/server/start",       "_api_server_start"),
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
         ("GET",    "/api/backup-config",      "_api_backup_config_get"),
@@ -1731,6 +1789,11 @@ class Handler(BaseHTTPRequestHandler):
             # this both to tag world rows and to decide whether the
             # global button reads "Apply + restart" or "Restart".
             data["stagedWorlds"] = [island_id for island_id, _, _ in self._staged_world_paths()]
+            # "systemctl" when the UI can drive systemd directly (bare-
+            # Linux + polkit rule installed) — UI shows a real Start
+            # button. "signal" otherwise — container supervisor owns the
+            # lifecycle, so Start is a noop.
+            data["serverControlMode"] = "systemctl" if _systemctl_available() else "signal"
         else:
             # Public player list: names + state only, no AccountIds or
             # NetAddress. allowDestructive omitted; stagedConfigPending
@@ -1840,6 +1903,20 @@ class Handler(BaseHTTPRequestHandler):
         if not pid:
             self._send(HTTPStatus.CONFLICT, "text/plain", b"game process not running\n")
             return
+        # On bare-Linux with the polkit rule in place, systemctl stop is
+        # the clean path — systemd state reflects reality + no spurious
+        # auto-restart. On k8s/compose where systemctl isn't reachable,
+        # fall through to the SIGTERM path (kubelet / compose restart
+        # policies will typically bring the game back).
+        if _systemctl_available():
+            ok, msg = systemctl_dispatch("stop")
+            if ok:
+                self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "systemctl"})
+                return
+            # Log + fall back to SIGTERM — don't strand the operator on
+            # a half-broken polkit config.
+            print(f"[server/stop] systemctl stop failed ({msg}); falling back to SIGTERM",
+                  file=sys.stderr, flush=True)
         ok, msg = signal_game(signal.SIGTERM)
         if not ok:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain",
@@ -1847,7 +1924,7 @@ class Handler(BaseHTTPRequestHandler):
                         "container — see helm chart)\n").encode())
             return
         RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
-        self._json(HTTPStatus.OK, {"ok": True, "detail": msg})
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "signal"})
 
     def _api_world_config_get(self, island_id: str):
         live_path = _world_desc_path(island_id)
@@ -1969,9 +2046,20 @@ class Handler(BaseHTTPRequestHandler):
         """Restart the game without applying any staged changes — the
         clean-state sibling to Apply+restart. Safe to call when no
         staged changes exist (the UI flips its button label based on
-        stagedConfigPending / stagedWorlds)."""
+        stagedConfigPending / stagedWorlds).
+
+        Prefers `systemctl restart` when the polkit rule is in place
+        (bare-Linux), falls back to SIGTERM + kubelet / compose / systemd
+        restart-on-exit otherwise."""
         if not allow_destructive():
             self._forbidden(); return
+        if _systemctl_available():
+            ok, msg = systemctl_dispatch("restart")
+            if ok:
+                self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "systemctl"})
+                return
+            print(f"[server/restart] systemctl restart failed ({msg}); falling back to SIGTERM",
+                  file=sys.stderr, flush=True)
         pid, _ = find_game_pid()
         if not pid:
             self._send(HTTPStatus.CONFLICT, "text/plain", b"game process not running\n")
@@ -1982,7 +2070,31 @@ class Handler(BaseHTTPRequestHandler):
                        (msg + "\n").encode())
             return
         RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
-        self._json(HTTPStatus.OK, {"ok": True, "detail": msg})
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "signal"})
+
+    def _api_server_start(self):
+        """Start the game process. Only meaningful on bare-Linux where
+        the UI can drive systemctl via the polkit rule — after a stop,
+        systemd won't auto-restart the service, so this is how the
+        operator brings it back.
+
+        On k8s / compose, the container supervisor keeps the process
+        running; a "start" button isn't applicable there, so we return
+        a 501 Not Implemented with a note instead of pretending."""
+        if not allow_destructive():
+            self._forbidden(); return
+        if not _systemctl_available():
+            self._send(HTTPStatus.NOT_IMPLEMENTED, "text/plain",
+                       ("start not available in this deployment — container "
+                        "supervisor (kubelet / compose / systemd) manages the "
+                        "lifecycle. Use /api/server/restart or toggle "
+                        "maintenance mode.\n").encode())
+            return
+        ok, msg = systemctl_dispatch("start")
+        if not ok:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", (msg + "\n").encode())
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "systemctl"})
 
     def _api_world_upload(self, island_id: str):
         """Receive a world tarball and extract into R5/Saved/.../Worlds/<islandId>/.

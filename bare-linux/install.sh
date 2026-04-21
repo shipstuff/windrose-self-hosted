@@ -214,6 +214,24 @@ ln -snf "${WINDROSE_INSTALL_DIR}" /opt/windrose-ui
 # the env file; the UI Idle-CPU card toggles the runtime override.
 install -m 0755 "${SCRIPTS_SRC}/patch-idle-cpu.py" /usr/local/bin/patch-idle-cpu.py
 
+# --- Polkit rule ------------------------------------------------------
+# Narrowly grant the steam user systemctl start/stop/restart access on
+# the windrose-* units only — so the admin UI can do a clean systemd
+# stop/restart without sudo. See bare-linux/polkit/50-windrose.rules
+# for the rule source + scope notes. If polkit isn't installed on this
+# host, skip — the UI transparently falls back to the SIGTERM-based
+# stop path (which works cross-service as long as the game runs as
+# the same user as the UI, which it does).
+POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+if [ -d "${POLKIT_RULES_DIR}" ]; then
+  install -m 0644 -o root -g root \
+    "${SCRIPT_DIR}/polkit/50-windrose.rules" \
+    "${POLKIT_RULES_DIR}/50-windrose.rules"
+  echo "[install] polkit rule installed at ${POLKIT_RULES_DIR}/50-windrose.rules"
+else
+  echo "[install] polkit not detected (${POLKIT_RULES_DIR} missing) — skipping rule; UI will use SIGTERM fallback"
+fi
+
 # --- Xvfb socket dir --------------------------------------------------
 install -d -m 1777 /tmp/.X11-unix
 

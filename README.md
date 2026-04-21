@@ -306,8 +306,9 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | PUT    | `/api/worlds/{islandId}/config`               | *destructive* | Stage per-world changes (writes `WorldDescription.staged.json`). Normalized on receive.  |
 | DELETE | `/api/worlds/{islandId}/config`               | *destructive* | Discard the staged per-world changes.                                                    |
 | POST   | `/api/worlds/{islandId}/upload`               | *destructive* | Upload a world tarball into `R5/Saved/.../Worlds/{id}/`. Requires the game to be stopped. |
-| POST   | `/api/server/restart`                         | *destructive* | SIGTERM the game process; supervisor brings it back. No config changes applied.          |
-| POST   | `/api/server/stop`                            | *destructive* | SIGTERM the game process. Kubelet / Docker / systemd restarts the container per usual.   |
+| POST   | `/api/server/restart`                         | *destructive* | Restart the game. Prefers `systemctl restart windrose-game.service` on bare-Linux (requires polkit rule from `bare-linux/polkit/50-windrose.rules`); falls back to SIGTERM + supervisor auto-restart on k8s / compose. |
+| POST   | `/api/server/stop`                            | *destructive* | Stop the game. On bare-Linux with polkit: `systemctl stop` (service stays inactive until Start). On k8s / compose: SIGTERM + supervisor restarts the container per usual. |
+| POST   | `/api/server/start`                           | *destructive* | Start the game service. Only available on bare-Linux (returns 501 on k8s/compose where the container supervisor owns the lifecycle). |
 | GET    | `/api/maintenance`                            | authed        | `{active, flagFile}` — whether the entrypoint will sleep on next boot instead of launching. |
 | POST   | `/api/maintenance`                            | *destructive* | `{active: bool, restart?: bool}` — toggle the flag file; `restart: true` also signals the game to stop now so it takes effect immediately. |
 | GET    | `/api/idle-cpu-patch`                         | authed        | Full state of the opt-in binary patch: MD5, detected patch state, env + override, needs-restart hint. |
