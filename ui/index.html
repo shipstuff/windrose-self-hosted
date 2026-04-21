@@ -223,6 +223,28 @@
         </div>
       </details>
 
+      <details class="row" id="directIpSection">
+        <summary>Direct IP Connection (advanced)</summary>
+        <p class="muted">
+          Bypasses Windrose's backend connectivity service — players join via a raw IP:port instead of an invite code.
+          Enable only if backend connectivity is blocked on your network, or you want LAN-only play.
+          <strong>Requires manual port-forwarding</strong> on your router (UDP, to the port below). Invite codes stop working while this is on.
+        </p>
+        <div class="form-grid row">
+          <label for="fUseDirect">Use Direct IP</label>
+          <div class="field"><input id="fUseDirect" type="checkbox"> <span class="muted">overrides the backend connectivity path</span></div>
+
+          <label for="fDirectAddr">Server address</label>
+          <div class="field"><input id="fDirectAddr" type="text" placeholder="reuses P2pProxyAddress if empty"></div>
+
+          <label for="fDirectPort">Server port</label>
+          <div class="field"><input id="fDirectPort" type="number" min="1" max="65535" step="1" placeholder="7777"></div>
+
+          <label for="fDirectProxy">Proxy address</label>
+          <div class="field"><input id="fDirectProxy" type="text" placeholder="0.0.0.0"> <span class="muted">only set if you're fronting with an explicit proxy</span></div>
+        </div>
+      </details>
+
       <details class="row" id="rawJsonWrapper">
         <summary>Raw JSON (advanced)</summary>
         <p class="muted">Two-way sync: typing here updates the form fields live (and vice versa). Server validates schema on stage. Invalid JSON just stops the sync until you fix it.</p>

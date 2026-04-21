@@ -60,6 +60,27 @@ finally:
   fi
 fi
 
+# Direct IP Connection (introduced in the 2026-04 Windrose patch).
+# When USE_DIRECT_CONNECTION=true, the game advertises a raw IP:port
+# instead of going through Windrose's connectivity services — players
+# bypass the backend matchmaker and invite codes stop working, clients
+# connect purely via your IP. Documented as an "advanced" option
+# requiring manual port forwarding on the operator's router. If unset
+# entirely, we leave all four Direct-IP fields alone in env-mode so
+# existing operators aren't silently opted in.
+: "${USE_DIRECT_CONNECTION:=}"
+: "${DIRECT_CONNECTION_SERVER_ADDRESS:=}"
+: "${DIRECT_CONNECTION_SERVER_PORT:=7777}"
+: "${DIRECT_CONNECTION_PROXY_ADDRESS:=0.0.0.0}"
+# When Direct IP is enabled and the server address isn't set, reuse the
+# same auto-detected IP as P2pProxyAddress — they're both "my LAN/WAN-
+# facing IP" from the same host's perspective, and forcing the operator
+# to set it twice is just a foot-gun.
+if [ "${USE_DIRECT_CONNECTION}" = "true" ] && [ -z "${DIRECT_CONNECTION_SERVER_ADDRESS}" ]; then
+  DIRECT_CONNECTION_SERVER_ADDRESS="${P2P_PROXY_ADDRESS}"
+  echo "$(timestamp) INFO: DIRECT_CONNECTION_SERVER_ADDRESS reusing P2P_PROXY_ADDRESS (${DIRECT_CONNECTION_SERVER_ADDRESS})"
+fi
+
 : "${FILES_WAIT_TIMEOUT_SECONDS:=0}"   # 0 = wait forever for the UI sidecar to populate
 : "${FILES_WAIT_POLL_SECONDS:=5}"
 : "${WINDROSE_CONFIG_MODE:=env}"
@@ -588,6 +609,7 @@ reconcile_server_config() {
       local jq_filter=''
       local stamp_pwprotected="false" stamp_password="false" stamp_name="false"
       local stamp_max="false" stamp_proxy="false" stamp_invite="false" stamp_island="false"
+      local stamp_dc_use="false" stamp_dc_addr="false" stamp_dc_port="false" stamp_dc_proxy="false"
       _decide() {
         # Args: flag-var, jq-path, kind, clause, log-label.
         local flag_var="$1" path="$2" kind="$3" clause="$4" label="$5"
@@ -620,7 +642,30 @@ reconcile_server_config() {
         _decide stamp_island '.ServerDescription_Persistent.WorldIslandId' string \
           '.ServerDescription_Persistent.WorldIslandId = $islandId' 'WorldIslandId'
       fi
+      # Direct IP fields — only stamp when USE_DIRECT_CONNECTION is set
+      # to any value (true/false). An unset env var means the operator
+      # hasn't opted into the feature; we leave all four Direct-IP keys
+      # exactly as they are on disk so existing deployments aren't
+      # silently flipped into Direct IP mode on upgrade.
+      if [ -n "${USE_DIRECT_CONNECTION}" ]; then
+        _decide stamp_dc_use '.ServerDescription_Persistent.UseDirectConnection' bool \
+          '.ServerDescription_Persistent.UseDirectConnection = $useDirect' 'UseDirectConnection'
+        _decide stamp_dc_addr '.ServerDescription_Persistent.DirectConnectionServerAddress' string \
+          '.ServerDescription_Persistent.DirectConnectionServerAddress = $dcAddr' 'DirectConnectionServerAddress'
+        _decide stamp_dc_port '.ServerDescription_Persistent.DirectConnectionServerPort' number \
+          '.ServerDescription_Persistent.DirectConnectionServerPort = $dcPort' 'DirectConnectionServerPort'
+        _decide stamp_dc_proxy '.ServerDescription_Persistent.DirectConnectionProxyAddress' string \
+          '.ServerDescription_Persistent.DirectConnectionProxyAddress = $dcProxy' 'DirectConnectionProxyAddress'
+      fi
 
+      # Normalize USE_DIRECT_CONNECTION to a real JSON bool so jq
+      # --argjson doesn't reject a missing/empty value. Defaults to
+      # false when the env is unset (the jq filter only runs if the
+      # operator opted in via one of the stamp flags anyway).
+      local use_direct_bool="false"
+      if [ "${USE_DIRECT_CONNECTION}" = "true" ] || [ "${USE_DIRECT_CONNECTION}" = "1" ]; then
+        use_direct_bool="true"
+      fi
       if [ -n "${jq_filter}" ]; then
         jq \
           --arg name "${SERVER_NAME}" \
@@ -630,6 +675,10 @@ reconcile_server_config() {
           --arg islandId "${WORLD_ISLAND_ID}" \
           --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
           --arg proxy "${P2P_PROXY_ADDRESS}" \
+          --argjson useDirect "${use_direct_bool}" \
+          --arg dcAddr "${DIRECT_CONNECTION_SERVER_ADDRESS}" \
+          --argjson dcPort "${DIRECT_CONNECTION_SERVER_PORT}" \
+          --arg dcProxy "${DIRECT_CONNECTION_PROXY_ADDRESS}" \
           "${jq_filter}" \
           "${WINDROSE_SERVER_CONFIG}" > "${WINDROSE_SERVER_CONFIG}.tmp" \
           && mv "${WINDROSE_SERVER_CONFIG}.tmp" "${WINDROSE_SERVER_CONFIG}"
@@ -656,6 +705,10 @@ reconcile_server_config() {
         --arg islandId "${WORLD_ISLAND_ID}" \
         --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
         --arg proxy "${P2P_PROXY_ADDRESS}" \
+        --argjson useDirect "${use_direct_bool}" \
+        --arg dcAddr "${DIRECT_CONNECTION_SERVER_ADDRESS}" \
+        --argjson dcPort "${DIRECT_CONNECTION_SERVER_PORT}" \
+        --arg dcProxy "${DIRECT_CONNECTION_PROXY_ADDRESS}" \
         --arg first "${first_boot}" \
         --arg s_pwp "${stamp_pwprotected}" \
         --arg s_pw "${stamp_password}" \
@@ -663,9 +716,15 @@ reconcile_server_config() {
         --arg s_max "${stamp_max}" \
         --arg s_proxy "${stamp_proxy}" \
         --arg s_invite "${stamp_invite}" \
-        --arg s_island "${stamp_island}" '
+        --arg s_island "${stamp_island}" \
+        --arg s_dcUse "${stamp_dc_use}" \
+        --arg s_dcAddr "${stamp_dc_addr}" \
+        --arg s_dcPort "${stamp_dc_port}" \
+        --arg s_dcProxy "${stamp_dc_proxy}" \
+        --arg direct_opt_in "${USE_DIRECT_CONNECTION}" '
         ($base.ServerDescription_Persistent // {}) as $b
         | ($first == "true") as $seed
+        | ($direct_opt_in != "") as $dc_opted_in
         | { ServerDescription_Persistent: (
             $b
             | (if $seed or $s_pwp   == "true" then .IsPasswordProtected = $protected else . end)
@@ -675,6 +734,10 @@ reconcile_server_config() {
             | (if $seed or $s_proxy == "true" then .P2pProxyAddress     = $proxy     else . end)
             | (if $s_invite == "true"                then .InviteCode    = $invite   else . end)
             | (if $s_island == "true"                then .WorldIslandId = $islandId else . end)
+            | (if ($seed and $dc_opted_in) or $s_dcUse   == "true" then .UseDirectConnection          = $useDirect else . end)
+            | (if ($seed and $dc_opted_in) or $s_dcAddr  == "true" then .DirectConnectionServerAddress = $dcAddr    else . end)
+            | (if ($seed and $dc_opted_in) or $s_dcPort  == "true" then .DirectConnectionServerPort   = $dcPort    else . end)
+            | (if ($seed and $dc_opted_in) or $s_dcProxy == "true" then .DirectConnectionProxyAddress = $dcProxy   else . end)
           ) }' > "${shadow}.tmp" && mv "${shadow}.tmp" "${shadow}"
       ;;
     managed)

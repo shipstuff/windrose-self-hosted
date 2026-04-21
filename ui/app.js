@@ -36,6 +36,10 @@ const fIsProtected   = document.getElementById("fIsProtected");
 const fPassword      = document.getElementById("fPassword");
 const fWorldId       = document.getElementById("fWorldId");
 const fP2pAddr       = document.getElementById("fP2pAddr");
+const fUseDirect     = document.getElementById("fUseDirect");
+const fDirectAddr    = document.getElementById("fDirectAddr");
+const fDirectPort    = document.getElementById("fDirectPort");
+const fDirectProxy   = document.getElementById("fDirectProxy");
 const fPSID          = document.getElementById("fPSID");
 const fInvite        = document.getElementById("fInvite");
 const configEditor        = document.getElementById("configEditor");
@@ -440,6 +444,10 @@ function populateFormFromDoc(sd) {
     fIsProtected.checked = !!p.IsPasswordProtected;
     fPassword.value = p.Password || "";
     fP2pAddr.value = p.P2pProxyAddress || "";
+    fUseDirect.checked = !!p.UseDirectConnection;
+    fDirectAddr.value  = p.DirectConnectionServerAddress || "";
+    fDirectPort.value  = p.DirectConnectionServerPort ?? 7777;
+    fDirectProxy.value = p.DirectConnectionProxyAddress || "";
     fPSID.textContent = p.PersistentServerId || "-";
     fInvite.textContent = p.InviteCode || "-";
     if (p.WorldIslandId) {
@@ -528,6 +536,17 @@ function buildConfigFromForm() {
   p.IsPasswordProtected = !!fIsProtected.checked;
   p.Password            = fPassword.value;
   p.P2pProxyAddress     = fP2pAddr.value;
+  // Direct IP fields — only emit when the checkbox is set OR the
+  // underlying doc already has them. This avoids silently adding
+  // Direct-IP keys to configs that predate the feature.
+  const hasDirectKeys = ("UseDirectConnection" in p) || fUseDirect.checked ||
+                        fDirectAddr.value || fDirectProxy.value;
+  if (hasDirectKeys) {
+    p.UseDirectConnection          = !!fUseDirect.checked;
+    p.DirectConnectionServerAddress = fDirectAddr.value;
+    p.DirectConnectionServerPort   = Number(fDirectPort.value) || 7777;
+    p.DirectConnectionProxyAddress = fDirectProxy.value || "0.0.0.0";
+  }
   if (fWorldId.value) p.WorldIslandId = fWorldId.value;
   return base;
 }
@@ -917,9 +936,11 @@ configSaveBtn.addEventListener("click", () => {
   stageConfig(parsed);
 });
 
-[fServerName, fMaxPlayers, fPassword, fP2pAddr, fWorldId].forEach(el =>
+[fServerName, fMaxPlayers, fPassword, fP2pAddr,
+ fDirectAddr, fDirectPort, fDirectProxy, fWorldId].forEach(el =>
   el.addEventListener("input", syncFormToRaw));
-fIsProtected.addEventListener("change", syncFormToRaw);
+[fIsProtected, fUseDirect].forEach(el =>
+  el.addEventListener("change", syncFormToRaw));
 configEditor.addEventListener("input", syncRawToForm);
 
 // Global restart button — dynamic label (managed in applyStatus).

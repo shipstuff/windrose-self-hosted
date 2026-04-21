@@ -165,6 +165,15 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `WORLD_PRESET_TYPE` | `Medium` | `Easy`, `Medium`, `Hard`, `Custom` |
 | `P2P_PROXY_ADDRESS` | auto-detected (UDP-connect getsockname trick; falls back to `0.0.0.0` if the trick fails) | The ICE host candidate advertised to clients. Override only if auto-detect picks the wrong interface. |
 
+**Direct IP Connection** (Windrose 2026-04+). Alternative to the backend connectivity service — players join via a raw IP:port instead of an invite code. Leave `USE_DIRECT_CONNECTION` empty (the default) unless your ISP blocks Windrose's backend. Enabling disables invite codes, advertises the address to connecting clients, and **requires you to manually port-forward UDP on your router**.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `USE_DIRECT_CONNECTION` | empty (feature off) | Set `true` to opt in, `false` to opt out. Empty leaves the field alone on existing configs. |
+| `DIRECT_CONNECTION_SERVER_ADDRESS` | reuses `P2P_PROXY_ADDRESS` when empty | The IP clients connect to. Can be a LAN IP (LAN-only play) or your public IP (router port-forwarding). |
+| `DIRECT_CONNECTION_SERVER_PORT` | `7777` | UDP port you forwarded on the router. |
+| `DIRECT_CONNECTION_PROXY_ADDRESS` | `0.0.0.0` | Only override if you're fronting with an explicit proxy. |
+
 **Runtime behavior**
 | Env var | Default | Purpose |
 |---|---|---|

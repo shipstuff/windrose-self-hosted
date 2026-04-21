@@ -1203,6 +1203,33 @@ def validate_server_description(doc: Any) -> list[str]:
     need("PersistentServerId", str, lambda k, v: check_str(k, v, _HEX32, 32, 32))
     need("InviteCode", str, lambda k, v: check_str(k, v, _INVITE, 6, 16))
     need("WorldIslandId", str, lambda k, v: check_str(k, v, _HEX32, 32, 32))
+    # Direct IP Connection (Windrose 2026-04+). All four fields are
+    # optional — older saved configs predate them. Only validate when
+    # present. Shape mirrors the live dedicated-server defaults:
+    #   UseDirectConnection: bool
+    #   DirectConnectionServerAddress: string (host or IP; "" allowed
+    #     when UseDirectConnection is false)
+    #   DirectConnectionServerPort: int 1-65535
+    #   DirectConnectionProxyAddress: string (typically "0.0.0.0" when
+    #     the operator isn't fronting with an explicit proxy)
+    def optional(key, typ, extra=None):
+        if key not in p:
+            return
+        if not isinstance(p[key], typ):
+            errs.append(f"ServerDescription_Persistent.{key}: expected {typ.__name__}, got {type(p[key]).__name__}")
+            return
+        if extra:
+            extra(key, p[key])
+    optional("UseDirectConnection", bool)
+    optional("DirectConnectionServerAddress", str, lambda k, v: check_str(k, v, None, 0, 255))
+    optional("DirectConnectionServerPort", int,
+             lambda k, v: errs.append(f"ServerDescription_Persistent.{k}: must be 1-65535") if not (1 <= v <= 65535) else None)
+    optional("DirectConnectionProxyAddress", str, lambda k, v: check_str(k, v, None, 0, 255))
+    # UseDirectConnection=true requires a non-empty server address —
+    # an empty address under Direct IP mode is the classic silent-fail
+    # footgun (same shape as the P2pProxyAddress=0.0.0.0 bounce).
+    if p.get("UseDirectConnection") is True and not p.get("DirectConnectionServerAddress"):
+        errs.append("ServerDescription_Persistent.DirectConnectionServerAddress: required when UseDirectConnection is true")
     return errs
 
 def _tagname_of(key: str) -> str:

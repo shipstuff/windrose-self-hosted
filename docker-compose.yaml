@@ -23,6 +23,16 @@ services:
       # 0.0.0.0 breaks client-connect — the game advertises it verbatim as
       # its ICE host candidate and Windows clients bounce to the main menu.
       P2P_PROXY_ADDRESS: ${P2P_PROXY_ADDRESS:-}
+      # Direct IP Connection (Windrose 2026-04). Leave USE_DIRECT_CONNECTION
+      # empty to keep the default backend-connectivity mode. Set to true
+      # to advertise a raw IP:port instead — invite codes stop working in
+      # this mode, clients join only via DIRECT_CONNECTION_SERVER_ADDRESS.
+      # When enabled and the address is empty, entrypoint reuses
+      # P2P_PROXY_ADDRESS. Requires manual port-forwarding on your router.
+      USE_DIRECT_CONNECTION: ${USE_DIRECT_CONNECTION:-}
+      DIRECT_CONNECTION_SERVER_ADDRESS: ${DIRECT_CONNECTION_SERVER_ADDRESS:-}
+      DIRECT_CONNECTION_SERVER_PORT: ${DIRECT_CONNECTION_SERVER_PORT:-7777}
+      DIRECT_CONNECTION_PROXY_ADDRESS: ${DIRECT_CONNECTION_PROXY_ADDRESS:-0.0.0.0}
       WINDROSE_CONFIG_MODE: ${WINDROSE_CONFIG_MODE:-env}
       WINDROSE_LAUNCH_STRATEGY: ${WINDROSE_LAUNCH_STRATEGY:-shipping}
       FILES_WAIT_TIMEOUT_SECONDS: ${FILES_WAIT_TIMEOUT_SECONDS:-0}
