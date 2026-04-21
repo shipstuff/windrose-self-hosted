@@ -283,6 +283,125 @@ def test_list_and_restore_game_backup():
             srv.shutdown()
 
 
+def test_backup_download_upload_roundtrip():
+    """The symmetric flow: operator creates a backup, downloads it over
+    HTTP, uploads the same bytes (to simulate the new host in a
+    migration), restores it. Asserts the restored world matches the
+    original bit-for-bit.
+
+    This is what the E2E prod→canary test exercises — catches bugs in
+    archive framing, extraction paths, and the pin-prefix naming.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # "Source" host: create a real backup.
+        r5_src = Path(tmp) / "src" / "R5"
+        backup_root_src = Path(tmp) / "src" / "backups"
+        backup_root_src.mkdir(parents=True)
+        _seed_r5(r5_src)
+        srv_src = _TestServer(r5_src, backup_root_src)
+        try:
+            _, created = _json_req("POST", f"{srv_src.base}/api/backups")
+            bid = created["id"]
+            # Download it.
+            code, tarball = _req("GET", f"{srv_src.base}/api/backups/{bid}/download")
+            assert code == 200, f"download failed: {code}"
+            assert tarball[:2] == b"\x1f\x8b", "not gzip-framed"
+            assert len(tarball) > 100, "suspiciously small tarball"
+        finally:
+            srv_src.shutdown()
+
+        # "Destination" host: start fresh, upload the same bytes, restore.
+        r5_dst = Path(tmp) / "dst" / "R5"
+        backup_root_dst = Path(tmp) / "dst" / "backups"
+        backup_root_dst.mkdir(parents=True)
+        # Seed the destination with DIFFERENT content so we can verify
+        # the restore actually replaces it with source's.
+        _seed_r5(r5_dst)
+        (r5_dst / "ServerDescription.json").write_text('{"ServerDescription_Persistent":{"ServerName":"DESTINATION"}}')
+        srv_dst = _TestServer(r5_dst, backup_root_dst)
+        try:
+            code, resp = _req("POST", f"{srv_dst.base}/api/backups/upload",
+                              body=tarball,
+                              headers={"Content-Type": "application/gzip"})
+            assert code == 200, f"upload failed: {code} {resp}"
+            imported = json.loads(resp)
+            assert imported["id"].startswith("manual-imported-"), imported
+            assert imported["pinned"] is True, imported
+            # Restore uses the id we got back.
+            code, restore_resp = _json_req("POST",
+                f"{srv_dst.base}/api/backups/{imported['id']}/restore")
+            assert code == 200, f"restore failed: {code} {restore_resp}"
+            # Destination's identity file should now match source's.
+            sd = json.loads((r5_dst / "ServerDescription.json").read_text())
+            name = sd.get("ServerDescription_Persistent", {}).get("ServerName")
+            assert name == "http-test", f"server name not restored (stuck on destination?): {name}"
+            # RocksDB content byte-for-byte matches the seed.
+            world = (r5_dst / "Saved" / "SaveProfiles" / "Default" /
+                     "RocksDB" / "0.10.0" / "Worlds" / "ABC123")
+            assert (world / "MANIFEST-000001").read_bytes() == b"manifest"
+        finally:
+            srv_dst.shutdown()
+
+
+def test_backup_download_unknown_id_404():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, _ = _req("GET", f"{srv.base}/api/backups/nope/download")
+            assert code == 404, code
+        finally:
+            srv.shutdown()
+
+
+def test_backup_upload_rejects_garbage():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            # Not a gzip, not a tar, just random bytes.
+            code, _ = _req("POST", f"{srv.base}/api/backups/upload",
+                           body=b"not a tarball at all",
+                           headers={"Content-Type": "application/octet-stream"})
+            assert code == 400, f"expected 400 for non-archive body, got {code}"
+        finally:
+            srv.shutdown()
+
+
+def test_backup_upload_rejects_tar_without_saved():
+    """A tarball that's structurally valid but missing the Saved/
+    directory should be rejected with 400, not land as a broken
+    backup that later silently corrupts a restore."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        # Build a tarball that only has ServerDescription.json.
+        import io, tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            info = tarfile.TarInfo("ServerDescription.json")
+            data = b'{"not":"real"}'
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, body = _req("POST", f"{srv.base}/api/backups/upload",
+                              body=buf.getvalue(),
+                              headers={"Content-Type": "application/gzip"})
+            assert code == 400, f"expected 400 for missing Saved/, got {code}: {body}"
+            assert b"Saved" in body, body
+        finally:
+            srv.shutdown()
+
+
 def test_backup_config_get_put_roundtrip():
     """GET returns defaults; PUT validates + persists; GET sees the update.
     Exercises the full UI edit-save-refresh loop."""
@@ -384,4 +503,8 @@ if __name__ == "__main__":
     _run("restore unknown game backup returns 404", test_restore_unknown_game_backup_returns_404)
     _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
+    _run("backup download → upload → restore round-trip", test_backup_download_upload_roundtrip)
+    _run("backup download unknown id → 404", test_backup_download_unknown_id_404)
+    _run("backup upload rejects non-archive garbage", test_backup_upload_rejects_garbage)
+    _run("backup upload rejects tar missing Saved/", test_backup_upload_rejects_tar_without_saved)
     print("\nall HTTP integration tests passed")

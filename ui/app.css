@@ -223,6 +223,10 @@ td.mono { font-family: ui-monospace, monospace; }
 .tag-auto           { background: #2a3a2a; color: #88c088; border: 1px solid #3a5a3a; }
 .tag-manual         { background: #2a2a3a; color: #8888c0; border: 1px solid #3a3a5a; }
 .tag-manual-pinned  { background: #3a2a2a; color: #c08888; border: 1px solid #5a3a3a; }
+.btn-link { display: inline-block; margin-right: 0.4rem; padding: 0.15rem 0.5rem; font-size: 0.85rem; color: var(--text); text-decoration: none; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; }
+.btn-link:hover { background: var(--surface-alt); }
+.inline-file-label { display: inline-flex; gap: 0.4rem; align-items: center; font-size: 0.85rem; color: var(--text-muted); margin-left: 0.5rem; }
+.inline-file-label input[type=file] { font-size: 0.8rem; }
 .form-grid { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1rem; align-items: center; }
 .form-grid > label { color: var(--text-muted); }
 .form-grid > .field { display: flex; gap: 0.5rem; align-items: center; }

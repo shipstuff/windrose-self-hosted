@@ -329,6 +329,33 @@ If `ServerDescription.json` was deleted, mangled, or replaced (e.g. by a clumsy 
 
 If no backup has the right `ServerDescription.json` either, the world is unrecoverable from the backend's point of view — the save file is still on disk but there's no way to bind it back to an island without the PSID that originally owned it.
 
+### 5. Migrate to a new host
+
+Moving your server between hosts (home-lab → VPS, k8s → bare-Linux, old node → new node) is a symmetric backup round-trip:
+
+1. **Source host** — admin console → Backups → *Ours* tab → **Download** on the row you want (or `GET /api/backups/{id}/download`). Streams the full tree (Saved/ + ServerDescription.json + WorldDescription.json + your `.backup-config.json`) as a single `.tar.gz`.
+2. **New host** — stand up a fresh Windrose deployment (helm install / docker compose / `sudo ./bare-linux/install.sh`). Don't start it yet, or do — either works.
+3. **New host's admin UI** → Backups → *Import backup (.tar.gz)* → pick the file → **Upload + pin**. Server lands it as `manual-imported-<ts>` (pinned — retention won't touch it) and returns the id.
+4. Click **Restore** on that row. The existing `/api/backups/{id}/restore` flow handles the swap — wipes whatever live `Saved/` the new host has, drops in the imported tree, restores the original `ServerDescription.json`, and requests a restart.
+5. Next boot, the backend looks up your preserved PSID and hands back the same `WorldIslandId`. Same invite code, same world, same players.
+
+CLI equivalent:
+```bash
+# Source:
+curl -s -u admin:$PASSWORD -o bkp.tar.gz \
+  http://<src-host>:28080/api/backups/<backup-id>/download
+
+# New host:
+curl -s -u admin:$PASSWORD --data-binary @bkp.tar.gz \
+  -H 'Content-Type: application/gzip' -H 'X-Filename: bkp.tar.gz' \
+  http://<new-host>:28080/api/backups/upload
+# Response is JSON with the new id — use it in the restore:
+curl -s -u admin:$PASSWORD -X POST \
+  http://<new-host>:28080/api/backups/<returned-id>/restore
+```
+
+Works across deployment surfaces — you can download from a k8s host and upload to a bare-Linux VPS (or vice versa). The only thing that won't migrate is the idle-CPU patch binary md5 marker; the new host's entrypoint will re-patch on first boot if `WINDROSE_PATCH_IDLE_CPU=1` is set.
+
 ### Prevention
 
 - **Pin before risky ops.** Before manually editing config files, running the idle-CPU patch for the first time, or swapping `WindowsServer/` via the upload flow, click **Pin** on the most recent backup in the *Ours* tab (or `POST /api/backups/{id}/pin`). Pinned entries ignore retention — they survive until you click Unpin.
@@ -379,6 +406,8 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | POST   | `/api/backups/{id}/pin`                       | *destructive* | Rename an existing backup to exempt it from retention. Returns the new id. |
 | POST   | `/api/backups/{id}/unpin`                     | *destructive* | Reverse of pin. |
 | POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. **This is the only supported recovery path — never raw-`cp` parts of a backup in place, the game's internal state under `Saved/` expects the whole tree to be consistent.** Fires `backup.restored`. |
+| GET    | `/api/backups/{id}/download`                  | authed        | Stream a full backup (Saved/ + ServerDescription + WorldDescription + .backup-config + .idle-patch-override) as `.tar.gz`. Same shape `POST /api/backups/upload` accepts — the two form a round-trip for server migration (download on host A → upload on host B → restore). |
+| POST   | `/api/backups/upload`                         | *destructive* | Accept a `.tar.gz` (shape from Download above), extract into a new `manual-imported-<ts>/` pinned backup dir, and return its id. Caller typically follows with `POST /api/backups/{id}/restore` to complete a migration. Fires `backup.created` with `source: "imported"`. |
 | GET    | `/api/backup-config`                          | authed        | Current effective auto-backup config (idleMinutes, floorHours, retainCount, retainDays) + the env-seeded defaults + last-run status. |
 | PUT    | `/api/backup-config`                          | *destructive* | Persist auto-backup config atomically to `$R5_DIR/.backup-config.json`. Validates range + type; file is authoritative thereafter. |
 | GET    | `/api/game-backups`                           | authed        | Windrose's own auto-backups under `SaveProfiles/Default_Backups/` (world-only snapshots on the game's own schedule). |

@@ -389,7 +389,10 @@ function renderBackups(backups) {
         ${escapeHtml(display)}
       </td>
       <td>${formatBytes(b.sizeBytes)}</td>
-      <td><button class="danger restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button></td>`;
+      <td>
+        <a class="btn-link download-btn" href="/api/backups/${encodeURIComponent(b.id)}/download" data-id="${escapeHtml(b.id)}" title="Download as .tar.gz">Download</a>
+        <button class="danger restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button>
+      </td>`;
     backupsBody.appendChild(tr);
   });
   backupsBody.querySelectorAll(".restore-btn").forEach(b => {
@@ -398,6 +401,32 @@ function renderBackups(backups) {
       log(`restoring ${b.dataset.id}...`);
       const res = await authFetch(`/api/backups/${b.dataset.id}/restore`, { method: "POST" });
       log(`${res.ok ? "restore ok" : "restore failed"}: ${await res.text()}`);
+    });
+  });
+  // Download is a plain href but we need to attach the auth header so
+  // the browser's Basic-auth challenge doesn't trip the XHR-suppress
+  // codepath. Intercept the click and drive the download through
+  // authFetch + a Blob URL.
+  backupsBody.querySelectorAll(".download-btn").forEach(a => {
+    a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const id = a.dataset.id;
+      log(`downloading ${id}...`);
+      const res = await authFetch(`/api/backups/${id}/download`);
+      if (!res.ok) {
+        log(`download failed: ${res.status} ${await res.text()}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `windrose-backup-${id}.tar.gz`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      log(`downloaded ${id} (${blob.size} bytes)`);
     });
   });
 }
@@ -1113,6 +1142,49 @@ backupCreateBtn.addEventListener("click", async () => {
   const res = await authFetch("/api/backups", { method: "POST" });
   log(`${res.ok ? "backup ok" : "backup failed"}: ${await res.text()}`);
   loadBackups();
+});
+
+// Import: counterpart to per-row Download. Picks up the file from the
+// input, streams it to /api/backups/upload with X-Filename so the
+// server can use the filename hint when picking a decoder (tar vs zip).
+// Response contains the new manual-imported-* id; we surface it in the
+// status line so the operator can click Restore on the right row.
+const backupImportFile   = document.getElementById("backupImportFile");
+const backupImportBtn    = document.getElementById("backupImportBtn");
+const backupImportStatus = document.getElementById("backupImportStatus");
+backupImportBtn.addEventListener("click", async () => {
+  const file = backupImportFile.files?.[0];
+  if (!file) {
+    backupImportStatus.textContent = "pick a .tar.gz first";
+    return;
+  }
+  backupImportStatus.textContent = `uploading ${file.name} (${file.size} bytes)...`;
+  backupImportBtn.disabled = true;
+  try {
+    const res = await authFetch("/api/backups/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/gzip",
+        "X-Filename": file.name,
+      },
+      body: file,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      backupImportStatus.textContent = `upload failed (${res.status}): ${text}`;
+      log(`backup import failed: ${text}`);
+      return;
+    }
+    const body = JSON.parse(text);
+    backupImportStatus.textContent = `imported as ${body.id} (pinned) — click Restore on its row to swap it in.`;
+    log(`imported ${body.id}`);
+    backupImportFile.value = "";
+    loadBackups();
+  } catch (err) {
+    backupImportStatus.textContent = `upload error: ${err}`;
+  } finally {
+    backupImportBtn.disabled = false;
+  }
 });
 
 const IDLE_PATCH_DISCLAIMER =

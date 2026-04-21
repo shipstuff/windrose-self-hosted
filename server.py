@@ -1409,6 +1409,84 @@ def restore_identity(preserve: Path) -> None:
         if s.is_file():
             shutil.copy2(s, R5_DIR / name)
 
+def import_backup_archive(body_stream, content_length: int, filename: str) -> dict:
+    """Receive a tarball from the `/api/backups/upload` endpoint, extract
+    it, and land it as a new pinned backup under ``BACKUP_ROOT``.
+
+    Expected archive shape (what ``GET /api/backups/{id}/download`` emits):
+      - top-level ``Saved/`` directory (required)
+      - top-level ``ServerDescription.json`` (optional but recommended —
+        without it, a restore on the destination host mints a fresh PSID
+        and orphans the save from the backend's island mapping)
+      - top-level ``WorldDescription.json`` (optional)
+      - any of ``.backup-config.json``, ``.idle-patch-override``,
+        ``.auto`` (passed through, no semantic meaning here)
+
+    Returns a dict shaped like ``create_backup()``. Always prefixes the
+    new id with ``manual-imported-`` so the backup is pinned (the
+    operator explicitly brought this file over; retention shouldn't be
+    allowed to evict it until they unpin).
+    """
+    work = Path(tempfile.mkdtemp(prefix="windrose-backup-import-"))
+    try:
+        upload = work / "upload.bin"
+        with upload.open("wb") as out:
+            remaining = content_length
+            while remaining > 0:
+                chunk = body_stream.read(min(UPLOAD_CHUNK, remaining))
+                if not chunk:
+                    break
+                out.write(chunk)
+                remaining -= len(chunk)
+        stage = work / "stage"
+        stage.mkdir()
+        try:
+            extract_archive(upload, stage, filename)
+        except (tarfile.TarError, zipfile.BadZipFile, OSError) as e:
+            # extract_archive routes to tarfile/zipfile based on filename
+            # or magic bytes — either library can raise when the body is
+            # truncated, wrong format, or just garbage. Re-raise as
+            # ValueError so the handler maps to 400 instead of 500.
+            raise ValueError(f"could not extract archive: {e}")
+        # Accept either a tarball that's rooted at `Saved/` + siblings,
+        # OR a single top-level dir containing those (defensive against
+        # download tools that wrap in an extra folder).
+        root = stage
+        entries = [p for p in stage.iterdir() if not p.name.startswith(".")]
+        if len(entries) == 1 and entries[0].is_dir() and not (stage / "Saved").is_dir():
+            root = entries[0]
+        if not (root / "Saved").is_dir():
+            raise ValueError("archive does not contain a Saved/ directory at its top level")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        new_id = f"{BACKUP_PIN_PREFIX}imported-{ts}"
+        dst = BACKUP_ROOT / new_id
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        # Move (not copy) to atomically place the extracted tree; a
+        # rename on the same filesystem is effectively free.
+        shutil.move(str(root), str(dst))
+        # Pinned by prefix — retention won't touch it. Return the same
+        # shape as create_backup() so UI + tests can treat it uniformly.
+        return {"id": new_id, "path": str(dst), "pinned": True, "source": "imported"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def stream_backup_archive(bid: str, wfile) -> None:
+    """Stream an existing backup directory as .tar.gz to ``wfile``.
+
+    Unlike ``_api_saves_download``, there's no scratch-snapshot step:
+    backup dirs are immutable once written (create_backup runs a single
+    copytree and never touches the tree again), so we can tar them
+    in-place without RocksDB-compaction races.
+    """
+    src = BACKUP_ROOT / bid
+    if not src.is_dir():
+        raise FileNotFoundError(bid)
+    with tarfile.open(fileobj=wfile, mode="w|gz") as tf:
+        for entry in sorted(src.iterdir()):
+            tf.add(entry, arcname=entry.name)
+
+
 def handle_upload(body_stream, content_length: int, filename: str) -> dict:
     work = Path(tempfile.mkdtemp(prefix="windrose-upload-"))
     try:
@@ -1641,6 +1719,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/server/start",       "_api_server_start"),
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
+        ("POST",   "/api/backups/upload",     "_api_backups_upload"),
         ("GET",    "/api/backup-config",      "_api_backup_config_get"),
         ("PUT",    "/api/backup-config",      "_api_backup_config_put"),
         ("GET",    "/api/game-backups",       "_api_game_backups_list"),
@@ -1688,6 +1767,13 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/(pin|unpin)$", path)
         if method == "POST" and m:
             self._api_backups_set_pin(m.group(1), m.group(2) == "pin")
+            return
+        # Dynamic: /api/backups/{id}/download — stream full backup as tar.gz.
+        # Regex excludes 'upload' so POST /api/backups/upload (the import
+        # endpoint) isn't accidentally parsed as {id}='upload'/download.
+        m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/download$", path)
+        if method == "GET" and m and m.group(1) != "upload":
+            self._api_backups_download(m.group(1))
             return
         # Dynamic: /api/game-backups/{ts}/restore — restore one of
         # Windrose's own Default_Backups/ entries onto the live tree.
@@ -2226,6 +2312,46 @@ class Handler(BaseHTTPRequestHandler):
         request_restart()
         fire_event("backup.restored", backupId=bid)
         self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True})
+
+    def _api_backups_download(self, bid: str):
+        """Stream a whole backup directory as .tar.gz. Authed (not
+        destructive — it's a read). The tarball shape matches what
+        POST /api/backups/upload expects, so the two together form a
+        symmetric round-trip for server migration."""
+        src = BACKUP_ROOT / bid
+        if not src.is_dir():
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such backup\n"); return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/gzip")
+        # Use the backup id as the filename stem so operators ending up
+        # with multiple downloads can tell them apart on disk.
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="windrose-backup-{bid}.tar.gz"')
+        self.end_headers()
+        try:
+            stream_backup_archive(bid, self.wfile)
+        except Exception as e:  # noqa: BLE001 — client likely hung up mid-stream
+            print(f"[backup:download] {bid} streaming error: {e}", file=sys.stderr, flush=True)
+
+    def _api_backups_upload(self):
+        """Accept a backup tarball and land it as a new pinned backup.
+        Returns the id so the caller can immediately hit
+        /api/backups/{id}/restore to complete the transplant."""
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain",
+                       b"Content-Length required (streaming upload)\n"); return
+        filename = self.headers.get("X-Filename", "windrose-backup.tar.gz")
+        try:
+            bkp = import_backup_archive(self.rfile, length, filename)
+        except ValueError as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode()); return
+        except Exception as e:  # noqa: BLE001
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
+        fire_event("backup.created", backupId=bkp["id"], source="imported")
+        self._json(HTTPStatus.OK, bkp)
 
     def _api_backup_config_get(self):
         cfg = effective_backup_config()

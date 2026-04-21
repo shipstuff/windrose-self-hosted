@@ -275,7 +275,19 @@
         </table>
         <div class="row">
           <button id="backupCreateBtn" class="danger">Create backup now</button>
+          <!-- Upload is the inbound half of the server-migration round-trip.
+               Emit the same .tar.gz that the per-row Download button
+               produces, the server lands it as a pinned imported- backup
+               and returns its id; operator then hits Restore to swap it
+               in. Lives here (card-level) not per-row because there's no
+               row to hang it off — the import doesn't exist yet. -->
+          <label class="inline-file-label">
+            Import backup (.tar.gz):
+            <input id="backupImportFile" type="file" accept=".tar.gz,.tgz,application/gzip">
+          </label>
+          <button id="backupImportBtn" class="danger" type="button">Upload + pin</button>
         </div>
+        <p id="backupImportStatus" class="muted"></p>
       </div>
 
       <div id="backupPaneGame" class="tab-pane hidden">
