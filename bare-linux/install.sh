@@ -45,26 +45,22 @@ WINDROSE_INSTALL_DIR="${WINDROSE_INSTALL_DIR:-/opt/windrose}"
 WINDROSE_ENV_DIR="${WINDROSE_ENV_DIR:-/etc/windrose}"
 WINDROSE_ENV_FILE="${WINDROSE_ENV_FILE:-${WINDROSE_ENV_DIR}/windrose.env}"
 
-# Safe-by-default: bind the admin UI to loopback. Exposing it publicly
-# (UI_BIND=0.0.0.0) without UI_PASSWORD set is a foot-gun on any VPS,
-# so the operator has to explicitly flip both knobs.
-UI_BIND="${UI_BIND:-127.0.0.1}"
-UI_PORT="${UI_PORT:-28080}"
-UI_PASSWORD="${UI_PASSWORD:-}"
-UI_ENABLE_ADMIN_WITHOUT_PASSWORD="${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}"
-
-# Webhook knobs. All optional; if the URL vars are empty the
-# EventDetector thread still runs but skips dispatch.
-WINDROSE_WEBHOOK_URL="${WINDROSE_WEBHOOK_URL:-}"
-WINDROSE_DISCORD_WEBHOOK_URL="${WINDROSE_DISCORD_WEBHOOK_URL:-}"
-WINDROSE_WEBHOOK_EVENTS="${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}"
-WINDROSE_WEBHOOK_POLL_SECONDS="${WINDROSE_WEBHOOK_POLL_SECONDS:-15}"
-WINDROSE_WEBHOOK_TIMEOUT="${WINDROSE_WEBHOOK_TIMEOUT:-5}"
+# DO NOT pre-assign defaults for managed keys here — the merge loop
+# below pulls values from the existing env file, but only if the shell
+# variable is *unset*. Assigning empty strings as defaults ahead of
+# time would make "operator didn't pass a CLI override" (unset)
+# indistinguishable from "operator explicitly passed empty" (set to
+# ""), so merge would skip the existing env's non-empty value and the
+# heredoc would write the empty default.  Regression 2026-04-21:
+# re-running install.sh silently wiped UI_PASSWORD on the VPS. Defaults
+# now live inline in the heredoc (UI_PASSWORD=${UI_PASSWORD:-}) where
+# they only apply if still unset post-merge.
 
 # Warn if the operator is reaching for a publicly-exposed UI without
 # a password. Not fatal — compose / bare-Linux have legitimate
 # LAN-only deploys where this is fine — but loud so it's deliberate.
-if [ "${UI_BIND}" = "0.0.0.0" ] && [ -z "${UI_PASSWORD}" ] && [ "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}" != "true" ]; then
+# Uses inline ${:-} so the check works even with no pre-assignment.
+if [ "${UI_BIND:-127.0.0.1}" = "0.0.0.0" ] && [ -z "${UI_PASSWORD:-}" ] && [ "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}" != "true" ]; then
   printf '\033[33m[install] WARN: UI_BIND=0.0.0.0 with no UI_PASSWORD.\n'
   printf '          The admin console will refuse destructive routes\n'
   printf '          without credentials, but anyone on the internet can\n'
@@ -344,10 +340,10 @@ FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
 # "1" -> entrypoint patches the EXE on every start (idempotent).
 # The UI Idle-CPU card can flip this per-host without editing this file.
 WINDROSE_PATCH_IDLE_CPU=${WINDROSE_PATCH_IDLE_CPU:-0}
-UI_BIND=${UI_BIND}
-UI_PORT=${UI_PORT}
-UI_PASSWORD=${UI_PASSWORD}
-UI_ENABLE_ADMIN_WITHOUT_PASSWORD=${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}
+UI_BIND=${UI_BIND:-127.0.0.1}
+UI_PORT=${UI_PORT:-28080}
+UI_PASSWORD=${UI_PASSWORD:-}
+UI_ENABLE_ADMIN_WITHOUT_PASSWORD=${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}
 UI_SERVE_STATIC=${UI_SERVE_STATIC:-true}
 
 # Webhook notifications — Discord embed + generic JSON POST. Leave URLs
@@ -359,11 +355,11 @@ UI_SERVE_STATIC=${UI_SERVE_STATIC:-true}
 #   player.join / player.leave       — AccountId appears in / drops from snapshot
 #   backup.created / backup.restored — /api/backups activity
 #   config.applied                   — admin console Apply + restart path
-WINDROSE_DISCORD_WEBHOOK_URL=${WINDROSE_DISCORD_WEBHOOK_URL}
-WINDROSE_WEBHOOK_URL=${WINDROSE_WEBHOOK_URL}
-WINDROSE_WEBHOOK_EVENTS=${WINDROSE_WEBHOOK_EVENTS}
-WINDROSE_WEBHOOK_POLL_SECONDS=${WINDROSE_WEBHOOK_POLL_SECONDS}
-WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT}
+WINDROSE_DISCORD_WEBHOOK_URL=${WINDROSE_DISCORD_WEBHOOK_URL:-}
+WINDROSE_WEBHOOK_URL=${WINDROSE_WEBHOOK_URL:-}
+WINDROSE_WEBHOOK_EVENTS=${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}
+WINDROSE_WEBHOOK_POLL_SECONDS=${WINDROSE_WEBHOOK_POLL_SECONDS:-15}
+WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT:-5}
 EOF
 
 # Preserve operator-added keys (anything NOT in _MANAGED_KEYS that
