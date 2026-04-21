@@ -166,9 +166,7 @@ install_via_steamcmd() {
   mkdir -p "${preserve_dir}"
 
   echo "$(timestamp) INFO: Stashing identity + save before SteamCMD app_update (preserve_dir ${preserve_dir})"
-  local had_saved="false"
   if [ -d "${WINDROSE_SERVER_DIR}/R5/Saved" ]; then
-    had_saved="true"
     mv "${WINDROSE_SERVER_DIR}/R5/Saved" "${preserve_dir}/Saved"
   fi
   for f in ServerDescription.json WorldDescription.json; do

@@ -136,10 +136,12 @@ def test_unreadable_dir_is_kept():
         # But stat() on the dir itself still works, so this doesn't actually
         # exercise the OSError path — instead, test by mocking.
         orig_stat = Path.stat
-        def fake_stat(self):
+        def fake_stat(self, *args, **kwargs):
+            # Path.stat in 3.13+ gets called with follow_symlinks=; accept
+            # whatever the caller passes and forward for non-targeted paths.
             if self.name.startswith("20260420"):
                 raise PermissionError("simulated")
-            return orig_stat(self)
+            return orig_stat(self, *args, **kwargs)
         Path.stat = fake_stat
         try:
             server._prune_backups()
