@@ -1,0 +1,42 @@
+// /etc/polkit-1/rules.d/50-windrose.rules
+//
+// Narrowly grants the 'steam' user start/stop/restart on the windrose-*
+// systemd units via systemctl, without requiring sudo or a password prompt.
+// Installed by bare-linux/install.sh.
+//
+// Scope of this rule — intentionally tight:
+//   - Subject: user must be literally 'steam' (the system account the
+//     admin UI runs as). Root and other users are unaffected.
+//   - Action: only org.freedesktop.systemd1.manage-units (systemctl
+//     start/stop/restart/reload variants), NOT manage-unit-files (which
+//     would allow enable/disable/mask/daemon-reload — privileged).
+//   - Unit: only the three windrose-* unit names that install.sh writes.
+//     Any other unit (ssh.service, docker.service, etc.) falls through
+//     to polkit's default "ask for auth" policy.
+//
+// If you rename any of the units (see WINDROSE_UNIT_NAME env in
+// server.py), update this list to match, or the systemctl dispatch path
+// will silently fall back to the SIGTERM-based stop in server.py.
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return undefined;
+    }
+    if (subject.user !== "steam") {
+        return undefined;
+    }
+    var unit = action.lookup("unit") || "";
+    var allowed_units = {
+        "windrose-game.service": true,
+        "windrose-xvfb.service": true,
+        "windrose-ui.service":   true,
+    };
+    if (!allowed_units[unit]) {
+        return undefined;
+    }
+    var verb = action.lookup("verb") || "";
+    if (verb === "start" || verb === "stop" || verb === "restart" ||
+        verb === "reload" || verb === "reload-or-restart") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

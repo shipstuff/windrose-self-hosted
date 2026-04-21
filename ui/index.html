@@ -84,6 +84,11 @@
              "Apply + restart" when any staged changes exist (server
              config or per-world). Plain "Restart server" otherwise. -->
         <button id="restartServerBtn" class="danger admin-only hidden" type="button">Restart server</button>
+        <!-- Stop + Start: only meaningful on bare-Linux (polkit + systemctl).
+             On k8s/compose the container supervisor owns the lifecycle,
+             so these stay hidden via serverControlMode check in app.js. -->
+        <button id="stopServerBtn" class="danger admin-only hidden" type="button">Stop</button>
+        <button id="startServerBtn" class="danger admin-only hidden" type="button">Start</button>
         <button id="discardAllStagedBtn" class="admin-only hidden" type="button">Discard all staged</button>
       </div>
     </div>
@@ -182,7 +187,7 @@
     <!-- Server config — form by default, raw JSON on demand -->
     <div class="card admin-only hidden">
       <h2>Server Config <span id="stagedTag" class="tag hidden">pending changes</span></h2>
-      <p class="muted">Edit fields then Stage — changes apply on next server restart. Identity (PersistentServerId) and world data are preserved.</p>
+      <p class="muted">Edit fields then Stage — changes apply on next server restart. Identity (PersistentServerId) and world data are preserved. Under the default <code>env</code> config mode, the entrypoint only re-stamps a field if its current on-disk value matches the last stamp; edits made here diverge from that, so they persist across restarts.</p>
       <div id="configDiffBox" class="hidden">
         <p class="muted row"><strong>Staged vs Live diff:</strong> lines added in green, removed in red.</p>
         <div id="configDiff" class="diff"></div>
@@ -218,6 +223,28 @@
         </div>
       </details>
 
+      <details class="row" id="directIpSection">
+        <summary>Direct IP Connection (advanced)</summary>
+        <p class="muted">
+          Bypasses Windrose's backend connectivity service — players join via a raw IP:port instead of an invite code.
+          Enable only if backend connectivity is blocked on your network, or you want LAN-only play.
+          <strong>Requires manual port-forwarding</strong> on your router (UDP, to the port below). Invite codes stop working while this is on.
+        </p>
+        <div class="form-grid row">
+          <label for="fUseDirect">Use Direct IP</label>
+          <div class="field"><input id="fUseDirect" type="checkbox"> <span class="muted">overrides the backend connectivity path</span></div>
+
+          <label for="fDirectAddr">Server address</label>
+          <div class="field"><input id="fDirectAddr" type="text" placeholder="reuses P2pProxyAddress if empty"></div>
+
+          <label for="fDirectPort">Server port</label>
+          <div class="field"><input id="fDirectPort" type="number" min="1" max="65535" step="1" placeholder="7777"></div>
+
+          <label for="fDirectProxy">Proxy address</label>
+          <div class="field"><input id="fDirectProxy" type="text" placeholder="0.0.0.0"> <span class="muted">only set if you're fronting with an explicit proxy</span></div>
+        </div>
+      </details>
+
       <details class="row" id="rawJsonWrapper">
         <summary>Raw JSON (advanced)</summary>
         <p class="muted">Two-way sync: typing here updates the form fields live (and vice versa). Server validates schema on stage. Invalid JSON just stops the sync until you fix it.</p>
@@ -234,14 +261,82 @@
     <!-- Backups -->
     <div class="card admin-only hidden">
       <h2>Backups</h2>
-      <p class="muted">Snapshots of <code>R5/Saved/</code> + identity files under <code>/home/steam/backups/</code>. Oldest pruned automatically.</p>
-      <div id="backupsEmpty" class="empty-note hidden">No backups yet.</div>
-      <table id="backupsTable">
-        <thead><tr><th>ID (UTC)</th><th>Size</th><th></th></tr></thead>
-        <tbody id="backupsBody"></tbody>
-      </table>
+      <div class="row backup-tabs" role="tablist">
+        <button id="backupTabUi" type="button" class="tab active" role="tab" aria-selected="true">Ours</button>
+        <button id="backupTabGame" type="button" class="tab" role="tab" aria-selected="false">Default_Backups (game)</button>
+      </div>
+
+      <div id="backupPaneUi" class="tab-pane">
+        <p class="muted">Snapshots of <code>R5/Saved/</code> + identity files under <code>/home/steam/backups/</code>. Retention: most-recent N kept, plus anything within the age window — pinned entries (<code>manual-*</code>) never auto-prune.</p>
+        <div id="backupsEmpty" class="empty-note hidden">No backups yet.</div>
+        <table id="backupsTable">
+          <thead><tr><th>ID (UTC)</th><th>Size</th><th></th></tr></thead>
+          <tbody id="backupsBody"></tbody>
+        </table>
+        <div class="row">
+          <button id="backupCreateBtn" class="danger">Create backup now</button>
+          <!-- Upload is the inbound half of the server-migration round-trip.
+               Emit the same .tar.gz that the per-row Download button
+               produces, the server lands it as a pinned imported- backup
+               and returns its id; operator then hits Restore to swap it
+               in. Lives here (card-level) not per-row because there's no
+               row to hang it off — the import doesn't exist yet. -->
+          <label class="inline-file-label">
+            Import backup (.tar.gz):
+            <input id="backupImportFile" type="file" accept=".tar.gz,.tgz,application/gzip">
+          </label>
+          <button id="backupImportBtn" class="danger" type="button">Upload + pin</button>
+        </div>
+        <p id="backupImportStatus" class="muted"></p>
+      </div>
+
+      <div id="backupPaneGame" class="tab-pane hidden">
+        <p class="muted">Windrose's own auto-backups under <code>R5/Saved/SaveProfiles/Default_Backups/</code>. Managed by the game engine on its own schedule — we surface them here so you can restore one if a UI backup isn't recent enough. Restore merges the selected backup onto the live RocksDB tree and creates a pinned safety snapshot first.</p>
+        <div id="gameBackupsEmpty" class="empty-note hidden">No game auto-backups yet.</div>
+        <table id="gameBackupsTable">
+          <thead><tr><th>Timestamp (UTC)</th><th>Size</th><th></th></tr></thead>
+          <tbody id="gameBackupsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Auto-backup schedule -->
+    <div class="card admin-only hidden" id="backupScheduleCard">
+      <h2>Auto-backup schedule</h2>
+      <p class="muted">
+        Idle trigger captures state shortly after the last player disconnects — cheap CPU, clean save, natural end-of-session snapshot.
+        Floor trigger is a safety net for long continuous sessions that never go idle. Manual <em>Create backup now</em> does not reset either clock (auto and manual are separate, like in-game auto-saves vs manual saves).
+      </p>
+      <div class="form-grid">
+        <label for="bsIdleMin">Idle minutes (0 = off)</label>
+        <div class="field"><input id="bsIdleMin" type="number" min="0" max="1440" step="0.5"> <span class="muted">min without players before auto-backup</span></div>
+        <label for="bsFloorHr">Floor hours (0 = off)</label>
+        <div class="field"><input id="bsFloorHr" type="number" min="0" max="720" step="0.5"> <span class="muted">max hours of continuous active session before a forced auto-backup</span></div>
+        <label for="bsRetainCount">Retain count</label>
+        <div class="field"><input id="bsRetainCount" type="number" min="0" max="10000" step="1"> <span class="muted">most-recent N non-pinned backups kept regardless of age</span></div>
+        <label for="bsRetainDays">Retain days</label>
+        <div class="field"><input id="bsRetainDays" type="number" min="0" max="1825" step="0.5"> <span class="muted">also keep anything younger than this, regardless of count</span></div>
+      </div>
+      <dl class="kv">
+        <dt>Last auto-backup</dt><dd id="bsLastAt">-</dd>
+        <dt>Last result</dt><dd id="bsLastResult" class="mono">-</dd>
+        <dt>Override file</dt><dd id="bsOverride" class="mono">-</dd>
+      </dl>
       <div class="row">
-        <button id="backupCreateBtn" class="danger">Create backup now</button>
+        <button id="bsSaveBtn" class="danger" type="button">Save</button>
+        <button id="bsRevertBtn" type="button">Revert unsaved</button>
+      </div>
+    </div>
+
+    <div class="card admin-only hidden" id="maintenanceCard">
+      <h2>Maintenance mode</h2>
+      <p class="muted">When on, the entrypoint sleeps instead of launching the game, so the server stays stopped through container/service restarts without editing values or touching systemd. Toggle off to boot normally on the next restart.</p>
+      <dl class="kv">
+        <dt>Current state</dt><dd id="mmState">-</dd>
+      </dl>
+      <div class="row">
+        <button id="mmEnableBtn" class="danger" type="button">Enable + stop now</button>
+        <button id="mmDisableBtn" class="danger" type="button">Disable + restart now</button>
       </div>
     </div>
 

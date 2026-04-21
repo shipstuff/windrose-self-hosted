@@ -36,6 +36,10 @@ const fIsProtected   = document.getElementById("fIsProtected");
 const fPassword      = document.getElementById("fPassword");
 const fWorldId       = document.getElementById("fWorldId");
 const fP2pAddr       = document.getElementById("fP2pAddr");
+const fUseDirect     = document.getElementById("fUseDirect");
+const fDirectAddr    = document.getElementById("fDirectAddr");
+const fDirectPort    = document.getElementById("fDirectPort");
+const fDirectProxy   = document.getElementById("fDirectProxy");
 const fPSID          = document.getElementById("fPSID");
 const fInvite        = document.getElementById("fInvite");
 const configEditor        = document.getElementById("configEditor");
@@ -45,6 +49,8 @@ const configDiff          = document.getElementById("configDiff");
 const configSaveBtn       = document.getElementById("configSaveBtn");
 const configRevertBtn     = document.getElementById("configRevertBtn");
 const restartServerBtn    = document.getElementById("restartServerBtn");
+const stopServerBtn       = document.getElementById("stopServerBtn");
+const startServerBtn      = document.getElementById("startServerBtn");
 const discardAllStagedBtn = document.getElementById("discardAllStagedBtn");
 const worldsStagedTag     = document.getElementById("worldsStagedTag");
 const worldEditorInline   = document.getElementById("worldEditorInline");
@@ -69,6 +75,22 @@ const backupsBody    = document.getElementById("backupsBody");
 const backupsTable   = document.getElementById("backupsTable");
 const backupsEmpty   = document.getElementById("backupsEmpty");
 const backupCreateBtn= document.getElementById("backupCreateBtn");
+const backupTabUi      = document.getElementById("backupTabUi");
+const backupTabGame    = document.getElementById("backupTabGame");
+const backupPaneUi     = document.getElementById("backupPaneUi");
+const backupPaneGame   = document.getElementById("backupPaneGame");
+const gameBackupsBody  = document.getElementById("gameBackupsBody");
+const gameBackupsTable = document.getElementById("gameBackupsTable");
+const gameBackupsEmpty = document.getElementById("gameBackupsEmpty");
+const bsIdleMin       = document.getElementById("bsIdleMin");
+const bsFloorHr       = document.getElementById("bsFloorHr");
+const bsRetainCount   = document.getElementById("bsRetainCount");
+const bsRetainDays    = document.getElementById("bsRetainDays");
+const bsLastAt        = document.getElementById("bsLastAt");
+const bsLastResult    = document.getElementById("bsLastResult");
+const bsOverride      = document.getElementById("bsOverride");
+const bsSaveBtn       = document.getElementById("bsSaveBtn");
+const bsRevertBtn     = document.getElementById("bsRevertBtn");
 const updateCard     = document.getElementById("updateCard");
 const archiveInput   = document.getElementById("archiveFile");
 const uploadBtn      = document.getElementById("uploadBtn");
@@ -76,6 +98,9 @@ const importTitle    = document.getElementById("importTitle");
 const importBlurb    = document.getElementById("importBlurb");
 const restartHint    = document.getElementById("restartHint");
 const statusEl       = document.getElementById("status");
+const mmState        = document.getElementById("mmState");
+const mmEnableBtn    = document.getElementById("mmEnableBtn");
+const mmDisableBtn   = document.getElementById("mmDisableBtn");
 const ipBinaryState     = document.getElementById("ipBinaryState");
 const ipBinaryMd5       = document.getElementById("ipBinaryMd5");
 const ipEnvRequested    = document.getElementById("ipEnvRequested");
@@ -355,11 +380,19 @@ function renderBackups(backups) {
     const display = b.createdAt
       ? new Date(b.createdAt).toISOString().replace(/\.\d+Z$/, "Z")
       : parseBackupId(b.id);
+    const src = b.source || (b.pinned ? "manual-pinned" : "manual");
+    const srcLabel = src === "auto" ? "auto" : (src === "manual-pinned" ? "pinned" : "manual");
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="mono" title="${escapeHtml(b.id)}">${escapeHtml(display)}</td>
+      <td class="mono" title="${escapeHtml(b.id)}">
+        <span class="tag tag-${escapeHtml(src)}">${escapeHtml(srcLabel)}</span>
+        ${escapeHtml(display)}
+      </td>
       <td>${formatBytes(b.sizeBytes)}</td>
-      <td><button class="danger restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button></td>`;
+      <td>
+        <a class="btn-link download-btn" href="/api/backups/${encodeURIComponent(b.id)}/download" data-id="${escapeHtml(b.id)}" title="Download as .tar.gz">Download</a>
+        <button class="danger restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button>
+      </td>`;
     backupsBody.appendChild(tr);
   });
   backupsBody.querySelectorAll(".restore-btn").forEach(b => {
@@ -368,6 +401,66 @@ function renderBackups(backups) {
       log(`restoring ${b.dataset.id}...`);
       const res = await authFetch(`/api/backups/${b.dataset.id}/restore`, { method: "POST" });
       log(`${res.ok ? "restore ok" : "restore failed"}: ${await res.text()}`);
+    });
+  });
+  // Download is a plain href but we need to attach the auth header so
+  // the browser's Basic-auth challenge doesn't trip the XHR-suppress
+  // codepath. Intercept the click and drive the download through
+  // authFetch + a Blob URL.
+  backupsBody.querySelectorAll(".download-btn").forEach(a => {
+    a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const id = a.dataset.id;
+      log(`downloading ${id}...`);
+      const res = await authFetch(`/api/backups/${id}/download`);
+      if (!res.ok) {
+        log(`download failed: ${res.status} ${await res.text()}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `windrose-backup-${id}.tar.gz`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      log(`downloaded ${id} (${blob.size} bytes)`);
+    });
+  });
+}
+
+function renderGameBackups(backups) {
+  if (!backups.length) {
+    gameBackupsTable.classList.add("hidden"); gameBackupsEmpty.classList.remove("hidden"); return;
+  }
+  gameBackupsTable.classList.remove("hidden"); gameBackupsEmpty.classList.add("hidden");
+  gameBackupsBody.innerHTML = "";
+  const destructive = lastStatus?.allowDestructive !== false;
+  backups.forEach(b => {
+    const display = b.createdAt
+      ? new Date(b.createdAt).toISOString().replace(/\.\d+Z$/, "Z")
+      : b.id;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono" title="${escapeHtml(b.id)}">${escapeHtml(display)}</td>
+      <td>${formatBytes(b.sizeBytes)}</td>
+      <td><button class="danger game-restore-btn" data-id="${escapeHtml(b.id)}" ${destructive ? "" : "disabled"}>Restore</button></td>`;
+    gameBackupsBody.appendChild(tr);
+  });
+  gameBackupsBody.querySelectorAll(".game-restore-btn").forEach(b => {
+    b.addEventListener("click", async () => {
+      if (!confirm(
+        `Restore game auto-backup ${b.dataset.id}?\n\n` +
+        `This merges the game's Default_Backups snapshot onto the live RocksDB tree. ` +
+        `A pinned safety snapshot of current state is taken first so you can roll back.\n\n` +
+        `Note: game backups are world-only — they don't restore ServerDescription or WorldDescription.`
+      )) return;
+      log(`restoring game backup ${b.dataset.id}...`);
+      const res = await authFetch(`/api/game-backups/${b.dataset.id}/restore`, { method: "POST" });
+      log(`${res.ok ? "game restore ok" : "game restore failed"}: ${await res.text()}`);
+      loadBackups(); loadGameBackups();
     });
   });
 }
@@ -380,6 +473,10 @@ function populateFormFromDoc(sd) {
     fIsProtected.checked = !!p.IsPasswordProtected;
     fPassword.value = p.Password || "";
     fP2pAddr.value = p.P2pProxyAddress || "";
+    fUseDirect.checked = !!p.UseDirectConnection;
+    fDirectAddr.value  = p.DirectConnectionServerAddress || "";
+    fDirectPort.value  = p.DirectConnectionServerPort ?? 7777;
+    fDirectProxy.value = p.DirectConnectionProxyAddress || "";
     fPSID.textContent = p.PersistentServerId || "-";
     fInvite.textContent = p.InviteCode || "-";
     if (p.WorldIslandId) {
@@ -468,6 +565,17 @@ function buildConfigFromForm() {
   p.IsPasswordProtected = !!fIsProtected.checked;
   p.Password            = fPassword.value;
   p.P2pProxyAddress     = fP2pAddr.value;
+  // Direct IP fields — only emit when the checkbox is set OR the
+  // underlying doc already has them. This avoids silently adding
+  // Direct-IP keys to configs that predate the feature.
+  const hasDirectKeys = ("UseDirectConnection" in p) || fUseDirect.checked ||
+                        fDirectAddr.value || fDirectProxy.value;
+  if (hasDirectKeys) {
+    p.UseDirectConnection          = !!fUseDirect.checked;
+    p.DirectConnectionServerAddress = fDirectAddr.value;
+    p.DirectConnectionServerPort   = Number(fDirectPort.value) || 7777;
+    p.DirectConnectionProxyAddress = fDirectProxy.value || "0.0.0.0";
+  }
   if (fWorldId.value) p.WorldIslandId = fWorldId.value;
   return base;
 }
@@ -562,13 +670,15 @@ function applyStatus(data) {
   // modal before our sign-in button is even clicked).
   if (showAdmin && !window._adminHydrated) {
     window._adminHydrated = true;
-    loadConfig(); loadBackups(); loadIdlePatch();
+    loadConfig(); loadBackups(); loadBackupConfig(); loadIdlePatch(); loadMaintenance();
   } else if (!showAdmin) {
     window._adminHydrated = false;
   }
   [uploadBtn, configSaveBtn, configRevertBtn, backupCreateBtn, worldUploadBtn,
-   restartServerBtn, discardAllStagedBtn, worldStageBtn, worldDiscardBtn,
-   ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn].forEach(b => {
+   restartServerBtn, stopServerBtn, startServerBtn, discardAllStagedBtn,
+   worldStageBtn, worldDiscardBtn,
+   ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn,
+   mmEnableBtn, mmDisableBtn].forEach(b => {
     if (b) b.disabled = !destructive;
   });
   stagedTag.classList.toggle("hidden", !data.stagedConfigPending);
@@ -580,6 +690,18 @@ function applyStatus(data) {
   const anyStaged = !!data.stagedConfigPending || stagedWorldCount > 0;
   restartServerBtn.textContent = anyStaged ? "Apply + restart" : "Restart server";
   discardAllStagedBtn.classList.toggle("hidden", !anyStaged);
+
+  // Stop + Start visibility: only show on bare-Linux where the polkit
+  // rule lets the UI drive systemctl. Everywhere else the container
+  // supervisor owns lifecycle and "Start" is meaningless.
+  const canSystemctl = data.serverControlMode === "systemctl";
+  stopServerBtn.classList.toggle("hidden", !canSystemctl || !showAdmin);
+  startServerBtn.classList.toggle("hidden", !canSystemctl || !showAdmin);
+  // Start only enabled when game isn't running; Stop only when it is.
+  if (canSystemctl) {
+    startServerBtn.disabled = !!data.serverRunning || !destructive;
+    stopServerBtn.disabled  = !data.serverRunning || !destructive;
+  }
 
   // H1 flips between a neutral "Status" title in the public view and
   // the full "Admin Console" label once signed in — so anons see a
@@ -665,6 +787,102 @@ async function loadBackups() {
   } catch (err) { log("backups load failed: " + err); }
 }
 
+async function loadGameBackups() {
+  try {
+    const res = await authFetch("/api/game-backups");
+    if (!res.ok) return;
+    renderGameBackups((await res.json()).backups || []);
+  } catch (err) { log("game backups load failed: " + err); }
+}
+
+let lastBackupConfig = null;
+async function loadBackupConfig() {
+  try {
+    const res = await authFetch("/api/backup-config");
+    if (!res.ok) return;
+    const cfg = await res.json();
+    lastBackupConfig = cfg;
+    bsIdleMin.value     = cfg.idleMinutes;
+    bsFloorHr.value     = cfg.floorHours;
+    bsRetainCount.value = cfg.retainCount;
+    bsRetainDays.value  = cfg.retainDays;
+    bsLastAt.textContent = cfg.lastAutoBackupAt
+      ? new Date(cfg.lastAutoBackupAt).toISOString().replace(/\.\d+Z$/, "Z")
+      : "(never / since UI restart)";
+    bsLastResult.textContent = cfg.lastResult || "(no run yet)";
+    bsOverride.textContent = `${cfg.overridePath} (${cfg.overrideExists ? "present" : "absent — using defaults"})`;
+  } catch (err) { log("backup-config load failed: " + err); }
+}
+
+bsSaveBtn.addEventListener("click", async () => {
+  const payload = {
+    idleMinutes: Number(bsIdleMin.value),
+    floorHours:  Number(bsFloorHr.value),
+    retainCount: Number(bsRetainCount.value),
+    retainDays:  Number(bsRetainDays.value),
+  };
+  log("saving auto-backup config...");
+  const res = await authFetch("/api/backup-config", {
+    method: "PUT",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    log("auto-backup config saved");
+    loadBackupConfig();
+  } else {
+    log("save failed: " + await res.text());
+  }
+});
+
+bsRevertBtn.addEventListener("click", () => {
+  if (!lastBackupConfig) { loadBackupConfig(); return; }
+  bsIdleMin.value     = lastBackupConfig.idleMinutes;
+  bsFloorHr.value     = lastBackupConfig.floorHours;
+  bsRetainCount.value = lastBackupConfig.retainCount;
+  bsRetainDays.value  = lastBackupConfig.retainDays;
+});
+
+function setBackupTab(which) {
+  const uiActive = which === "ui";
+  backupTabUi.classList.toggle("active", uiActive);
+  backupTabGame.classList.toggle("active", !uiActive);
+  backupTabUi.setAttribute("aria-selected", String(uiActive));
+  backupTabGame.setAttribute("aria-selected", String(!uiActive));
+  backupPaneUi.classList.toggle("hidden", !uiActive);
+  backupPaneGame.classList.toggle("hidden", uiActive);
+  if (!uiActive) loadGameBackups();
+}
+backupTabUi.addEventListener("click", () => setBackupTab("ui"));
+backupTabGame.addEventListener("click", () => setBackupTab("game"));
+
+async function loadMaintenance() {
+  try {
+    const res = await authFetch("/api/maintenance");
+    if (!res.ok) return;
+    const s = await res.json();
+    mmState.textContent = s.active ? "ACTIVE — server will stay stopped across restarts" : "inactive (normal boot)";
+    mmEnableBtn.disabled = s.active;
+    mmDisableBtn.disabled = !s.active;
+  } catch (err) { log("maintenance load failed: " + err); }
+}
+
+async function setMaintenance(active) {
+  const verb = active ? "enable" : "disable";
+  if (!confirm(`${active ? "Enable" : "Disable"} maintenance mode and ${active ? "stop" : "restart"} the game now?`)) return;
+  log(`maintenance ${verb}...`);
+  const res = await authFetch("/api/maintenance", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ active, restart: true }),
+  });
+  if (!res.ok) { log(`maintenance ${verb} failed: ${await res.text()}`); return; }
+  const s = await res.json();
+  log(`maintenance now ${s.active ? "ACTIVE" : "inactive"}${s.restartRequested ? " (restart signaled)" : ""}`);
+  loadMaintenance();
+  loadStatus();
+}
+
 async function loadIdlePatch() {
   try {
     const res = await authFetch("/api/idle-cpu-patch");
@@ -719,7 +937,7 @@ async function stageConfig(json) {
 }
 
 // --- Event wiring -------------------------------------------------
-refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadIdlePatch(); });
+refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadBackupConfig(); loadIdlePatch(); loadMaintenance(); });
 downloadSavesBtn.addEventListener("click", () => { window.location.href = "/api/saves/download"; });
 
 uploadBtn.addEventListener("click", async () => {
@@ -747,9 +965,11 @@ configSaveBtn.addEventListener("click", () => {
   stageConfig(parsed);
 });
 
-[fServerName, fMaxPlayers, fPassword, fP2pAddr, fWorldId].forEach(el =>
+[fServerName, fMaxPlayers, fPassword, fP2pAddr,
+ fDirectAddr, fDirectPort, fDirectProxy, fWorldId].forEach(el =>
   el.addEventListener("input", syncFormToRaw));
-fIsProtected.addEventListener("change", syncFormToRaw);
+[fIsProtected, fUseDirect].forEach(el =>
+  el.addEventListener("change", syncFormToRaw));
 configEditor.addEventListener("input", syncRawToForm);
 
 // Global restart button — dynamic label (managed in applyStatus).
@@ -768,6 +988,21 @@ restartServerBtn.addEventListener("click", async () => {
   const res = await authFetch(url, { method: "POST" });
   log(`${res.ok ? "ok" : "failed"}: ${await res.text()}`);
   setTimeout(() => { loadStatus(); loadConfig(); }, 1500);
+});
+
+stopServerBtn.addEventListener("click", async () => {
+  if (!confirm("Stop the game server? Service will stay stopped until you click Start.")) return;
+  log("stopping server...");
+  const res = await authFetch("/api/server/stop", { method: "POST" });
+  log(`${res.ok ? "stop ok" : "stop failed"}: ${await res.text()}`);
+  setTimeout(loadStatus, 1500);
+});
+
+startServerBtn.addEventListener("click", async () => {
+  log("starting server...");
+  const res = await authFetch("/api/server/start", { method: "POST" });
+  log(`${res.ok ? "start ok" : "start failed"}: ${await res.text()}`);
+  setTimeout(loadStatus, 1500);
 });
 discardAllStagedBtn.addEventListener("click", async () => {
   if (!confirm("Discard all staged changes (server config + every world)?")) return;
@@ -909,6 +1144,49 @@ backupCreateBtn.addEventListener("click", async () => {
   loadBackups();
 });
 
+// Import: counterpart to per-row Download. Picks up the file from the
+// input, streams it to /api/backups/upload with X-Filename so the
+// server can use the filename hint when picking a decoder (tar vs zip).
+// Response contains the new manual-imported-* id; we surface it in the
+// status line so the operator can click Restore on the right row.
+const backupImportFile   = document.getElementById("backupImportFile");
+const backupImportBtn    = document.getElementById("backupImportBtn");
+const backupImportStatus = document.getElementById("backupImportStatus");
+backupImportBtn.addEventListener("click", async () => {
+  const file = backupImportFile.files?.[0];
+  if (!file) {
+    backupImportStatus.textContent = "pick a .tar.gz first";
+    return;
+  }
+  backupImportStatus.textContent = `uploading ${file.name} (${file.size} bytes)...`;
+  backupImportBtn.disabled = true;
+  try {
+    const res = await authFetch("/api/backups/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/gzip",
+        "X-Filename": file.name,
+      },
+      body: file,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      backupImportStatus.textContent = `upload failed (${res.status}): ${text}`;
+      log(`backup import failed: ${text}`);
+      return;
+    }
+    const body = JSON.parse(text);
+    backupImportStatus.textContent = `imported as ${body.id} (pinned) — click Restore on its row to swap it in.`;
+    log(`imported ${body.id}`);
+    backupImportFile.value = "";
+    loadBackups();
+  } catch (err) {
+    backupImportStatus.textContent = `upload error: ${err}`;
+  } finally {
+    backupImportBtn.disabled = false;
+  }
+});
+
 const IDLE_PATCH_DISCLAIMER =
   "You are enabling the EXPERIMENTAL idle-CPU binary patch.\n\n" +
   "It modifies the Windrose dedicated-server binary in place. NO warranty — " +
@@ -927,6 +1205,9 @@ function confirmEnableIdlePatch() {
   sessionStorage.setItem("ipAckRisk", "1");
   return true;
 }
+
+mmEnableBtn.addEventListener("click", () => setMaintenance(true));
+mmDisableBtn.addEventListener("click", () => setMaintenance(false));
 
 ipEnableBtn.addEventListener("click", () => {
   if (!confirmEnableIdlePatch()) { log("idle-patch enable cancelled"); return; }
@@ -1066,5 +1347,6 @@ signOutBtn.addEventListener("click", () => {
 // an unauth'd page load would 401-spam /api/config and /api/backups.
 loadStatus();
 setInterval(loadStatus, 5000);
-setInterval(() => { if (window._adminHydrated) loadBackups(); }, 30000);
+setInterval(() => { if (window._adminHydrated) { loadBackups(); loadBackupConfig(); } }, 30000);
 setInterval(() => { if (window._adminHydrated) loadIdlePatch(); }, 30000);
+setInterval(() => { if (window._adminHydrated) loadMaintenance(); }, 30000);

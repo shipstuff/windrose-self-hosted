@@ -38,32 +38,29 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPTS_SRC="${REPO_ROOT}/scripts"
+UI_SRC="${REPO_ROOT}/ui"
 
 WINDROSE_USER="${WINDROSE_USER:-steam}"
 WINDROSE_INSTALL_DIR="${WINDROSE_INSTALL_DIR:-/opt/windrose}"
 WINDROSE_ENV_DIR="${WINDROSE_ENV_DIR:-/etc/windrose}"
 WINDROSE_ENV_FILE="${WINDROSE_ENV_FILE:-${WINDROSE_ENV_DIR}/windrose.env}"
 
-# Safe-by-default: bind the admin UI to loopback. Exposing it publicly
-# (UI_BIND=0.0.0.0) without UI_PASSWORD set is a foot-gun on any VPS,
-# so the operator has to explicitly flip both knobs.
-UI_BIND="${UI_BIND:-127.0.0.1}"
-UI_PORT="${UI_PORT:-28080}"
-UI_PASSWORD="${UI_PASSWORD:-}"
-UI_ENABLE_ADMIN_WITHOUT_PASSWORD="${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}"
-
-# Webhook knobs. All optional; if the URL vars are empty the
-# EventDetector thread still runs but skips dispatch.
-WINDROSE_WEBHOOK_URL="${WINDROSE_WEBHOOK_URL:-}"
-WINDROSE_DISCORD_WEBHOOK_URL="${WINDROSE_DISCORD_WEBHOOK_URL:-}"
-WINDROSE_WEBHOOK_EVENTS="${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}"
-WINDROSE_WEBHOOK_POLL_SECONDS="${WINDROSE_WEBHOOK_POLL_SECONDS:-15}"
-WINDROSE_WEBHOOK_TIMEOUT="${WINDROSE_WEBHOOK_TIMEOUT:-5}"
+# DO NOT pre-assign defaults for managed keys here — the merge loop
+# below pulls values from the existing env file, but only if the shell
+# variable is *unset*. Assigning empty strings as defaults ahead of
+# time would make "operator didn't pass a CLI override" (unset)
+# indistinguishable from "operator explicitly passed empty" (set to
+# ""), so merge would skip the existing env's non-empty value and the
+# heredoc would write the empty default.  Regression 2026-04-21:
+# re-running install.sh silently wiped UI_PASSWORD on the VPS. Defaults
+# now live inline in the heredoc (UI_PASSWORD=${UI_PASSWORD:-}) where
+# they only apply if still unset post-merge.
 
 # Warn if the operator is reaching for a publicly-exposed UI without
 # a password. Not fatal — compose / bare-Linux have legitimate
 # LAN-only deploys where this is fine — but loud so it's deliberate.
-if [ "${UI_BIND}" = "0.0.0.0" ] && [ -z "${UI_PASSWORD}" ] && [ "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}" != "true" ]; then
+# Uses inline ${:-} so the check works even with no pre-assignment.
+if [ "${UI_BIND:-127.0.0.1}" = "0.0.0.0" ] && [ -z "${UI_PASSWORD:-}" ] && [ "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}" != "true" ]; then
   printf '\033[33m[install] WARN: UI_BIND=0.0.0.0 with no UI_PASSWORD.\n'
   printf '          The admin console will refuse destructive routes\n'
   printf '          without credentials, but anyone on the internet can\n'
@@ -190,21 +187,50 @@ install -m 0644 "${SCRIPTS_SRC}/ServerDescription_example.json" \
 install -m 0644 "${SCRIPTS_SRC}/WorldDescription_example.json" \
   /usr/local/share/WorldDescription_example.json
 
-for f in server.py index.html app.js app.css; do
+# Layout mirrors the repo: server.py at the install root, ui/ siblings.
+# server.py resolves STATIC_DIR as parent/ui so both paths must be
+# installed together. The legacy /opt/windrose-ui symlink points at
+# ${WINDROSE_INSTALL_DIR} so any existing references keep resolving
+# (server.py at /opt/windrose-ui/server.py, assets at /opt/windrose-ui/ui/).
+install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/ui"
+install -m 0755 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
+  "${REPO_ROOT}/server.py" "${WINDROSE_INSTALL_DIR}/server.py"
+for f in index.html app.js app.css; do
   install -m 0644 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
-    "${SCRIPTS_SRC}/ui/${f}" "${WINDROSE_INSTALL_DIR}/scripts/ui/${f}"
+    "${UI_SRC}/${f}" "${WINDROSE_INSTALL_DIR}/ui/${f}"
 done
-chmod 0755 "${WINDROSE_INSTALL_DIR}/scripts/ui/server.py"
-# server.py expects /opt/windrose-ui/ when referenced from k8s; add a
-# symlink so the UI path matches the container path. Harmless if it's
-# already there from a previous install.
-ln -snf "${WINDROSE_INSTALL_DIR}/scripts/ui" /opt/windrose-ui
+# Old install may have left a scripts/ui/ tree behind. Remove it so
+# operators don't stare at stale files that no longer participate.
+rm -rf "${WINDROSE_INSTALL_DIR}/scripts/ui" 2>/dev/null || true
+ln -snf "${WINDROSE_INSTALL_DIR}" /opt/windrose-ui
 
 # Idle-CPU patch script — install at /usr/local/bin/ to match the
 # Docker image layout so the entrypoint's _find_patch_script hits
 # the fast-path candidate. Opt in via WINDROSE_PATCH_IDLE_CPU=1 in
 # the env file; the UI Idle-CPU card toggles the runtime override.
 install -m 0755 "${SCRIPTS_SRC}/patch-idle-cpu.py" /usr/local/bin/patch-idle-cpu.py
+# Engine.ini reconciler — keeps NetServerMaxTickRate + t.MaxFPS in
+# sync with NET_SERVER_MAX_TICK_RATE across boots. Same path as the
+# Docker image so the entrypoint's _reconcile_script lookup hits.
+install -m 0755 "${SCRIPTS_SRC}/reconcile-engine-ini.sh" /usr/local/bin/reconcile-engine-ini.sh
+
+# --- Polkit rule ------------------------------------------------------
+# Narrowly grant the steam user systemctl start/stop/restart access on
+# the windrose-* units only — so the admin UI can do a clean systemd
+# stop/restart without sudo. See bare-linux/polkit/50-windrose.rules
+# for the rule source + scope notes. If polkit isn't installed on this
+# host, skip — the UI transparently falls back to the SIGTERM-based
+# stop path (which works cross-service as long as the game runs as
+# the same user as the UI, which it does).
+POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+if [ -d "${POLKIT_RULES_DIR}" ]; then
+  install -m 0644 -o root -g root \
+    "${SCRIPT_DIR}/polkit/50-windrose.rules" \
+    "${POLKIT_RULES_DIR}/50-windrose.rules"
+  echo "[install] polkit rule installed at ${POLKIT_RULES_DIR}/50-windrose.rules"
+else
+  echo "[install] polkit not detected (${POLKIT_RULES_DIR} missing) — skipping rule; UI will use SIGTERM fallback"
+fi
 
 # --- Xvfb socket dir --------------------------------------------------
 install -d -m 1777 /tmp/.X11-unix
@@ -234,6 +260,9 @@ _MANAGED_KEYS=" \
   DISPLAY WINDROSE_SERVER_SOURCE SERVER_NAME MAX_PLAYER_COUNT \
   IS_PASSWORD_PROTECTED SERVER_PASSWORD WORLD_ISLAND_ID WORLD_NAME \
   WORLD_PRESET_TYPE P2P_PROXY_ADDRESS DISABLE_SENTRY PROTON_USE_XALIA \
+  USE_DIRECT_CONNECTION DIRECT_CONNECTION_SERVER_ADDRESS \
+  DIRECT_CONNECTION_SERVER_PORT DIRECT_CONNECTION_PROXY_ADDRESS \
+  NET_SERVER_MAX_TICK_RATE \
   FILES_WAIT_TIMEOUT_SECONDS WINDROSE_PATCH_IDLE_CPU \
   UI_BIND UI_PORT UI_PASSWORD \
   UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
@@ -280,6 +309,17 @@ elif [ -f "${WINDROSE_ENV_FILE}" ]; then
   done
 fi
 
+# Apply defaults NOW (post-merge) for managed keys whose shell var
+# might still be unset: a fresh install with no existing env file and
+# no CLI overrides leaves these empty, and the status echo at the end
+# of the script dereferences them under `set -u`. The heredoc already
+# uses ${:-} for the file contents, but that doesn't touch the shell
+# var. Keep these defaults in sync with the heredoc's ${:-defaults}.
+: "${UI_BIND:=127.0.0.1}"
+: "${UI_PORT:=28080}"
+: "${UI_PASSWORD:=}"
+: "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:=false}"
+
 log "writing env file ${WINDROSE_ENV_FILE}"
 tmp_env="$(mktemp)"
 cat > "${tmp_env}" <<EOF
@@ -302,6 +342,17 @@ WORLD_ISLAND_ID=${WORLD_ISLAND_ID:-default-world}
 WORLD_NAME=${WORLD_NAME:-Default Windrose World}
 WORLD_PRESET_TYPE=${WORLD_PRESET_TYPE:-Medium}
 P2P_PROXY_ADDRESS=${P2P_PROXY_ADDRESS:-}
+# Direct IP Connection (Windrose 2026-04). Leave USE_DIRECT_CONNECTION
+# empty to keep the default backend-connectivity mode. See README for
+# when Direct IP is the right choice + the port-forwarding caveat.
+USE_DIRECT_CONNECTION=${USE_DIRECT_CONNECTION:-}
+DIRECT_CONNECTION_SERVER_ADDRESS=${DIRECT_CONNECTION_SERVER_ADDRESS:-}
+DIRECT_CONNECTION_SERVER_PORT=${DIRECT_CONNECTION_SERVER_PORT:-7777}
+DIRECT_CONNECTION_PROXY_ADDRESS=${DIRECT_CONNECTION_PROXY_ADDRESS:-0.0.0.0}
+# Server tick rate (stat srvfps) — stamped into Engine.ini's
+# NetServerMaxTickRate + t.MaxFPS on every boot. 30 for weak hosts,
+# 120 for beefy LAN setups. Shadow-stamp preserves hand-edits.
+NET_SERVER_MAX_TICK_RATE=${NET_SERVER_MAX_TICK_RATE:-60}
 DISABLE_SENTRY=${DISABLE_SENTRY:-1}
 PROTON_USE_XALIA=${PROTON_USE_XALIA:-0}
 FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
@@ -309,10 +360,10 @@ FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
 # "1" -> entrypoint patches the EXE on every start (idempotent).
 # The UI Idle-CPU card can flip this per-host without editing this file.
 WINDROSE_PATCH_IDLE_CPU=${WINDROSE_PATCH_IDLE_CPU:-0}
-UI_BIND=${UI_BIND}
-UI_PORT=${UI_PORT}
-UI_PASSWORD=${UI_PASSWORD}
-UI_ENABLE_ADMIN_WITHOUT_PASSWORD=${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}
+UI_BIND=${UI_BIND:-127.0.0.1}
+UI_PORT=${UI_PORT:-28080}
+UI_PASSWORD=${UI_PASSWORD:-}
+UI_ENABLE_ADMIN_WITHOUT_PASSWORD=${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}
 UI_SERVE_STATIC=${UI_SERVE_STATIC:-true}
 
 # Webhook notifications — Discord embed + generic JSON POST. Leave URLs
@@ -324,11 +375,11 @@ UI_SERVE_STATIC=${UI_SERVE_STATIC:-true}
 #   player.join / player.leave       — AccountId appears in / drops from snapshot
 #   backup.created / backup.restored — /api/backups activity
 #   config.applied                   — admin console Apply + restart path
-WINDROSE_DISCORD_WEBHOOK_URL=${WINDROSE_DISCORD_WEBHOOK_URL}
-WINDROSE_WEBHOOK_URL=${WINDROSE_WEBHOOK_URL}
-WINDROSE_WEBHOOK_EVENTS=${WINDROSE_WEBHOOK_EVENTS}
-WINDROSE_WEBHOOK_POLL_SECONDS=${WINDROSE_WEBHOOK_POLL_SECONDS}
-WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT}
+WINDROSE_DISCORD_WEBHOOK_URL=${WINDROSE_DISCORD_WEBHOOK_URL:-}
+WINDROSE_WEBHOOK_URL=${WINDROSE_WEBHOOK_URL:-}
+WINDROSE_WEBHOOK_EVENTS=${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}
+WINDROSE_WEBHOOK_POLL_SECONDS=${WINDROSE_WEBHOOK_POLL_SECONDS:-15}
+WINDROSE_WEBHOOK_TIMEOUT=${WINDROSE_WEBHOOK_TIMEOUT:-5}
 EOF
 
 # Preserve operator-added keys (anything NOT in _MANAGED_KEYS that
@@ -412,7 +463,7 @@ EnvironmentFile=${WINDROSE_ENV_FILE}
 # works. The k8s side gets this via shareProcessNamespace; on bare
 # Linux the UI already sees the whole host PID namespace by default,
 # so no twist needed — this just confirms the expectation.
-ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/scripts/ui/server.py
+ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/server.py
 Restart=always
 RestartSec=5
 
@@ -423,6 +474,13 @@ WantedBy=multi-user.target
 # --- Reload + enable --------------------------------------------------
 systemctl daemon-reload
 systemctl enable --now windrose-xvfb.service windrose-ui.service windrose-game.service
+# `enable --now` is a no-op on services that are already running, so
+# re-runs of install.sh (e.g. picking up new UI code) wouldn't restart
+# them — the Python process would keep the old server.py in memory.
+# try-restart bounces only the services that were already running, so
+# fresh installs aren't double-started and upgrades actually pick up
+# new code without the operator having to chase extra systemctl calls.
+systemctl try-restart windrose-ui.service windrose-game.service
 
 log "done."
 echo

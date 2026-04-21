@@ -165,13 +165,23 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `WORLD_PRESET_TYPE` | `Medium` | `Easy`, `Medium`, `Hard`, `Custom` |
 | `P2P_PROXY_ADDRESS` | auto-detected (UDP-connect getsockname trick; falls back to `0.0.0.0` if the trick fails) | The ICE host candidate advertised to clients. Override only if auto-detect picks the wrong interface. |
 
+**Direct IP Connection** (Windrose 2026-04+). Alternative to the backend connectivity service — players join via a raw IP:port instead of an invite code. Leave `USE_DIRECT_CONNECTION` empty (the default) unless your ISP blocks Windrose's backend. Enabling disables invite codes, advertises the address to connecting clients, and **requires you to manually port-forward UDP on your router**.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `USE_DIRECT_CONNECTION` | empty (feature off) | Set `true` to opt in, `false` to opt out. Empty leaves the field alone on existing configs. |
+| `DIRECT_CONNECTION_SERVER_ADDRESS` | reuses `P2P_PROXY_ADDRESS` when empty | The IP clients connect to. Can be a LAN IP (LAN-only play) or your public IP (router port-forwarding). |
+| `DIRECT_CONNECTION_SERVER_PORT` | `7777` | UDP port you forwarded on the router. |
+| `DIRECT_CONNECTION_PROXY_ADDRESS` | `0.0.0.0` | Only override if you're fronting with an explicit proxy. |
+
 **Runtime behavior**
 | Env var | Default | Purpose |
 |---|---|---|
 | `WINDROSE_CONFIG_MODE` | `env` | `env` (stamp `ServerDescription.json` from env on every boot), `managed` (render from chart inlineJson + Secret), `mutable` (leave operator's on-disk file alone; recommended for UI-driven edits). |
 | `WINDROSE_LAUNCH_STRATEGY` | `shipping` | `shipping` (headless, recommended) or `launcher` (`WindroseServer.exe`). |
 | `WINDROSE_SERVER_SOURCE` | `steamcmd` | `steamcmd` (anonymous `app_update 4129620` on every boot) or `files` (operator populates `WindowsServer/` via UI upload / `kubectl cp`). |
-| `SERVER_LAUNCH_ARGS` | `-FPS=60` | Extra args appended after `-log` on the game binary's command line. Empty uncaps, `-FPS=30` matches older behavior. |
+| `SERVER_LAUNCH_ARGS` | `-FPS=60` | Extra args appended after `-log` on the game binary's command line. Caps the game's main loop; pair with `NET_SERVER_MAX_TICK_RATE` below to keep command-line + Engine.ini in sync. Empty uncaps. |
+| `NET_SERVER_MAX_TICK_RATE` | `60` | Server-side tick rate (`stat srvfps`) — stamped into Engine.ini's `NetServerMaxTickRate` + `t.MaxFPS` on every boot. **This is the knob that moves the needle** — `SERVER_LAUNCH_ARGS=-FPS=N` alone doesn't change the net tick, only the render cap. Lower to `30` on constrained hosts (1-2 vCPU VPSes, older NAS) to halve per-tick CPU + replication bandwidth at the cost of visibly choppier movement. Raise to `120` on real hardware with LAN/low-latency clients. Uses shadow-stamp: hand-edits to Engine.ini for these two keys survive subsequent helm upgrades (we only overwrite when the on-disk value matches the one we last wrote). |
 | `FILES_WAIT_TIMEOUT_SECONDS` | `0` | 0 = wait forever for `WindowsServer/` to appear before launching. Only relevant when `WINDROSE_SERVER_SOURCE=files`. |
 | `PROTON_USE_XALIA` | `0` | Xalia crashes on headless Proton; leave off. |
 | `DISABLE_SENTRY` | `1` | Crashpad hard-aborts under Wine; keep Sentry disabled unless you're debugging. |
@@ -179,8 +189,8 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 **Idle-CPU patch**
 | Env var | Default | Purpose |
 |---|---|---|
-| `WINDROSE_PATCH_IDLE_CPU` | `0` | `1` → entrypoint runs `scripts/patch-idle-cpu.py` against the game binary on every start. **Experimental, no warranty.** See the Caveats section and the script header for the disclaimer. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
-| `WINDROSE_PATCH_OVERRIDE_FILE` | `$R5_DIR/.idle-patch-override` | Path the entrypoint consults for a runtime override written by the admin UI's Idle-CPU card. `disabled` forces OFF and triggers a revert on next boot; `enabled` forces ON. Absent = follow `WINDROSE_PATCH_IDLE_CPU`. |
+| `WINDROSE_PATCH_IDLE_CPU` | `0` | `1` → entrypoint builds a `WindroseServer-Win64-Shipping.patched.exe` sibling of the Steam-managed original on every start (caching by source md5), and launches that instead. The original is never modified, so SteamCMD's app_update has nothing to revert. **Experimental, no warranty** — see Caveats and the script header. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
+| `WINDROSE_PATCH_OVERRIDE_FILE` | `$R5_DIR/.idle-patch-override` | Runtime override written by the admin UI's Idle-CPU card. `disabled` forces OFF (patched sibling is removed on next restart, game launches original); `enabled` forces ON regardless of env. Absent = follow `WINDROSE_PATCH_IDLE_CPU`. |
 
 **Admin UI (`windrose-ui` sidecar)**
 | Env var | Default | Purpose |
@@ -190,6 +200,20 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `UI_PASSWORD` | `` | HTTP basic-auth password; empty = no auth (only safe on LAN-only / firewalled hosts). Username is ignored. |
 | `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` | `false` | Explicit opt-in for destructive endpoints when `UI_PASSWORD` is empty. With a password set, destructive is always allowed. |
 | `UI_SERVE_STATIC` | `true` | Set `false` to have the Python sidecar serve only `/api/*`; pair with an nginx that owns the static bundle. |
+
+**Backups**
+| Env var | Default | Purpose |
+|---|---|---|
+| `WINDROSE_BACKUP_ROOT` | `/home/steam/backups` | Where `create_backup()` drops timestamped snapshots. |
+| `WINDROSE_BACKUP_RETAIN` | `10` | Minimum count of most-recent non-pinned backups to keep. Combined with the age window below via OR — a backup survives if either rule keeps it. Acts as a hard floor: even if no new backups happen for a year, the newest N survive. |
+| `WINDROSE_BACKUP_RETAIN_DAYS` | `7` | Keep anything younger than this many days, regardless of count. Age rule only **adds** to the keep set — never subtracts — so if the auto-backup scheduler stalls, the most-recent N from the count rule still stick around. |
+| `WINDROSE_AUTO_BACKUP_IDLE_MINUTES` | `1` | Idle trigger: take an auto-backup N minutes after the last player disconnects. Set `0` to disable. |
+| `WINDROSE_AUTO_BACKUP_FLOOR_HOURS` | `6` | Floor trigger: if the server has been continuously active (players connected) for M hours with no auto-backup, take one. Set `0` to disable. |
+| `WINDROSE_ALLOW_FRESH_WORLD` | `0` | Escape hatch for the entrypoint's "Saved/ is empty but this install used to have a world" data-loss guard. Set `1` only when you genuinely want to start fresh on an install that previously had saves. Usually you want to restore from a backup instead. |
+
+**Runtime override.** Once an operator edits the auto-backup schedule in the admin UI, the values are persisted atomically to `$R5_DIR/.backup-config.json` and **the file is authoritative thereafter** — the env vars above only seed the initial values until the file exists. Delete the file to fall back to env-driven defaults.
+
+**Manual vs auto.** Two independent systems, like in-game manual saves vs auto-saves. Clicking *Create backup now* does **not** reset either auto-backup clock. Pinned backups (dirs whose name starts with `manual-`) are exempt from retention and never auto-pruned. Create one via `POST /api/backups` with body `{"pin": true}`, or pin an existing one via `POST /api/backups/{id}/pin`. Auto-created backups land in unprefixed timestamped dirs with a hidden `.auto` marker file inside — the admin UI tags their rows accordingly and webhook payloads include `source: "auto"`.
 
 **Webhooks (fires from a background poller)**
 | Env var | Default | Purpose |
@@ -245,6 +269,106 @@ The endpoint accepts `.tar.gz` / `.tar` / `.zip`, auto-detects format by magic b
 
 The game stores its `PersistentServerId` in `ServerDescription.json`. On registration, Windrose's backend looks up the island keyed off PSID — your save's `WorldIslandId` is tied to the PSID that originally owned it. If you nuke `ServerDescription.json` as part of an update, the game mints a fresh PSID on next boot, the backend hands you a brand-new island, and your old save sits on disk untied to any server the backend knows about. See `memory/windrose_island_identity.md`.
 
+## Recover Your World
+
+Four recovery paths, from lightest-touch to nuclear. All are covered by the same principle: **the backup directory is the source of truth; never cherry-pick pieces of it onto a running live tree**. RocksDB + the game's internal bookkeeping under `Saved/` expect the whole subtree to be consistent with the identity JSONs.
+
+### 1. Restore a UI backup — the default recovery path
+
+Admin console → **Backups** card → **Ours** tab → **Restore** on the timestamp row you want. Equivalent `curl`:
+
+```bash
+curl -s -u admin:$PASSWORD -X POST \
+  http://<host>:28080/api/backups/<backup-id>/restore
+```
+
+This calls `restore_backup()`, which wipes the live `R5/Saved/` tree and drops in the backup's whole tree + `ServerDescription.json` + `WorldDescription.json` + `.backup-config.json` + `.idle-patch-override`. Triggers a restart; the backend sees the preserved PSID and hands back the same island. Fires a `backup.restored` webhook. **This is the only supported recovery primitive for world data loss** — rolling back piece-by-piece leaves the internal state inconsistent and the game may refuse to load the world.
+
+Backups show three row tags: `auto` (scheduler-created), `manual` (operator-clicked), `pinned` (`manual-` prefix — exempt from retention). All three restore identically.
+
+### 2. Merge a Windrose game auto-backup
+
+Admin console → **Backups** → **Default_Backups (game)** tab → **Restore**. Equivalent `curl`:
+
+```bash
+curl -s -u admin:$PASSWORD -X POST \
+  http://<host>:28080/api/game-backups/<timestamp>/restore
+```
+
+Use when a UI backup isn't recent enough and the game's own on-launch backup captured the state you want. Merges the backup's RocksDB tree on top of live, creates a pinned safety snapshot first (visible under the *Ours* tab with the `manual-` prefix). **Caveat:** game auto-backups are world-only — `ServerDescription.json` is untouched, so this won't help recover a lost PSID. If your island identity is also gone, use path #1 instead.
+
+### 3. Disaster mode — when the admin UI won't start
+
+If the UI sidecar is crash-looping or the game won't boot and you can't reach the API, the on-disk backup directory is still there. From the container / host shell:
+
+```bash
+# k8s
+kubectl -n games exec windrose-0 -c windrose-ui -- ls -1 /home/steam/backups
+
+# bare-Linux / compose (on host)
+ls -1 /home/steam/backups
+```
+
+Pick the timestamp, stop the game, and do a plain `rm -rf Saved/ && cp -a` dance:
+
+```bash
+# Inside the container (or on the bare-Linux host):
+cd /home/steam/windrose/WindowsServer/R5
+# Stop the game first — these files must not be in use.
+rm -rf Saved
+cp -a /home/steam/backups/<ts>/Saved .
+cp /home/steam/backups/<ts>/ServerDescription.json .
+cp /home/steam/backups/<ts>/WorldDescription.json .
+```
+
+Then bring the UI / game back up. This matches exactly what `restore_backup()` does programmatically — it exists so operators don't have to.
+
+### 4. Lost PSID → orphaned island
+
+If `ServerDescription.json` was deleted, mangled, or replaced (e.g. by a clumsy `cp` from a blank template), the game mints a fresh `PersistentServerId` on next boot, the backend hands back a brand-new `WorldIslandId`, and your old save sits on disk untied to any server the backend knows about. **Only path #1 fixes this** — a UI backup captures `ServerDescription.json` so the PSID comes back intact. Game auto-backups (#2) won't help here; they're world-only.
+
+If no backup has the right `ServerDescription.json` either, the world is unrecoverable from the backend's point of view — the save file is still on disk but there's no way to bind it back to an island without the PSID that originally owned it.
+
+### 5. Migrate to a new host
+
+Moving your server between hosts (home-lab → VPS, k8s → bare-Linux, old node → new node) is a symmetric backup round-trip:
+
+1. **Source host** — admin console → Backups → *Ours* tab → **Download** on the row you want (or `GET /api/backups/{id}/download`). Streams the full tree (Saved/ + ServerDescription.json + WorldDescription.json + your `.backup-config.json`) as a single `.tar.gz`.
+2. **New host** — stand up a fresh Windrose deployment (helm install / docker compose / `sudo ./bare-linux/install.sh`). Don't start it yet, or do — either works.
+3. **New host's admin UI** → Backups → *Import backup (.tar.gz)* → pick the file → **Upload + pin**. Server lands it as `manual-imported-<ts>` (pinned — retention won't touch it) and returns the id.
+4. Click **Restore** on that row. The existing `/api/backups/{id}/restore` flow handles the swap — wipes whatever live `Saved/` the new host has, drops in the imported tree, restores the original `ServerDescription.json`, and requests a restart.
+5. Next boot, the backend looks up your preserved PSID and hands back the same `WorldIslandId`. Same invite code, same world, same players.
+
+CLI equivalent:
+```bash
+# Source:
+curl -s -u admin:$PASSWORD -o bkp.tar.gz \
+  http://<src-host>:28080/api/backups/<backup-id>/download
+
+# New host:
+curl -s -u admin:$PASSWORD --data-binary @bkp.tar.gz \
+  -H 'Content-Type: application/gzip' -H 'X-Filename: bkp.tar.gz' \
+  http://<new-host>:28080/api/backups/upload
+# Response is JSON with the new id — use it in the restore:
+curl -s -u admin:$PASSWORD -X POST \
+  http://<new-host>:28080/api/backups/<returned-id>/restore
+```
+
+Works across deployment surfaces — you can download from a k8s host and upload to a bare-Linux VPS (or vice versa). The only thing that won't migrate is the idle-CPU patch binary md5 marker; the new host's entrypoint will re-patch on first boot if `WINDROSE_PATCH_IDLE_CPU=1` is set.
+
+### Prevention
+
+- **Pin before risky ops.** Before manually editing config files, running the idle-CPU patch for the first time, or swapping `WindowsServer/` via the upload flow, click **Pin** on the most recent backup in the *Ours* tab (or `POST /api/backups/{id}/pin`). Pinned entries ignore retention — they survive until you click Unpin.
+- **Keep the age window generous.** `WINDROSE_BACKUP_RETAIN_DAYS=7` is the floor we ship with, and retention combines count + age via OR (either rule keeping a backup is enough). So `retain=10 + retain_days=7` guarantees the most recent 10 survive forever and anything in the last week also survives, even if the auto-scheduler silently stalls.
+- **Watch for auto-backup drift.** The Backups row tagging shows `auto` vs `manual` — if you see no `auto` rows for multiple days despite active play, the scheduler likely isn't firing. Check the UI container's stderr for `[auto-backup]` lines.
+- **Don't build recovery tooling in `/tmp`.** Most deployments mount `/tmp` as tmpfs; a mid-operation container kill = data gone. All backups + staging in this repo land on the PVC (`/home/steam/backups/`) for exactly this reason.
+
+### What NOT to do
+
+- **Don't raw-`cp` a single world subtree** (`Saved/.../Worlds/<id>/`). RocksDB's `MANIFEST` + `CURRENT` files reference data in sibling `Saved/SaveProfiles/` paths; copying a world folder alone can mismatch those pointers and corrupt the load.
+- **Don't delete `ServerDescription.json`** thinking the game will helpfully re-mint. It will — and your existing save becomes unrebindable (see path #4).
+- **Don't amend / force-push a `.backup-config.json` directly** on disk while the scheduler is running. Use `PUT /api/backup-config` so the write is atomic; the scheduler re-reads the file each tick.
+
 ## Retrieve The Invite Code
 
 From the UI: the big code on the **Invite** card.
@@ -278,16 +402,29 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | POST   | `/api/config/validate`                        | authed        | Dry-run schema check for a config body, no side effects.                                 |
 | POST   | `/api/config/apply`                           | *destructive* | Swap staged → live for server + every staged world atomically, then signal restart.      |
 | GET    | `/api/backups`                                | authed        | List of timestamped snapshots under `/home/steam/backups/`.                              |
-| POST   | `/api/backups`                                | *destructive* | Create a manual snapshot now. Fires `backup.created` webhook.                            |
-| POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. Fires `backup.restored`. |
+| POST   | `/api/backups`                                | *destructive* | Create a manual snapshot now. Body `{"pin": true}` prefixes the directory name with `manual-` so it's exempt from retention. Fires `backup.created` webhook. |
+| POST   | `/api/backups/{id}/pin`                       | *destructive* | Rename an existing backup to exempt it from retention. Returns the new id. |
+| POST   | `/api/backups/{id}/unpin`                     | *destructive* | Reverse of pin. |
+| POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. **This is the only supported recovery path — never raw-`cp` parts of a backup in place, the game's internal state under `Saved/` expects the whole tree to be consistent.** Fires `backup.restored`. |
+| GET    | `/api/backups/{id}/download`                  | authed        | Stream a full backup (Saved/ + ServerDescription + WorldDescription + .backup-config + .idle-patch-override) as `.tar.gz`. Same shape `POST /api/backups/upload` accepts — the two form a round-trip for server migration (download on host A → upload on host B → restore). |
+| POST   | `/api/backups/upload`                         | *destructive* | Accept a `.tar.gz` (shape from Download above), extract into a new `manual-imported-<ts>/` pinned backup dir, and return its id. Caller typically follows with `POST /api/backups/{id}/restore` to complete a migration. Fires `backup.created` with `source: "imported"`. |
+| GET    | `/api/backup-config`                          | authed        | Current effective auto-backup config (idleMinutes, floorHours, retainCount, retainDays) + the env-seeded defaults + last-run status. |
+| PUT    | `/api/backup-config`                          | *destructive* | Persist auto-backup config atomically to `$R5_DIR/.backup-config.json`. Validates range + type; file is authoritative thereafter. |
+| GET    | `/api/game-backups`                           | authed        | Windrose's own auto-backups under `SaveProfiles/Default_Backups/` (world-only snapshots on the game's own schedule). |
+| POST   | `/api/game-backups/{ts}/restore`              | *destructive* | Merge a selected game auto-backup onto the live RocksDB tree. Creates a pinned safety snapshot first. Note: game auto-backups don't contain ServerDescription/WorldDescription — they're world-only. |
 | GET    | `/api/saves/download`                         | authed        | Stream `R5/Saved/` as a `.tar.gz` (useful for local analysis or backups off-host).       |
 | POST   | `/api/upload`                                 | *destructive* | Stream a `.tar.gz` / `.tar` / `.zip` of a `WindowsServer/` tree onto the PVC. Preserves identity + saves; snapshots the old tree to `backups/`. |
 | GET    | `/api/worlds/{islandId}/config`               | authed        | Live + staged `WorldDescription.json` for one world.                                     |
 | PUT    | `/api/worlds/{islandId}/config`               | *destructive* | Stage per-world changes (writes `WorldDescription.staged.json`). Normalized on receive.  |
 | DELETE | `/api/worlds/{islandId}/config`               | *destructive* | Discard the staged per-world changes.                                                    |
 | POST   | `/api/worlds/{islandId}/upload`               | *destructive* | Upload a world tarball into `R5/Saved/.../Worlds/{id}/`. Requires the game to be stopped. |
-| POST   | `/api/server/restart`                         | *destructive* | SIGTERM the game process; supervisor brings it back. No config changes applied.          |
-| POST   | `/api/server/stop`                            | *destructive* | SIGTERM the game process. Kubelet / Docker / systemd restarts the container per usual.   |
+| POST   | `/api/server/restart`                         | *destructive* | Restart the game. Prefers `systemctl restart windrose-game.service` on bare-Linux (requires polkit rule from `bare-linux/polkit/50-windrose.rules`); falls back to SIGTERM + supervisor auto-restart on k8s / compose. |
+| POST   | `/api/server/stop`                            | *destructive* | Stop the game. On bare-Linux with polkit: `systemctl stop` (service stays inactive until Start). On k8s / compose: SIGTERM + supervisor restarts the container per usual. |
+| POST   | `/api/server/start`                           | *destructive* | Start the game service. Only available on bare-Linux (returns 501 on k8s/compose where the container supervisor owns the lifecycle). |
+| GET    | `/api/maintenance`                            | authed        | `{active, flagFile}` — whether the entrypoint will sleep on next boot instead of launching. |
+| POST   | `/api/maintenance`                            | *destructive* | `{active: bool, restart?: bool}` — toggle the flag file; `restart: true` also signals the game to stop now so it takes effect immediately. |
+| GET    | `/api/idle-cpu-patch`                         | authed        | Full state of the opt-in binary patch: MD5, detected patch state, env + override, needs-restart hint. |
+| POST   | `/api/idle-cpu-patch`                         | *destructive* | `{override: "enabled"|"disabled"|null, restart?: bool}` — write/clear the runtime override file; optional restart. |
 
 `islandId` is the 32-character hex folder name under `RocksDB/<GameVersion>/Worlds/`. Backup `id` is the UTC timestamp folder name under `/home/steam/backups/` (format `YYYYMMDDTHHMMSSZ`).
 
@@ -325,8 +462,8 @@ Event types:
 | `server.offline`  | The game process goes away (crash, `stop`, pod eviction).          |
 | `player.join`     | A new `AccountId` appears in the connected-players snapshot.       |
 | `player.leave`    | An `AccountId` drops out of the connected-players snapshot.        |
-| `backup.created`  | The admin console's **Create backup now** or `POST /api/backups`.  |
-| `backup.restored` | A backup is restored via `POST /api/backups/{id}/restore`.         |
+| `backup.created`  | The admin console's **Create backup now**, `POST /api/backups`, or an auto-backup from the scheduler (payload includes `source: "auto"` + `reason: "idle"` or `"floor"`). |
+| `backup.restored` | A backup is restored via `POST /api/backups/{id}/restore` or a game auto-backup is merged via `POST /api/game-backups/{ts}/restore`. |
 | `config.applied`  | Config changes are applied via **Apply + restart**.                |
 
 Restrict the fired set with `WINDROSE_WEBHOOK_EVENTS` (comma-separated). Empty URLs disable delivery entirely — leave both URLs unset to suppress webhooks even if the event list is populated.
@@ -359,8 +496,12 @@ kubectl kustomize . >/dev/null
 helm lint ./helm/windrose
 helm template windrose ./helm/windrose >/dev/null
 shellcheck scripts/entrypoint.sh scripts/pack-windowsserver.sh
-python3 -m py_compile scripts/ui/server.py
-bash scripts/ui/test_api.sh  # requires a running canary — see CLAUDE.md
+python3 -m py_compile server.py
+python3 tests/test_retention.py
+python3 tests/test_restore.py
+python3 tests/test_auto_backup.py
+python3 tests/test_http.py
+bash tests/test_api.sh  # requires a running canary — see CLAUDE.md
 ```
 
 CI runs these plus JSON validation and YAML lint.
@@ -375,9 +516,9 @@ CI runs these plus JSON validation and YAML lint.
   2. **nginx serves static, Python serves `/api/*`.** Set `ui.serveStatic: false` in values, then bundle the assets into a ConfigMap nginx can mount:
      ```bash
      kubectl -n games create configmap windrose-ui-assets \
-       --from-file=index.html=./scripts/ui/index.html \
-       --from-file=app.css=./scripts/ui/app.css \
-       --from-file=app.js=./scripts/ui/app.js
+       --from-file=index.html=./ui/index.html \
+       --from-file=app.css=./ui/app.css \
+       --from-file=app.js=./ui/app.js
      ```
      Point nginx's `root` or `alias` at the mount and `proxy_pass` the `/api/*` location to the windrose Service.
 - **Unpatched idle CPU is ~2 cores** — a known upstream spin-loop bug in `boost::asio::detail::socket_select_interrupter::reset()`, unreachable from Engine.ini / launch args / Proton env (see `memory/windrose_idle_cpu_known_bug.md`). Optional binary patch at `scripts/patch-idle-cpu.py` injects a `Sleep(1)` into the hot loop; ~97% reduction on the builds measured so far. Opt in via `WINDROSE_PATCH_IDLE_CPU=1` (Helm: `patchIdleCpu: "1"`). The script auto-derives offsets from a unique byte signature so it tolerates Windrose rebuilds — it refuses cleanly if the signature moves. The UI's Idle-CPU card has a runtime override for rollback without redeploying. **Offered as-is with no warranty and no guarantees.** Operators run it against their own SteamCMD-pulled copy; this project does not distribute modified binaries. Applying may conflict with the Windrose EULA or Steam Subscriber Agreement — review the terms before enabling; full risk rests with you.
@@ -415,7 +556,9 @@ Everything below this line is for agents and humans editing this repo. Regular o
 - `Dockerfile`: game-server container image.
 - `scripts/entrypoint.sh`: source of truth for startup — SteamCMD seed (for `steamclient.so` only; no app depot download), Proton seed, files-wait loop, save-version migration, config reconciliation, Xvfb-socket wait, `exec proton`.
 - `scripts/ServerDescription_example.json` / `WorldDescription_example.json`: seed templates used in `env` config mode.
-- `scripts/ui/`: UI sidecar assets (baked into the same game-server image as `/opt/windrose-ui/`). `server.py` is the stdlib-only admin console (status, invite, config editor, backups, per-world editor, webhooks); `index.html` + `app.css` + `app.js` are the browser UI; `test_api.sh` is the canary smoke test.
+- `server.py` (repo root): stdlib-only admin console (status, invite, config editor, backups, per-world editor, webhooks). Baked into the same image as the game container at `/opt/windrose-ui/server.py`.
+- `ui/`: browser bundle (`index.html` + `app.css` + `app.js`), served by `server.py` from its sibling directory (`UI_STATIC_DIR` env var overrides when nginx owns assets).
+- `tests/`: stdlib-only unit + integration tests (`test_retention.py`, `test_restore.py`, `test_auto_backup.py`, `test_http.py`) plus the canary smoke test (`test_api.sh`). Run via `python3 tests/test_<name>.py`.
 - `docker-compose.yaml`: three-service local deployment (game + xvfb + ui) with `network_mode: host` on the game.
 - `namespace.yaml`, `pvc.yaml`, `statefulset.yaml`, `service.yaml`, `ingress.yaml`: plain Kubernetes manifests.
 - `kustomization.yaml`: thin wrapper over the plain manifests.
@@ -475,7 +618,7 @@ Important specifics:
 - Prefer small, synchronized changes across docs and deployment surfaces over fixing only one path.
 - Never commit real secrets. Passwords and webhook URLs come from env or Kubernetes Secrets.
 - If you touch runtime defaults, update this README (and the env-var table above).
-- If you change the UI JSON shape (`/api/status`, `/api/config`, etc.), update `scripts/ui/app.js` (and, where relevant, `scripts/ui/index.html`) in the same change. The browser and server must agree.
+- If you change the UI JSON shape (`/api/status`, `/api/config`, etc.), update `ui/app.js` (and, where relevant, `ui/index.html`) in the same change. The browser and server must agree.
 - If you touch published artifact names or tags, update both image and chart workflows in `.github/workflows/`.
 - Don't add community-Docker-isms that depend on anonymous SteamCMD depot download — that path is blocked for Windrose and we intentionally do not try.
 - `memory/` files under `~/.claude/projects/-home-seslly-seslly-github-windrose-self-hosted/memory/` are Claude Code's persistent notes. When you discover a non-obvious fact about how Windrose or Proton behaves (e.g. the `P2pProxyAddress` / ICE host-candidate fix, the `0.0.0.0 getsockname` dead end, the backend-assigned WorldIslandId), write it there so the next session has the context.

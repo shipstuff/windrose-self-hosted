@@ -77,6 +77,20 @@ spec:
             # host candidate. Downward API status.hostIP was tempting but it
             # returns whatever the kubelet registers as InternalIP — often
             # an overlay address that LAN clients can't reach.
+            # --- Direct IP Connection ----------------------------------
+            # Only pass through when useDirectConnection is explicitly
+            # set (true|false). null leaves the field alone so existing
+            # deployments aren't silently flipped.
+            {{- if ne .Values.serverConfig.useDirectConnection nil }}
+            - name: USE_DIRECT_CONNECTION
+              value: {{ .Values.serverConfig.useDirectConnection | quote }}
+            - name: DIRECT_CONNECTION_SERVER_ADDRESS
+              value: {{ .Values.serverConfig.directConnection.serverAddress | quote }}
+            - name: DIRECT_CONNECTION_SERVER_PORT
+              value: {{ .Values.serverConfig.directConnection.serverPort | quote }}
+            - name: DIRECT_CONNECTION_PROXY_ADDRESS
+              value: {{ .Values.serverConfig.directConnection.proxyAddress | quote }}
+            {{- end }}
             - name: WORLD_ISLAND_ID
               value: {{ .Values.worldConfig.islandId | quote }}
             - name: WORLD_NAME
@@ -93,6 +107,8 @@ spec:
               value: {{ .Values.filesWaitTimeoutSeconds | quote }}
             - name: SERVER_LAUNCH_ARGS
               value: {{ .Values.serverConfig.launchArgs | quote }}
+            - name: NET_SERVER_MAX_TICK_RATE
+              value: {{ .Values.serverConfig.networkTickRate | quote }}
             - name: WINDROSE_SERVER_SOURCE
               value: {{ .Values.serverConfig.source | default "steamcmd" | quote }}
             - name: DISPLAY

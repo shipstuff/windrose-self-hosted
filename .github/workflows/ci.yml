@@ -29,7 +29,33 @@ jobs:
         with:
           python-version: "3.13"
       - name: Syntax-check UI server
-        run: python3 -m py_compile scripts/ui/server.py scripts/patch-idle-cpu.py
+        run: python3 -m py_compile server.py scripts/patch-idle-cpu.py
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Backup retention tests
+        run: python3 tests/test_retention.py
+      - name: Backup create/restore round-trip tests
+        run: python3 tests/test_restore.py
+      - name: Auto-backup scheduler tests
+        run: python3 tests/test_auto_backup.py
+      - name: Server-control (systemctl dispatch) tests
+        run: python3 tests/test_server_control.py
+      - name: ServerDescription schema tests
+        run: python3 tests/test_schema.py
+      - name: HTTP integration tests
+        run: python3 tests/test_http.py
+      - name: install.sh env-merge regression
+        run: bash tests/test_install_env_merge.sh
+      - name: Engine.ini reconcile (NetServerMaxTickRate + t.MaxFPS)
+        run: bash tests/test_engine_ini_reconcile.sh
+      - name: ServerDescription shadow-stamp contract
+        run: bash tests/test_shadow_stamp.sh
 
   yaml-lint:
     runs-on: ubuntu-latest

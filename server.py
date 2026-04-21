@@ -33,6 +33,7 @@ Without either, destructive endpoints return 403.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -65,7 +66,14 @@ R5_LOG                = R5_DIR / "Saved" / "Logs" / "R5.log"
 CONFIG_PATH           = R5_DIR / "ServerDescription.json"
 STAGED_CONFIG_PATH    = R5_DIR / "ServerDescription.staged.json"
 BACKUP_ROOT           = Path(os.environ.get("WINDROSE_BACKUP_ROOT", "/home/steam/backups"))
-STATIC_DIR            = Path(__file__).resolve().parent
+# Frontend assets live in a sibling ui/ directory. Deployments that
+# ship server.py and ui/ together at the same level (Docker image,
+# bare-Linux install, dev checkout) just work. An override env var
+# supports the pattern where nginx serves the bundle from a different
+# mount but the Python sidecar still handles /api/*.
+STATIC_DIR            = Path(os.environ.get(
+    "UI_STATIC_DIR", str(Path(__file__).resolve().parent / "ui"),
+))
 UI_PASSWORD                        = os.environ.get("UI_PASSWORD", "")
 # Opt-in flag that lets destructive actions (upload, server stop, config
 # apply, backup restore) run even when no password is set. Intended only
@@ -76,7 +84,45 @@ UI_ENABLE_ADMIN_WITHOUT_PASSWORD  = os.environ.get("UI_ENABLE_ADMIN_WITHOUT_PASS
 # pod "/api/*-only" so an nginx in front (ingress or sidecar) can own
 # the static assets (and possibly auth) and reverse-proxy /api/* here.
 UI_SERVE_STATIC       = os.environ.get("UI_SERVE_STATIC", "true").lower() not in ("0", "false", "no")
-BACKUP_RETAIN         = int(os.environ.get("WINDROSE_BACKUP_RETAIN", "5"))
+BACKUP_RETAIN         = int(os.environ.get("WINDROSE_BACKUP_RETAIN", "10"))
+BACKUP_RETAIN_DAYS    = float(os.environ.get("WINDROSE_BACKUP_RETAIN_DAYS", "7"))
+# Auto-backup scheduler defaults. Zero on either disables that trigger.
+# Both defaults can be overridden per-install via the admin UI, which
+# writes an atomic JSON override file at $R5_DIR/.backup-config.json
+# (see effective_backup_config() below). Env vars only seed the initial
+# values until the operator saves from the UI.
+#
+# Semantics:
+#   - idleMinutes: N min after last player disconnects → take a backup.
+#     The idle clock resets every time the player count becomes non-zero.
+#   - floorHours: if the server has been continuously active (any players
+#     connected) for M hours with no auto-backup, take one.
+#   - Manual backups do NOT reset either of these clocks (separate systems,
+#     like in-game auto-saves vs manual saves).
+AUTO_BACKUP_IDLE_MINUTES_DEFAULT = float(os.environ.get("WINDROSE_AUTO_BACKUP_IDLE_MINUTES", "1"))
+AUTO_BACKUP_FLOOR_HOURS_DEFAULT  = float(os.environ.get("WINDROSE_AUTO_BACKUP_FLOOR_HOURS", "6"))
+# Poll cadence for the scheduler thread. Fast enough that an idle
+# trigger of 1 min fires within ~15s of the threshold; piggybacks on
+# the existing event-detector cadence.
+AUTO_BACKUP_POLL_SECONDS         = float(os.environ.get("WINDROSE_AUTO_BACKUP_POLL_SECONDS", "15"))
+AUTO_BACKUP_MARKER_NAME          = ".auto"
+# Backup dir names starting with this prefix are exempt from the
+# retention sweep — operators can pin important snapshots by naming
+# them with this prefix (`POST /api/backups {"pin": true}` does the
+# rename automatically). Prevents rapid automated backups from pushing
+# out a known-good recovery snapshot.
+BACKUP_PIN_PREFIX     = "manual-"
+# Windrose itself writes a per-launch backup under
+# R5/Saved/SaveProfiles/Default_Backups/<timestamp>/ (up to 30, auto-
+# rotated — behavior documented in the game's 2026-04 release notes).
+# We surface them alongside our own backups in the UI so operators have
+# one more recovery path. Read-only from our side — we never write
+# into this tree.
+GAME_BACKUPS_DIR      = Path(os.environ.get(
+    "WINDROSE_GAME_BACKUPS_DIR",
+    str(R5_DIR / "Saved" / "SaveProfiles" / "Default_Backups"),
+))
+GAME_ROCKSDB_DIR      = R5_DIR / "Saved" / "SaveProfiles" / "Default" / "RocksDB"
 GAME_CPU_LIMIT_STR    = os.environ.get("WINDROSE_GAME_CPU_LIMIT", "")
 GAME_MEM_LIMIT_STR    = os.environ.get("WINDROSE_GAME_MEM_LIMIT", "")
 
@@ -92,12 +138,26 @@ IDLE_PATCH_OVERRIDE_FILE = Path(os.environ.get(
     str(R5_DIR / ".idle-patch-override"),
 ))
 GAME_EXE_PATH = WINDROSE_SERVER_DIR / "R5" / "Binaries" / "Win64" / "WindroseServer-Win64-Shipping.exe"
-# First: the Docker / bare-Linux install target. Second: alongside the
-# UI server file for repo-checkout + source-run scenarios (scripts/ui/server.py
-# -> scripts/patch-idle-cpu.py).
+# Maintenance-mode flag. Entrypoint loop-sleeps instead of launching Proton
+# when this file exists, so the container stays up but the game stays stopped.
+# Operator clears the flag (UI toggle or manual rm) and the next restart
+# boots normally. Matches the entrypoint's default path so overriding the
+# env var on either side moves both endpoints together.
+MAINTENANCE_FLAG_FILE = Path(os.environ.get(
+    "WINDROSE_MAINTENANCE_FLAG_FILE",
+    str(R5_DIR / ".maintenance-mode"),
+))
+# Scratch dir for /api/saves/download's copytree snapshot. Defaults to
+# /tmp which is fine on most hosts, but on tmpfs-backed /tmp (common on
+# RHEL / some Docker setups) a large save can OOM the host mid-stream.
+# Point this at a PVC-backed path (e.g. /home/steam/tmp) on those hosts.
+SAVES_DOWNLOAD_SCRATCH_DIR = os.environ.get("WINDROSE_DOWNLOAD_SCRATCH_DIR", "/tmp")
+# First: the Docker / bare-Linux install target. Second: the repo-root
+# source-run fallback (server.py at repo root, patch-idle-cpu.py lives
+# under scripts/).
 PATCH_SCRIPT_CANDIDATES = [
     Path("/usr/local/bin/patch-idle-cpu.py"),
-    Path(__file__).resolve().parent.parent / "patch-idle-cpu.py",
+    Path(__file__).resolve().parent / "scripts" / "patch-idle-cpu.py",
 ]
 _PATCH_STATE_CACHE: dict = {"mtime": None, "md5": None, "state": None, "reason": None}
 _PATCH_STATE_LOCK = threading.Lock()
@@ -472,46 +532,63 @@ def _find_patch_script() -> Path | None:
 
 
 def idle_patch_binary_state() -> dict:
-    """Return a cached dict describing the shipping EXE's patch state. Uses
-    mtime+size as a cache key so a restart / patch / revert invalidates us
-    without re-scanning the 300 MB binary on every UI poll. Thread-safe
-    via _PATCH_STATE_LOCK so concurrent request handlers see consistent
-    reads + writes."""
+    """Report the idle-CPU patch state under the sidecar model. The
+    entrypoint maintains a sibling `<exe>.patched.exe` alongside the
+    Steam-managed original, plus a `<exe>.patched-source.md5` file
+    recording the md5 of the source it was built from.
+
+    States:
+      missing   — original EXE isn't on disk yet
+      unpatched — no sibling (patch is OFF or has never been built)
+      patched   — sibling exists and its recorded source md5 matches
+                  the current original's md5; will launch on next start
+      stale     — sibling exists but source md5 differs (Windrose
+                  updated since last patch build). Next boot rebuilds.
+    """
     try:
-        st = GAME_EXE_PATH.stat()
+        src_st = GAME_EXE_PATH.stat()
     except FileNotFoundError:
-        with _PATCH_STATE_LOCK:
-            _PATCH_STATE_CACHE.update({"mtime": None, "md5": None, "state": "missing", "reason": None})
         return {"state": "missing", "md5": None}
-    key = (st.st_mtime_ns, st.st_size)
+
+    patched_exe = GAME_EXE_PATH.parent / (GAME_EXE_PATH.stem + ".patched.exe")
+    source_md5_file = GAME_EXE_PATH.parent / (GAME_EXE_PATH.stem + ".patched-source.md5")
+
+    cache_key = (src_st.st_mtime_ns, src_st.st_size,
+                 patched_exe.stat().st_mtime_ns if patched_exe.is_file() else 0)
     with _PATCH_STATE_LOCK:
-        if _PATCH_STATE_CACHE.get("mtime") == key and _PATCH_STATE_CACHE.get("state"):
+        if _PATCH_STATE_CACHE.get("mtime") == cache_key and _PATCH_STATE_CACHE.get("state"):
             return {
                 "state": _PATCH_STATE_CACHE["state"],
                 "md5": _PATCH_STATE_CACHE["md5"],
                 "reason": _PATCH_STATE_CACHE.get("reason"),
             }
-    script = _find_patch_script()
-    if script is None:
-        return {"state": "unknown", "md5": None, "reason": "patch-idle-cpu.py not installed"}
-    try:
-        out = subprocess.run(
-            ["python3", str(script), str(GAME_EXE_PATH), "--print-state"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception as e:
-        return {"state": "unknown", "md5": None, "reason": f"subprocess error: {e}"}
-    line = (out.stdout or "").strip().splitlines()[-1] if out.stdout else ""
-    try:
-        parsed = json.loads(line) if line else {}
-    except json.JSONDecodeError:
-        parsed = {}
-    state = parsed.get("state", "unknown")
-    md5 = parsed.get("md5")
-    reason = parsed.get("reason")
+
+    src_md5 = _file_md5_streaming(GAME_EXE_PATH)
+
+    if not patched_exe.is_file():
+        state, reason = "unpatched", None
+    else:
+        try:
+            cached = source_md5_file.read_text(encoding="ascii").strip()
+        except OSError:
+            cached = ""
+        if cached == src_md5:
+            state, reason = "patched", None
+        else:
+            state = "stale"
+            reason = f"source md5 moved from {cached or '(none)'} to {src_md5}; will rebuild on next restart"
+
     with _PATCH_STATE_LOCK:
-        _PATCH_STATE_CACHE.update({"mtime": key, "md5": md5, "state": state, "reason": reason})
-    return {"state": state, "md5": md5, "reason": reason}
+        _PATCH_STATE_CACHE.update({"mtime": cache_key, "md5": src_md5, "state": state, "reason": reason})
+    return {"state": state, "md5": src_md5, "reason": reason}
+
+
+def _file_md5_streaming(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def idle_patch_full_status() -> dict:
@@ -574,39 +651,417 @@ def list_backups() -> list[dict]:
     out: list[dict] = []
     if not BACKUP_ROOT.exists():
         return out
-    for d in sorted(BACKUP_ROOT.iterdir(), reverse=True):
-        if not d.is_dir():
-            continue
+    # Gather metadata first so we can sort by mtime (true chronological)
+    # instead of by dir name. Sorting by name groups the "manual-*"
+    # prefix lexicographically separately from bare-timestamp auto
+    # entries, producing a confusing interleave where a pinned backup
+    # from last week appears above an auto-backup from five minutes ago.
+    rows: list[dict] = []
+    for d in BACKUP_ROOT.iterdir():
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue  # Python 3.13 is_dir() propagates OSError; skip unreadable entries
         try:
             st = d.stat()
             size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+            mtime = st.st_mtime
         except OSError:
-            size = 0; st = None
-        out.append({
+            size = 0; st = None; mtime = 0.0
+        pinned = d.name.startswith(BACKUP_PIN_PREFIX)
+        auto = (d / AUTO_BACKUP_MARKER_NAME).is_file()
+        rows.append({
+            "_mtime": mtime,  # sort key, stripped before returning
             "id": d.name,
-            "createdAt": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat() if st else "",
+            "createdAt": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat() if st else "",
             "sizeBytes": size,
+            "pinned": pinned,
+            "source": "auto" if auto else ("manual-pinned" if pinned else "manual"),
         })
+    rows.sort(key=lambda r: r["_mtime"], reverse=True)
+    for r in rows:
+        r.pop("_mtime", None)
+        out.append(r)
     return out
 
-def create_backup() -> dict:
+def create_backup(pin: bool = False) -> dict:
+    """Snapshot the current R5/Saved tree + identity files into a
+    timestamped backup directory, then run retention.
+
+    Do NOT use raw `cp` or piecewise file swaps to recover from a backup
+    — RocksDB + the game's internal book-keeping under Saved/ expect
+    the whole subtree to be consistent. Use `restore_backup()` /
+    `POST /api/backups/{id}/restore`.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    dst = BACKUP_ROOT / ts
+    dir_name = (BACKUP_PIN_PREFIX + ts) if pin else ts
+    dst = BACKUP_ROOT / dir_name
     dst.mkdir(parents=True, exist_ok=True)
     saved = R5_DIR / "Saved"
     if saved.is_dir():
         shutil.copytree(saved, dst / "Saved", dirs_exist_ok=True)
-    for name in ("ServerDescription.json", "WorldDescription.json"):
+    # Identity + operator-owned runtime settings. Staged configs are
+    # intentionally NOT captured — those represent pending intent, not
+    # live state, and mixing them into restore semantics gets confusing.
+    for name in (
+        "ServerDescription.json",
+        "WorldDescription.json",
+        ".backup-config.json",
+        ".idle-patch-override",
+    ):
         src = R5_DIR / name
         if src.is_file():
             shutil.copy2(src, dst / name)
-    # Retention: keep most-recent N
-    backups = sorted([p for p in BACKUP_ROOT.iterdir() if p.is_dir()], reverse=True)
-    for old in backups[BACKUP_RETAIN:]:
-        shutil.rmtree(old, ignore_errors=True)
-    return {"id": ts, "path": str(dst)}
+    _prune_backups()
+    return {"id": dir_name, "path": str(dst), "pinned": pin}
+
+
+def _prune_backups() -> None:
+    """Retention policy, evaluated per call to `create_backup()`:
+
+      1. Directories whose name starts with BACKUP_PIN_PREFIX are never
+         pruned ("pinned"). Operators use this to protect a known-good
+         snapshot from being auto-evicted.
+      2. Among the non-pinned, keep the most-recent BACKUP_RETAIN by
+         name-sort (timestamp dirs sort chronologically by design).
+      3. Also keep anything mtime-younger than BACKUP_RETAIN_DAYS,
+         regardless of count — so a burst of backups in one hour
+         doesn't push out last week's quiet snapshot.
+
+    A backup survives if EITHER (2) or (3) keeps it. Rule (1) overrides
+    everything else.
+    """
+    if not BACKUP_ROOT.is_dir():
+        return
+    cfg = effective_backup_config()
+    retain_count = int(cfg["retainCount"])
+    retain_days  = float(cfg["retainDays"])
+    now = time.time()
+    age_cutoff = now - retain_days * 86400
+    # Python 3.13's Path.is_dir() stopped swallowing OSError, so a single
+    # unreadable entry during iterdir() would abort the entire prune sweep.
+    # Guard each is_dir() call so the sweep still completes.
+    entries = []
+    for p in BACKUP_ROOT.iterdir():
+        try:
+            if p.is_dir():
+                entries.append(p)
+        except OSError:
+            pass  # can't read — leave it alone, move on
+    unpinned = [p for p in entries if not p.name.startswith(BACKUP_PIN_PREFIX)]
+    # Rule 2: top-N by name-sort descending.
+    keep_names = {p.name for p in sorted(unpinned, key=lambda p: p.name, reverse=True)[:retain_count]}
+    # Rule 3: keep anything within the age window.
+    for p in unpinned:
+        try:
+            if p.stat().st_mtime >= age_cutoff:
+                keep_names.add(p.name)
+        except OSError:
+            keep_names.add(p.name)  # If we can't stat, don't be the one to delete it.
+    for p in unpinned:
+        if p.name not in keep_names:
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def pin_backup(bid: str) -> str:
+    """Rename an existing backup dir with BACKUP_PIN_PREFIX so retention
+    skips it. Returns the new id. No-op if already pinned."""
+    src = BACKUP_ROOT / bid
+    if not src.is_dir():
+        raise FileNotFoundError(bid)
+    if bid.startswith(BACKUP_PIN_PREFIX):
+        return bid
+    new_name = BACKUP_PIN_PREFIX + bid
+    dst = BACKUP_ROOT / new_name
+    if dst.exists():
+        raise FileExistsError(new_name)
+    src.rename(dst)
+    return new_name
+
+
+def unpin_backup(bid: str) -> str:
+    """Strip BACKUP_PIN_PREFIX from a backup dir name so retention treats
+    it normally. No-op if not currently pinned."""
+    src = BACKUP_ROOT / bid
+    if not src.is_dir():
+        raise FileNotFoundError(bid)
+    if not bid.startswith(BACKUP_PIN_PREFIX):
+        return bid
+    new_name = bid[len(BACKUP_PIN_PREFIX):]
+    dst = BACKUP_ROOT / new_name
+    if dst.exists():
+        raise FileExistsError(new_name)
+    src.rename(dst)
+    return new_name
+
+
+def list_game_backups() -> list[dict]:
+    """Enumerate Windrose's own Default_Backups/ entries. Same shape as
+    list_backups() plus `source="game"` so the UI can tag the row."""
+    out: list[dict] = []
+    if not GAME_BACKUPS_DIR.is_dir():
+        return out
+    # Sort by mtime rather than name so the UI presents chronological
+    # order regardless of the game engine's future naming conventions.
+    rows = []
+    for d in GAME_BACKUPS_DIR.iterdir():
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue
+        try:
+            st = d.stat()
+            size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+            mtime = st.st_mtime
+        except OSError:
+            size = 0; st = None; mtime = 0.0
+        rows.append((mtime, d, st, size))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    for _mtime, d, st, size in rows:
+        out.append({
+            "id": d.name,
+            "createdAt": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat() if st else "",
+            "sizeBytes": size,
+            "source": "game",
+        })
+    return out
+
+
+def restore_game_backup(ts: str) -> None:
+    """Merge-restore a Default_Backups/<ts>/ entry onto the live RocksDB
+    tree. Follows the recipe in the Windrose release notes: copy the
+    backup contents on top of SaveProfiles/Default/RocksDB/ replacing
+    matching files. Not a wipe-and-replace — the game's own Default_Backups
+    layout is scoped per-version/per-world, and we merge so multiple
+    worlds in other subtrees aren't inadvertently wiped.
+
+    Creates a snapshot of the current live state via create_backup()
+    FIRST (with a pin prefix so it survives retention) — if this restore
+    lands wrong, operator has a one-click rollback in the UI backup list.
+    """
+    src = GAME_BACKUPS_DIR / ts
+    if not src.is_dir():
+        raise FileNotFoundError(ts)
+    # Pre-restore safety snapshot — pinned so retention can't evict it.
+    create_backup(pin=True)
+    GAME_ROCKSDB_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, GAME_ROCKSDB_DIR, dirs_exist_ok=True)
+
+
+def _backup_config_path() -> Path:
+    return R5_DIR / ".backup-config.json"
+
+
+def effective_backup_config() -> dict:
+    """Resolve the runtime backup config. File (UI-owned) wins over env.
+    Always returns a fully-populated dict so callers can pull fields
+    without defensive `.get` noise.
+    """
+    cfg = {
+        "idleMinutes": AUTO_BACKUP_IDLE_MINUTES_DEFAULT,
+        "floorHours":  AUTO_BACKUP_FLOOR_HOURS_DEFAULT,
+        "retainCount": BACKUP_RETAIN,
+        "retainDays":  BACKUP_RETAIN_DAYS,
+    }
+    path = _backup_config_path()
+    try:
+        if path.is_file():
+            overrides = json.loads(path.read_text())
+            for k in list(cfg.keys()):
+                if k in overrides and overrides[k] is not None:
+                    cfg[k] = type(cfg[k])(overrides[k])
+    except Exception as e:  # noqa: BLE001 — bad file shouldn't brick pruning
+        print(f"[backup-config] failed to load overrides: {e}", file=sys.stderr, flush=True)
+    return cfg
+
+
+def _validate_backup_config(payload: dict) -> dict:
+    """Coerce + clamp incoming config PUT body. Raises ValueError on shape errors."""
+    if not isinstance(payload, dict):
+        raise ValueError("body must be an object")
+    out: dict = {}
+    for k, lo, hi, caster in (
+        ("idleMinutes", 0.0, 24 * 60,   float),
+        ("floorHours",  0.0, 24 * 30,   float),
+        ("retainCount", 0,   10_000,    int),
+        ("retainDays",  0.0, 365.0 * 5, float),
+    ):
+        if k not in payload:
+            continue
+        try:
+            v = caster(payload[k])
+        except (TypeError, ValueError):
+            raise ValueError(f"{k} must be a number")
+        if v < lo or v > hi:
+            raise ValueError(f"{k} out of range [{lo}, {hi}]")
+        out[k] = v
+    return out
+
+
+def save_backup_config(overrides: dict) -> dict:
+    """Atomic-replace the override file with the given dict. Caller should
+    pre-validate via _validate_backup_config. Returns the effective config
+    after the write."""
+    path = _backup_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(overrides, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return effective_backup_config()
+
+
+def _mark_auto_backup(bkp_dir: Path) -> None:
+    """Drop the marker file inside a backup dir so list_backups() can tag it."""
+    try:
+        (bkp_dir / AUTO_BACKUP_MARKER_NAME).write_text(
+            datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii"
+        )
+    except Exception as e:  # noqa: BLE001 — cosmetic tag, don't fail the backup over it
+        print(f"[auto-backup] failed to drop marker: {e}", file=sys.stderr, flush=True)
+
+
+# In-memory state for the scheduler thread. Reset on UI container restart;
+# _bootstrap_auto_backup_state() re-derives the last-backup timestamp from
+# on-disk markers so restarts don't cause spurious immediate backups.
+_auto_state_lock = threading.Lock()
+_auto_state: dict = {
+    "lastAutoBackupAt": None,   # epoch float or None
+    "playersZeroSince": None,   # epoch float or None
+    "lastResult": "",
+}
+
+
+def _bootstrap_auto_backup_state() -> None:
+    """On process start, scan BACKUP_ROOT for the newest .auto-marked dir
+    and seed lastAutoBackupAt from it. Prevents the scheduler from firing
+    immediately after a UI container restart."""
+    latest = 0.0
+    try:
+        if BACKUP_ROOT.is_dir():
+            for d in BACKUP_ROOT.iterdir():
+                try:
+                    if d.is_dir() and (d / AUTO_BACKUP_MARKER_NAME).is_file():
+                        latest = max(latest, d.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    with _auto_state_lock:
+        _auto_state["lastAutoBackupAt"] = latest or None
+
+
+def trigger_auto_backup(reason: str) -> dict | None:
+    """Create an auto-backup and record state. Returns the backup dict or
+    None on failure. Reason goes into stderr log + webhook payload so
+    operators can distinguish idle vs floor triggers."""
+    try:
+        bkp = create_backup(pin=False)
+    except Exception as e:  # noqa: BLE001 — log, don't crash scheduler
+        msg = f"auto-backup failed: {e}"
+        print(f"[auto-backup] {msg}", file=sys.stderr, flush=True)
+        with _auto_state_lock:
+            _auto_state["lastResult"] = msg
+        return None
+    bkp_dir = Path(bkp["path"])
+    _mark_auto_backup(bkp_dir)
+    now = time.time()
+    with _auto_state_lock:
+        _auto_state["lastAutoBackupAt"] = now
+        _auto_state["lastResult"] = f"ok ({reason}) at {datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec='seconds')}"
+    print(f"[auto-backup] created {bkp['id']} reason={reason}", file=sys.stderr, flush=True)
+    fire_event("backup.created", backupId=bkp["id"], source="auto", reason=reason)
+    return bkp
+
+
+class AutoBackupScheduler(threading.Thread):
+    """Polling thread that implements the idle + floor triggers.
+
+    State machine:
+      players == 0:
+        - mark playersZeroSince = first poll that saw zero
+        - if (now - playersZeroSince) >= idleMinutes*60 AND no auto-backup
+          has fired since the zero-streak started → fire, then wait for
+          players to come back before firing again.
+      players > 0:
+        - playersZeroSince = None (reset)
+        - if floorHours > 0 AND (now - lastAutoBackupAt) >= floorHours*3600
+          → fire once and keep waiting.
+
+    Manual backups DO NOT update lastAutoBackupAt — two independent clocks
+    by design (cf. in-game manual vs auto saves).
+    """
+
+    def __init__(self):
+        super().__init__(daemon=True, name="windrose-auto-backup")
+
+    def _current_players(self) -> int:
+        try:
+            pid, _ = find_game_pid()
+            if pid is None:
+                return 0
+            return sum(1 for _ in parse_active_players())
+        except Exception:
+            return 0
+
+    def run(self) -> None:
+        _bootstrap_auto_backup_state()
+        while True:
+            time.sleep(AUTO_BACKUP_POLL_SECONDS)
+            try:
+                self._tick()
+            except Exception as e:  # noqa: BLE001
+                print(f"[auto-backup] tick error: {e}", file=sys.stderr, flush=True)
+
+    def _tick(self) -> None:
+        cfg = effective_backup_config()
+        idle_s  = float(cfg["idleMinutes"]) * 60.0
+        floor_s = float(cfg["floorHours"])  * 3600.0
+        now     = time.time()
+        players = self._current_players()
+
+        with _auto_state_lock:
+            last_auto  = _auto_state["lastAutoBackupAt"]
+            zero_since = _auto_state["playersZeroSince"]
+
+        if players == 0:
+            # Floor trigger is for active sessions only; cancel any
+            # running "active streak" here. Idle path takes over.
+            if idle_s <= 0:
+                return  # operator disabled the idle trigger
+            if zero_since is None:
+                with _auto_state_lock:
+                    _auto_state["playersZeroSince"] = now
+                return
+            if (now - zero_since) < idle_s:
+                return  # not idle long enough yet
+            # Fire only once per zero-streak: skip if we already took an
+            # auto-backup after zero_since.
+            if last_auto is not None and last_auto >= zero_since:
+                return
+            trigger_auto_backup("idle")
+        else:
+            with _auto_state_lock:
+                _auto_state["playersZeroSince"] = None
+            if floor_s <= 0:
+                return
+            if last_auto is not None and (now - last_auto) < floor_s:
+                return
+            trigger_auto_backup("floor")
+
 
 def restore_backup(bid: str) -> None:
+    """Atomic, whole-tree restore of a backup over the live R5/ state.
+
+    This is the ONLY supported recovery primitive for world data loss.
+    Partial recovery (cp of just `Saved/.../Worlds/<id>/`) leaves game
+    internal state inconsistent — Saved/SaveProfiles/Default_Backups,
+    document-manager caches, and RocksDB manifest pointers all need to
+    match the world payload they reference. This function rm -rf's the
+    entire live Saved/ tree first, then drops in the backup's full
+    Saved/ tree + ServerDescription/WorldDescription JSON.
+    """
     src = BACKUP_ROOT / bid
     if not src.is_dir():
         raise FileNotFoundError(bid)
@@ -614,7 +1069,12 @@ def restore_backup(bid: str) -> None:
         dst = R5_DIR / "Saved"
         shutil.rmtree(dst, ignore_errors=True)
         shutil.copytree(src / "Saved", dst)
-    for name in ("ServerDescription.json", "WorldDescription.json"):
+    for name in (
+        "ServerDescription.json",
+        "WorldDescription.json",
+        ".backup-config.json",
+        ".idle-patch-override",
+    ):
         s = src / name
         if s.is_file():
             shutil.copy2(s, R5_DIR / name)
@@ -622,13 +1082,70 @@ def restore_backup(bid: str) -> None:
 # --- Restart / stop signaling ----------------------------------------------
 RESTART_SENTINEL = Path("/tmp/windrose-restart-requested")
 
+# Name of the systemd unit that owns the game process on bare-Linux.
+# When present AND systemctl is on PATH AND the polkit rule from
+# bare-linux/polkit/50-windrose.rules is installed, the UI prefers a
+# clean `systemctl stop/restart` over a SIGTERM so systemd reflects the
+# real state. Falls back transparently on k8s / compose (no systemd in
+# the relevant namespace).
+WINDROSE_UNIT_NAME = os.environ.get("WINDROSE_UNIT_NAME", "windrose-game.service")
+
+
+def _systemctl_available() -> bool:
+    """True if this host has a systemctl we can drive and the windrose
+    unit exists. Caching would be nice but state can change mid-run
+    (install.sh re-run, unit rename), and the list-unit-files call is
+    cheap — ~5ms on a warm host."""
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        r = subprocess.run(
+            ["systemctl", "list-unit-files", "--no-legend", WINDROSE_UNIT_NAME],
+            capture_output=True, text=True, timeout=3,
+        )
+        return WINDROSE_UNIT_NAME in r.stdout
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def systemctl_dispatch(verb: str) -> tuple[bool, str]:
+    """Run `systemctl <verb> windrose-game.service` as whatever user
+    the UI runs as. Relies on the polkit rule shipped in
+    bare-linux/polkit/50-windrose.rules to grant the 'steam' user
+    access to manage the windrose-* units without sudo. Returns
+    (ok, message)."""
+    try:
+        r = subprocess.run(
+            ["systemctl", verb, WINDROSE_UNIT_NAME],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return True, r.stdout.strip() or f"systemctl {verb} ok"
+        return False, (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+    except subprocess.TimeoutExpired:
+        return False, f"systemctl {verb} timed out"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
 def request_restart() -> None:
     """Request a server restart without hard-killing here.
 
-    Writes a sentinel the game-container entrypoint watches; also best-
-    effort signals the running game process (requires CAP_KILL on the
-    UI container — see chart).
+    On bare-Linux with the polkit rule installed, prefers a clean
+    `systemctl restart windrose-game.service` so systemd's state
+    reflects reality. Otherwise writes the sentinel file the game-
+    container entrypoint watches + best-effort SIGTERMs the running
+    game process (kubelet / compose / systemd restarts it on exit).
     """
+    if _systemctl_available():
+        ok, msg = systemctl_dispatch("restart")
+        if ok:
+            return
+        # Fall through to the SIGTERM path if the polkit rule isn't in
+        # place or systemctl refused. Don't raise — operators in a
+        # half-configured state should still see *something* happen.
+        print(f"[restart] systemctl restart failed ({msg}); falling back to SIGTERM",
+              file=sys.stderr, flush=True)
     RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
     signal_game(signal.SIGTERM)
 
@@ -705,6 +1222,33 @@ def validate_server_description(doc: Any) -> list[str]:
     need("PersistentServerId", str, lambda k, v: check_str(k, v, _HEX32, 32, 32))
     need("InviteCode", str, lambda k, v: check_str(k, v, _INVITE, 6, 16))
     need("WorldIslandId", str, lambda k, v: check_str(k, v, _HEX32, 32, 32))
+    # Direct IP Connection (Windrose 2026-04+). All four fields are
+    # optional — older saved configs predate them. Only validate when
+    # present. Shape mirrors the live dedicated-server defaults:
+    #   UseDirectConnection: bool
+    #   DirectConnectionServerAddress: string (host or IP; "" allowed
+    #     when UseDirectConnection is false)
+    #   DirectConnectionServerPort: int 1-65535
+    #   DirectConnectionProxyAddress: string (typically "0.0.0.0" when
+    #     the operator isn't fronting with an explicit proxy)
+    def optional(key, typ, extra=None):
+        if key not in p:
+            return
+        if not isinstance(p[key], typ):
+            errs.append(f"ServerDescription_Persistent.{key}: expected {typ.__name__}, got {type(p[key]).__name__}")
+            return
+        if extra:
+            extra(key, p[key])
+    optional("UseDirectConnection", bool)
+    optional("DirectConnectionServerAddress", str, lambda k, v: check_str(k, v, None, 0, 255))
+    optional("DirectConnectionServerPort", int,
+             lambda k, v: errs.append(f"ServerDescription_Persistent.{k}: must be 1-65535") if not (1 <= v <= 65535) else None)
+    optional("DirectConnectionProxyAddress", str, lambda k, v: check_str(k, v, None, 0, 255))
+    # UseDirectConnection=true requires a non-empty server address —
+    # an empty address under Direct IP mode is the classic silent-fail
+    # footgun (same shape as the P2pProxyAddress=0.0.0.0 bounce).
+    if p.get("UseDirectConnection") is True and not p.get("DirectConnectionServerAddress"):
+        errs.append("ServerDescription_Persistent.DirectConnectionServerAddress: required when UseDirectConnection is true")
     return errs
 
 def _tagname_of(key: str) -> str:
@@ -883,6 +1427,84 @@ def restore_identity(preserve: Path) -> None:
         s = preserve / name
         if s.is_file():
             shutil.copy2(s, R5_DIR / name)
+
+def import_backup_archive(body_stream, content_length: int, filename: str) -> dict:
+    """Receive a tarball from the `/api/backups/upload` endpoint, extract
+    it, and land it as a new pinned backup under ``BACKUP_ROOT``.
+
+    Expected archive shape (what ``GET /api/backups/{id}/download`` emits):
+      - top-level ``Saved/`` directory (required)
+      - top-level ``ServerDescription.json`` (optional but recommended —
+        without it, a restore on the destination host mints a fresh PSID
+        and orphans the save from the backend's island mapping)
+      - top-level ``WorldDescription.json`` (optional)
+      - any of ``.backup-config.json``, ``.idle-patch-override``,
+        ``.auto`` (passed through, no semantic meaning here)
+
+    Returns a dict shaped like ``create_backup()``. Always prefixes the
+    new id with ``manual-imported-`` so the backup is pinned (the
+    operator explicitly brought this file over; retention shouldn't be
+    allowed to evict it until they unpin).
+    """
+    work = Path(tempfile.mkdtemp(prefix="windrose-backup-import-"))
+    try:
+        upload = work / "upload.bin"
+        with upload.open("wb") as out:
+            remaining = content_length
+            while remaining > 0:
+                chunk = body_stream.read(min(UPLOAD_CHUNK, remaining))
+                if not chunk:
+                    break
+                out.write(chunk)
+                remaining -= len(chunk)
+        stage = work / "stage"
+        stage.mkdir()
+        try:
+            extract_archive(upload, stage, filename)
+        except (tarfile.TarError, zipfile.BadZipFile, OSError) as e:
+            # extract_archive routes to tarfile/zipfile based on filename
+            # or magic bytes — either library can raise when the body is
+            # truncated, wrong format, or just garbage. Re-raise as
+            # ValueError so the handler maps to 400 instead of 500.
+            raise ValueError(f"could not extract archive: {e}")
+        # Accept either a tarball that's rooted at `Saved/` + siblings,
+        # OR a single top-level dir containing those (defensive against
+        # download tools that wrap in an extra folder).
+        root = stage
+        entries = [p for p in stage.iterdir() if not p.name.startswith(".")]
+        if len(entries) == 1 and entries[0].is_dir() and not (stage / "Saved").is_dir():
+            root = entries[0]
+        if not (root / "Saved").is_dir():
+            raise ValueError("archive does not contain a Saved/ directory at its top level")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        new_id = f"{BACKUP_PIN_PREFIX}imported-{ts}"
+        dst = BACKUP_ROOT / new_id
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        # Move (not copy) to atomically place the extracted tree; a
+        # rename on the same filesystem is effectively free.
+        shutil.move(str(root), str(dst))
+        # Pinned by prefix — retention won't touch it. Return the same
+        # shape as create_backup() so UI + tests can treat it uniformly.
+        return {"id": new_id, "path": str(dst), "pinned": True, "source": "imported"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def stream_backup_archive(bid: str, wfile) -> None:
+    """Stream an existing backup directory as .tar.gz to ``wfile``.
+
+    Unlike ``_api_saves_download``, there's no scratch-snapshot step:
+    backup dirs are immutable once written (create_backup runs a single
+    copytree and never touches the tree again), so we can tar them
+    in-place without RocksDB-compaction races.
+    """
+    src = BACKUP_ROOT / bid
+    if not src.is_dir():
+        raise FileNotFoundError(bid)
+    with tarfile.open(fileobj=wfile, mode="w|gz") as tf:
+        for entry in sorted(src.iterdir()):
+            tf.add(entry, arcname=entry.name)
+
 
 def handle_upload(body_stream, content_length: int, filename: str) -> dict:
     work = Path(tempfile.mkdtemp(prefix="windrose-upload-"))
@@ -1113,10 +1735,17 @@ class Handler(BaseHTTPRequestHandler):
         ("POST",   "/api/config/apply",       "_api_config_apply"),
         ("POST",   "/api/server/stop",        "_api_server_stop"),
         ("POST",   "/api/server/restart",     "_api_server_restart"),
+        ("POST",   "/api/server/start",       "_api_server_start"),
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
+        ("POST",   "/api/backups/upload",     "_api_backups_upload"),
+        ("GET",    "/api/backup-config",      "_api_backup_config_get"),
+        ("PUT",    "/api/backup-config",      "_api_backup_config_put"),
+        ("GET",    "/api/game-backups",       "_api_game_backups_list"),
         ("GET",    "/api/idle-cpu-patch",     "_api_idle_patch_get"),
         ("POST",   "/api/idle-cpu-patch",     "_api_idle_patch_post"),
+        ("GET",    "/api/maintenance",        "_api_maintenance_get"),
+        ("POST",   "/api/maintenance",        "_api_maintenance_post"),
         # /api/backups/{id}/restore, /api/worlds/{id}/upload, and
         # /api/worlds/{id}/config handled in _dispatch dynamically.
     ]
@@ -1152,6 +1781,24 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/restore$", path)
         if method == "POST" and m:
             self._api_backups_restore(m.group(1))
+            return
+        # Dynamic: /api/backups/{id}/pin + /unpin
+        m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/(pin|unpin)$", path)
+        if method == "POST" and m:
+            self._api_backups_set_pin(m.group(1), m.group(2) == "pin")
+            return
+        # Dynamic: /api/backups/{id}/download — stream full backup as tar.gz.
+        # Regex excludes 'upload' so POST /api/backups/upload (the import
+        # endpoint) isn't accidentally parsed as {id}='upload'/download.
+        m = re.match(r"^/api/backups/([A-Za-z0-9\-_T.Z]+)/download$", path)
+        if method == "GET" and m and m.group(1) != "upload":
+            self._api_backups_download(m.group(1))
+            return
+        # Dynamic: /api/game-backups/{ts}/restore — restore one of
+        # Windrose's own Default_Backups/ entries onto the live tree.
+        m = re.match(r"^/api/game-backups/([A-Za-z0-9\-_T.Z]+)/restore$", path)
+        if method == "POST" and m:
+            self._api_game_backups_restore(m.group(1))
             return
         # Dynamic: /api/worlds/{islandId}/upload
         m = re.match(r"^/api/worlds/([0-9A-Fa-f]{32})/upload$", path)
@@ -1274,6 +1921,11 @@ class Handler(BaseHTTPRequestHandler):
             # this both to tag world rows and to decide whether the
             # global button reads "Apply + restart" or "Restart".
             data["stagedWorlds"] = [island_id for island_id, _, _ in self._staged_world_paths()]
+            # "systemctl" when the UI can drive systemd directly (bare-
+            # Linux + polkit rule installed) — UI shows a real Start
+            # button. "signal" otherwise — container supervisor owns the
+            # lifecycle, so Start is a noop.
+            data["serverControlMode"] = "systemctl" if _systemctl_available() else "signal"
         else:
             # Public player list: names + state only, no AccountIds or
             # NetAddress. allowDestructive omitted; stagedConfigPending
@@ -1309,13 +1961,31 @@ class Handler(BaseHTTPRequestHandler):
         saved = R5_DIR / "Saved"
         if not saved.is_dir():
             self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no save dir\n"); return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/gzip")
-        self.send_header("Content-Disposition", 'attachment; filename="windrose-saves.tar.gz"')
-        self.end_headers()
-        # Stream tarball directly to socket.
-        with tarfile.open(fileobj=self.wfile, mode="w|gz") as tf:
-            tf.add(saved, arcname="Saved")
+        # Streaming tarfile.add() over the LIVE Saved directory races with
+        # RocksDB compactions (log → sst renames mid-walk). Reported
+        # symptom: world fails to load on next boot, game falls back to
+        # generating a fresh one. Snapshot to a scratch dir first — that
+        # detaches our I/O from the live DB — then tar and stream the
+        # snapshot. Override scratch dir via WINDROSE_DOWNLOAD_SCRATCH_DIR
+        # on hosts where /tmp is tmpfs and saves exceed available RAM.
+        os.makedirs(SAVES_DOWNLOAD_SCRATCH_DIR, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="windrose-dl-",
+                                         dir=SAVES_DOWNLOAD_SCRATCH_DIR) as scratch:
+            scratch_root = Path(scratch)
+            try:
+                shutil.copytree(saved, scratch_root / "Saved",
+                                dirs_exist_ok=False, symlinks=True)
+            except Exception as e:
+                self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain",
+                           f"snapshot failed: {e}\n".encode())
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="windrose-saves.tar.gz"')
+            self.end_headers()
+            with tarfile.open(fileobj=self.wfile, mode="w|gz") as tf:
+                tf.add(scratch_root / "Saved", arcname="Saved")
 
     def _api_config_get(self):
         live    = load_json(CONFIG_PATH) or {}
@@ -1365,6 +2035,20 @@ class Handler(BaseHTTPRequestHandler):
         if not pid:
             self._send(HTTPStatus.CONFLICT, "text/plain", b"game process not running\n")
             return
+        # On bare-Linux with the polkit rule in place, systemctl stop is
+        # the clean path — systemd state reflects reality + no spurious
+        # auto-restart. On k8s/compose where systemctl isn't reachable,
+        # fall through to the SIGTERM path (kubelet / compose restart
+        # policies will typically bring the game back).
+        if _systemctl_available():
+            ok, msg = systemctl_dispatch("stop")
+            if ok:
+                self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "systemctl"})
+                return
+            # Log + fall back to SIGTERM — don't strand the operator on
+            # a half-broken polkit config.
+            print(f"[server/stop] systemctl stop failed ({msg}); falling back to SIGTERM",
+                  file=sys.stderr, flush=True)
         ok, msg = signal_game(signal.SIGTERM)
         if not ok:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain",
@@ -1372,7 +2056,7 @@ class Handler(BaseHTTPRequestHandler):
                         "container — see helm chart)\n").encode())
             return
         RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
-        self._json(HTTPStatus.OK, {"ok": True, "detail": msg})
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "signal"})
 
     def _api_world_config_get(self, island_id: str):
         live_path = _world_desc_path(island_id)
@@ -1494,9 +2178,20 @@ class Handler(BaseHTTPRequestHandler):
         """Restart the game without applying any staged changes — the
         clean-state sibling to Apply+restart. Safe to call when no
         staged changes exist (the UI flips its button label based on
-        stagedConfigPending / stagedWorlds)."""
+        stagedConfigPending / stagedWorlds).
+
+        Prefers `systemctl restart` when the polkit rule is in place
+        (bare-Linux), falls back to SIGTERM + kubelet / compose / systemd
+        restart-on-exit otherwise."""
         if not allow_destructive():
             self._forbidden(); return
+        if _systemctl_available():
+            ok, msg = systemctl_dispatch("restart")
+            if ok:
+                self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "systemctl"})
+                return
+            print(f"[server/restart] systemctl restart failed ({msg}); falling back to SIGTERM",
+                  file=sys.stderr, flush=True)
         pid, _ = find_game_pid()
         if not pid:
             self._send(HTTPStatus.CONFLICT, "text/plain", b"game process not running\n")
@@ -1507,7 +2202,31 @@ class Handler(BaseHTTPRequestHandler):
                        (msg + "\n").encode())
             return
         RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
-        self._json(HTTPStatus.OK, {"ok": True, "detail": msg})
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "signal"})
+
+    def _api_server_start(self):
+        """Start the game process. Only meaningful on bare-Linux where
+        the UI can drive systemctl via the polkit rule — after a stop,
+        systemd won't auto-restart the service, so this is how the
+        operator brings it back.
+
+        On k8s / compose, the container supervisor keeps the process
+        running; a "start" button isn't applicable there, so we return
+        a 501 Not Implemented with a note instead of pretending."""
+        if not allow_destructive():
+            self._forbidden(); return
+        if not _systemctl_available():
+            self._send(HTTPStatus.NOT_IMPLEMENTED, "text/plain",
+                       ("start not available in this deployment — container "
+                        "supervisor (kubelet / compose / systemd) manages the "
+                        "lifecycle. Use /api/server/restart or toggle "
+                        "maintenance mode.\n").encode())
+            return
+        ok, msg = systemctl_dispatch("start")
+        if not ok:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", (msg + "\n").encode())
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "detail": msg, "via": "systemctl"})
 
     def _api_world_upload(self, island_id: str):
         """Receive a world tarball and extract into R5/Saved/.../Worlds/<islandId>/.
@@ -1574,9 +2293,31 @@ class Handler(BaseHTTPRequestHandler):
     def _api_backups_create(self):
         if not allow_destructive():
             self._forbidden(); return
-        bkp = create_backup()
+        pin = False
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > 0:
+            body = self.rfile.read(length)
+            try:
+                payload = json.loads(body) if body else {}
+                pin = bool(payload.get("pin"))
+            except json.JSONDecodeError:
+                pass  # treat as unpinned; don't fail just because body is junk
+        if "pin=1" in (self.headers.get("X-Query-String", "") or ""):
+            pin = True
+        bkp = create_backup(pin=pin)
         fire_event("backup.created", backupId=bkp.get("id", ""))
         self._json(HTTPStatus.OK, bkp)
+
+    def _api_backups_set_pin(self, bid: str, pin: bool):
+        if not allow_destructive():
+            self._forbidden(); return
+        try:
+            new_id = pin_backup(bid) if pin else unpin_backup(bid)
+        except FileNotFoundError:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such backup\n"); return
+        except FileExistsError as e:
+            self._send(HTTPStatus.CONFLICT, "text/plain", f"target exists: {e}\n".encode()); return
+        self._json(HTTPStatus.OK, {"id": new_id, "pinned": new_id.startswith(BACKUP_PIN_PREFIX)})
 
     def _api_backups_restore(self, bid: str):
         if not allow_destructive():
@@ -1590,6 +2331,146 @@ class Handler(BaseHTTPRequestHandler):
         request_restart()
         fire_event("backup.restored", backupId=bid)
         self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True})
+
+    def _api_backups_download(self, bid: str):
+        """Stream a whole backup directory as .tar.gz. Authed (not
+        destructive — it's a read). The tarball shape matches what
+        POST /api/backups/upload expects, so the two together form a
+        symmetric round-trip for server migration."""
+        src = BACKUP_ROOT / bid
+        if not src.is_dir():
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such backup\n"); return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/gzip")
+        # Use the backup id as the filename stem so operators ending up
+        # with multiple downloads can tell them apart on disk.
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="windrose-backup-{bid}.tar.gz"')
+        self.end_headers()
+        try:
+            stream_backup_archive(bid, self.wfile)
+        except Exception as e:  # noqa: BLE001 — client likely hung up mid-stream
+            print(f"[backup:download] {bid} streaming error: {e}", file=sys.stderr, flush=True)
+
+    def _api_backups_upload(self):
+        """Accept a backup tarball and land it as a new pinned backup.
+        Returns the id so the caller can immediately hit
+        /api/backups/{id}/restore to complete the transplant."""
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain",
+                       b"Content-Length required (streaming upload)\n"); return
+        filename = self.headers.get("X-Filename", "windrose-backup.tar.gz")
+        try:
+            bkp = import_backup_archive(self.rfile, length, filename)
+        except ValueError as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode()); return
+        except Exception as e:  # noqa: BLE001
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
+        fire_event("backup.created", backupId=bkp["id"], source="imported")
+        self._json(HTTPStatus.OK, bkp)
+
+    def _api_backup_config_get(self):
+        cfg = effective_backup_config()
+        with _auto_state_lock:
+            last = _auto_state["lastAutoBackupAt"]
+            result = _auto_state["lastResult"]
+        self._json(HTTPStatus.OK, {
+            **cfg,
+            "defaults": {
+                "idleMinutes": AUTO_BACKUP_IDLE_MINUTES_DEFAULT,
+                "floorHours":  AUTO_BACKUP_FLOOR_HOURS_DEFAULT,
+                "retainCount": BACKUP_RETAIN,
+                "retainDays":  BACKUP_RETAIN_DAYS,
+            },
+            "overridePath":      str(_backup_config_path()),
+            "overrideExists":    _backup_config_path().is_file(),
+            "lastAutoBackupAt":  datetime.fromtimestamp(last, tz=timezone.utc).isoformat() if last else None,
+            "lastResult":        result,
+        })
+
+    def _api_backup_config_put(self):
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(body) if body else {}
+            validated = _validate_backup_config(payload)
+        except (json.JSONDecodeError, ValueError) as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode()); return
+        cfg = save_backup_config(validated)
+        self._json(HTTPStatus.OK, cfg)
+
+    def _api_game_backups_list(self):
+        self._json(HTTPStatus.OK, {"backups": list_game_backups()})
+
+    def _api_game_backups_restore(self, ts: str):
+        if not allow_destructive():
+            self._forbidden(); return
+        try:
+            restore_game_backup(ts)
+        except FileNotFoundError:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such game backup\n"); return
+        except Exception as e:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
+        request_restart()
+        fire_event("backup.restored", backupId=f"game:{ts}")
+        self._json(HTTPStatus.OK, {"ok": True, "restartRequested": True, "source": "game"})
+
+    def _api_maintenance_get(self):
+        self._json(HTTPStatus.OK, {
+            "active": MAINTENANCE_FLAG_FILE.is_file(),
+            "flagFile": str(MAINTENANCE_FLAG_FILE),
+        })
+
+    def _api_maintenance_post(self):
+        if not allow_destructive():
+            self._forbidden(); return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"invalid JSON body\n"); return
+        # Strict bool validation: bool(payload.get("active")) accepts any
+        # non-empty JSON value (including the string "false") as truthy,
+        # which lets a malformed client flip maintenance mode on by
+        # accident. Require a real JSON boolean for both toggles.
+        if not isinstance(payload, dict):
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"body must be a JSON object\n"); return
+        want_active = payload.get("active")
+        if not isinstance(want_active, bool):
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain",
+                       b'"active" must be a JSON boolean (true|false)\n'); return
+        want_restart = payload.get("restart", False)
+        if not isinstance(want_restart, bool):
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain",
+                       b'"restart" must be a JSON boolean when present\n'); return
+        if want_active:
+            MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
+            tmp.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii")
+            tmp.replace(MAINTENANCE_FLAG_FILE)
+        else:
+            try:
+                MAINTENANCE_FLAG_FILE.unlink()
+            except FileNotFoundError:
+                pass
+        status = {"active": MAINTENANCE_FLAG_FILE.is_file(), "flagFile": str(MAINTENANCE_FLAG_FILE)}
+        # Optional: if caller asks, also signal the running game so the
+        # maintenance state takes effect immediately instead of on the
+        # next organic restart. Entering maintenance = stop the game now;
+        # exiting = restart so the entrypoint rechecks the flag.
+        if want_restart:
+            try:
+                request_restart()
+                status["restartRequested"] = True
+            except Exception as e:
+                status["restartError"] = str(e)
+        self._json(HTTPStatus.OK, status)
 
     def _api_idle_patch_get(self):
         self._json(HTTPStatus.OK, idle_patch_full_status())
@@ -1639,6 +2520,16 @@ def main():
         print(f"  webhooks:       {', '.join(hooks)}", flush=True)
         print(f"  webhook events: {sorted(WEBHOOK_EVENTS)}", flush=True)
         EventDetector().start()
+    # Auto-backup scheduler runs regardless of webhook config — it's the
+    # safety net operators asked for (idle trigger after last player leaves,
+    # floor trigger for long continuous sessions). Both triggers can be
+    # disabled by setting their threshold to 0 in the admin UI.
+    _cfg_preview = effective_backup_config()
+    print(f"  auto-backup:    idle={_cfg_preview['idleMinutes']}min "
+          f"floor={_cfg_preview['floorHours']}h "
+          f"retain={_cfg_preview['retainCount']}/{_cfg_preview['retainDays']}d",
+          flush=True)
+    AutoBackupScheduler().start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

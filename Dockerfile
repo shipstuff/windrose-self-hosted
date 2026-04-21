@@ -64,11 +64,14 @@ COPY scripts/WorldDescription_example.json /usr/local/share/WorldDescription_exa
 # Optional idle-CPU patch — off by default, opt in with
 # WINDROSE_PATCH_IDLE_CPU=1. The entrypoint only invokes it when set.
 COPY --chmod=755 scripts/patch-idle-cpu.py /usr/local/bin/patch-idle-cpu.py
+COPY --chmod=755 scripts/reconcile-engine-ini.sh /usr/local/bin/reconcile-engine-ini.sh
 
 # Admin console (stdlib Python HTTP server + static assets). Baked into
 # the same image as the game binary; the UI sidecar runs via a command
-# override at /opt/windrose-ui/server.py.
-COPY --chown=10000:10000 scripts/ui/ /opt/windrose-ui/
+# override at /opt/windrose-ui/server.py. Backend lives at the repo
+# root (server.py); frontend bundle is the sibling ui/ tree.
+COPY --chown=10000:10000 server.py    /opt/windrose-ui/server.py
+COPY --chown=10000:10000 ui/          /opt/windrose-ui/ui/
 RUN chmod 755 /opt/windrose-ui/server.py
 
 USER steam

@@ -43,11 +43,11 @@ ui:
   # / app.js — useful when an external nginx (ingress or a sidecar) owns
   # the static assets + auth and only reverse-proxies /api/* here.
   # To bundle the static assets into a ConfigMap for nginx, run once
-  # outside Helm (assets are under scripts/ui/):
+  # outside Helm (assets are under ui/):
   #   kubectl -n games create configmap windrose-ui-assets \
-  #     --from-file=index.html=./scripts/ui/index.html \
-  #     --from-file=app.css=./scripts/ui/app.css \
-  #     --from-file=app.js=./scripts/ui/app.js
+  #     --from-file=index.html=./ui/index.html \
+  #     --from-file=app.css=./ui/app.css \
+  #     --from-file=app.js=./ui/app.js
   # and volumeMount that ConfigMap where your nginx serves from.
   serveStatic: true
   # Webhook notifications — Discord + generic JSON. Events are posted
@@ -167,14 +167,29 @@ serverConfig:
   # before +app_update and restores after.
   source: steamcmd
   # Appended after the required `-log` on the game binary's command line.
-  # Default caps the engine tick to 60 FPS. The older 30-FPS default was
-  # there as a brake on the idle-CPU spin bug (the main loop was
-  # unpaced when no clients were connected and burned whole cores); the
-  # idle-CPU binary patch (see `patchIdleCpu` below + `scripts/patch-idle-cpu.py`)
-  # is the real fix, so the cap is no longer needed at 30 and we leave
-  # headroom for the server to simulate + replicate at 60. Drop to
-  # "-FPS=30" if you prefer the older behavior, or "" to uncap entirely.
+  # Pinned to match networkTickRate below so command-line + Engine.ini
+  # agree. Empty uncaps the render loop entirely.
   launchArgs: "-FPS=60"
+  # --- networkTickRate -------------------------------------------------
+  # Server tick rate (srvfps) — stamped into Engine.ini's
+  # NetServerMaxTickRate + t.MaxFPS on every boot. This is the knob
+  # that actually moves the `stat srvfps` needle in-game.
+  #
+  # 60 Hz is the project default: 2x smoother positional replication
+  # than stock 30 without the CPU/bandwidth cost of 120. Headroom is
+  # there once the idle-CPU patch (patchIdleCpu: "1") is on — the main
+  # loop used to burn whole cores regardless of clients connected.
+  #
+  # Lower to 30 on weak hosts (1-2 vCPU VPSes, older NAS hardware) —
+  # halves per-tick CPU + replication bandwidth at the cost of visibly
+  # choppier movement in combat. Raise to 120 on hosts with real
+  # headroom and LAN/low-latency clients where the smoothness pays off.
+  #
+  # The reconcile uses a shadow-stamp: if you hand-edit Engine.ini to a
+  # different value, that edit survives subsequent helm upgrades (we
+  # only overwrite when the on-disk value matches the one we last
+  # wrote). See scripts/reconcile-engine-ini.sh + the unit tests.
+  networkTickRate: 60
   # Applied in env mode.
   serverName: "Windrose Server"
   inviteCode: ""
@@ -211,6 +226,26 @@ serverConfig:
   # — if the printed value matches what clients should hit, leave empty.
   # ---------------------------------------------------------------------
   p2pProxyAddress: ""
+  # --- Direct IP Connection --------------------------------------------
+  # Windrose 2026-04 added a Direct IP mode that bypasses the backend
+  # connectivity service entirely: players connect to a raw IP:port you
+  # advertise. Invite codes stop working while this is on — clients join
+  # only via the direct address. Advanced feature — requires manual port
+  # forwarding on your router. Leave useDirectConnection unset to keep
+  # the default backend-connected mode (what most operators want).
+  #
+  # When to enable: backend connectivity is blocked on your ISP/LAN, or
+  # you explicitly want LAN-only play without going through Windrose's
+  # gateways (latency, privacy, or air-gapped).
+  #
+  # If useDirectConnection is true and directConnection.serverAddress is
+  # empty, the entrypoint reuses p2pProxyAddress (they're both "my IP"
+  # from the host's perspective — no point in setting it twice).
+  useDirectConnection: null      # null = don't touch field; true | false to control
+  directConnection:
+    serverAddress: ""            # IP clients connect to; empty + useDirectConnection=true reuses p2pProxyAddress
+    serverPort: 7777             # UDP port you forwarded on your router
+    proxyAddress: "0.0.0.0"      # only override if you're fronting with an explicit proxy
   passwordSecret:
     name: ""
     key: password

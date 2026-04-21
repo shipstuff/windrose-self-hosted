@@ -1,9 +1,12 @@
-# Whitelist: only scripts/ feeds the build. Keeps the context small and
-# prevents new top-level files (helm values, k8s manifests, docs) from
-# silently bloating it.
+# Whitelist: only the files the Dockerfile actually COPYs feed the
+# build. Keeps the context small and prevents new top-level files
+# (helm values, k8s manifests, docs, tests) from silently bloating it.
 *
 !scripts
 !scripts/**
+!ui
+!ui/**
+!server.py
 !Dockerfile
 **/__pycache__/
 **/*.py[cod]
