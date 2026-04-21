@@ -164,7 +164,22 @@
   --details-marker: #9aa3b0;
 }
 
-body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 60rem; background: var(--bg); color: var(--text); }
+/* Responsive layout:
+ *  - Phones (< 600px): padding collapses to ~0.75rem so content isn't
+ *    squeezed by the hardcoded 2rem margin that was here before.
+ *  - Widescreens (> 1280px): max-width grows to 80rem (was capped at
+ *    60rem = 960px) so operators with a 4K monitor aren't staring at
+ *    a postage-stamp column in the middle of the viewport.
+ * clamp() + margin:auto keeps the page centered at any size without
+ * media queries for every transition. */
+body {
+  font-family: system-ui, Arial, sans-serif;
+  margin: 0 auto;
+  padding: clamp(0.75rem, 2.5vw, 2rem);
+  max-width: 80rem;
+  background: var(--bg);
+  color: var(--text);
+}
 h1 { margin-top: 0; }
 h2 { margin-top: 0; font-size: 1.1rem; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
 .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: var(--surface); }
@@ -185,7 +200,7 @@ select { background: var(--surface); color: var(--text); border: 1px solid var(-
 input[type=checkbox] { width: auto; margin-right: 0.4rem; }
 textarea { width: 100%; min-height: 14rem; font-family: ui-monospace, monospace; font-size: 0.85rem; padding: 0.5rem; box-sizing: border-box; background: var(--surface); color: var(--text); border: 1px solid var(--border-input); border-radius: 4px; }
 #status { white-space: pre-wrap; background: var(--status-bg); color: var(--text); padding: 0.8rem; border-radius: 6px; min-height: 3rem; font-family: ui-monospace, monospace; font-size: 0.85rem; max-height: 20rem; overflow: auto; }
-.row { margin-top: 0.6rem; }
+.row { margin-top: 0.6rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
 .muted { color: var(--text-muted); font-size: 0.9rem; }
 .invite-code { font: 600 2rem ui-monospace, monospace; letter-spacing: 0.15em; padding: 0.6rem 1rem; background: var(--invite-bg); border: 1px solid var(--invite-border); border-radius: 6px; display: inline-block; color: var(--text); }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; font-size: 0.9rem; }
@@ -197,6 +212,10 @@ textarea { width: 100%; min-height: 14rem; font-family: ui-monospace, monospace;
 .pill-err { color: var(--err); font-weight: 600; }
 .tag { display: inline-block; padding: 0.1rem 0.5rem; background: var(--tag-bg); border-radius: 10px; font-size: 0.8rem; color: var(--tag-text); }
 .tag.locked { background: var(--tag-locked-bg); color: var(--tag-locked-text); border: 1px solid var(--tag-locked-border); }
+/* Tables on narrow screens: let the card scroll the table horizontally
+ * rather than force the parent to grow. Without this the Backups table's
+ * two-button action column blows out the card on phones. */
+.card { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
 th { color: var(--text-muted); font-weight: 500; font-size: 0.85rem; background: var(--surface-alt); }

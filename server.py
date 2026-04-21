@@ -651,7 +651,13 @@ def list_backups() -> list[dict]:
     out: list[dict] = []
     if not BACKUP_ROOT.exists():
         return out
-    for d in sorted(BACKUP_ROOT.iterdir(), reverse=True):
+    # Gather metadata first so we can sort by mtime (true chronological)
+    # instead of by dir name. Sorting by name groups the "manual-*"
+    # prefix lexicographically separately from bare-timestamp auto
+    # entries, producing a confusing interleave where a pinned backup
+    # from last week appears above an auto-backup from five minutes ago.
+    rows: list[dict] = []
+    for d in BACKUP_ROOT.iterdir():
         try:
             if not d.is_dir():
                 continue
@@ -660,17 +666,23 @@ def list_backups() -> list[dict]:
         try:
             st = d.stat()
             size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+            mtime = st.st_mtime
         except OSError:
-            size = 0; st = None
+            size = 0; st = None; mtime = 0.0
         pinned = d.name.startswith(BACKUP_PIN_PREFIX)
         auto = (d / AUTO_BACKUP_MARKER_NAME).is_file()
-        out.append({
+        rows.append({
+            "_mtime": mtime,  # sort key, stripped before returning
             "id": d.name,
-            "createdAt": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat() if st else "",
+            "createdAt": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat() if st else "",
             "sizeBytes": size,
             "pinned": pinned,
             "source": "auto" if auto else ("manual-pinned" if pinned else "manual"),
         })
+    rows.sort(key=lambda r: r["_mtime"], reverse=True)
+    for r in rows:
+        r.pop("_mtime", None)
+        out.append(r)
     return out
 
 def create_backup(pin: bool = False) -> dict:
@@ -790,7 +802,10 @@ def list_game_backups() -> list[dict]:
     out: list[dict] = []
     if not GAME_BACKUPS_DIR.is_dir():
         return out
-    for d in sorted(GAME_BACKUPS_DIR.iterdir(), reverse=True):
+    # Sort by mtime rather than name so the UI presents chronological
+    # order regardless of the game engine's future naming conventions.
+    rows = []
+    for d in GAME_BACKUPS_DIR.iterdir():
         try:
             if not d.is_dir():
                 continue
@@ -799,8 +814,12 @@ def list_game_backups() -> list[dict]:
         try:
             st = d.stat()
             size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+            mtime = st.st_mtime
         except OSError:
-            size = 0; st = None
+            size = 0; st = None; mtime = 0.0
+        rows.append((mtime, d, st, size))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    for _mtime, d, st, size in rows:
         out.append({
             "id": d.name,
             "createdAt": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat() if st else "",
