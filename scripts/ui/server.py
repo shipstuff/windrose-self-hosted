@@ -614,8 +614,11 @@ def list_backups() -> list[dict]:
     if not BACKUP_ROOT.exists():
         return out
     for d in sorted(BACKUP_ROOT.iterdir(), reverse=True):
-        if not d.is_dir():
-            continue
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue  # Python 3.13 is_dir() propagates OSError; skip unreadable entries
         try:
             st = d.stat()
             size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
@@ -671,7 +674,16 @@ def _prune_backups() -> None:
         return
     now = time.time()
     age_cutoff = now - BACKUP_RETAIN_DAYS * 86400
-    entries = [p for p in BACKUP_ROOT.iterdir() if p.is_dir()]
+    # Python 3.13's Path.is_dir() stopped swallowing OSError, so a single
+    # unreadable entry during iterdir() would abort the entire prune sweep.
+    # Guard each is_dir() call so the sweep still completes.
+    entries = []
+    for p in BACKUP_ROOT.iterdir():
+        try:
+            if p.is_dir():
+                entries.append(p)
+        except OSError:
+            pass  # can't read — leave it alone, move on
     unpinned = [p for p in entries if not p.name.startswith(BACKUP_PIN_PREFIX)]
     # Rule 2: top-N by name-sort descending.
     keep_names = {p.name for p in sorted(unpinned, key=lambda p: p.name, reverse=True)[:BACKUP_RETAIN]}
