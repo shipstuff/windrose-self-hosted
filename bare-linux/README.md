@@ -243,8 +243,8 @@ the game's RSS spikes on world load + backend handshake.
 
 ```
 /opt/windrose/scripts/entrypoint.sh        # game launcher
-/opt/windrose/scripts/ui/server.py         # admin console
-/opt/windrose/scripts/ui/{index.html,app.js,app.css}
+/opt/windrose/server.py                    # admin console
+/opt/windrose/ui/{index.html,app.js,app.css}
 /etc/windrose/windrose.env                 # runtime env (root-rw, group-r for steam)
 /home/steam/windrose/                      # game data (WindowsServer/, saves, backups)
 /home/steam/steamcmd/                      # SteamCMD + GE-Proton compat data

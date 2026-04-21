@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Syntax-check UI server
-        run: python3 -m py_compile scripts/ui/server.py scripts/patch-idle-cpu.py
+        run: python3 -m py_compile server.py scripts/patch-idle-cpu.py
 
   python-tests:
     runs-on: ubuntu-latest
@@ -39,13 +39,13 @@ jobs:
         with:
           python-version: "3.13"
       - name: Backup retention tests
-        run: python3 scripts/ui/test_retention.py
+        run: python3 tests/test_retention.py
       - name: Backup create/restore round-trip tests
-        run: python3 scripts/ui/test_restore.py
+        run: python3 tests/test_restore.py
       - name: Auto-backup scheduler tests
-        run: python3 scripts/ui/test_auto_backup.py
+        run: python3 tests/test_auto_backup.py
       - name: HTTP integration tests
-        run: python3 scripts/ui/test_http.py
+        run: python3 tests/test_http.py
 
   yaml-lint:
     runs-on: ubuntu-latest

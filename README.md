@@ -383,8 +383,12 @@ kubectl kustomize . >/dev/null
 helm lint ./helm/windrose
 helm template windrose ./helm/windrose >/dev/null
 shellcheck scripts/entrypoint.sh scripts/pack-windowsserver.sh
-python3 -m py_compile scripts/ui/server.py
-bash scripts/ui/test_api.sh  # requires a running canary — see CLAUDE.md
+python3 -m py_compile server.py
+python3 tests/test_retention.py
+python3 tests/test_restore.py
+python3 tests/test_auto_backup.py
+python3 tests/test_http.py
+bash tests/test_api.sh  # requires a running canary — see CLAUDE.md
 ```
 
 CI runs these plus JSON validation and YAML lint.
@@ -399,9 +403,9 @@ CI runs these plus JSON validation and YAML lint.
   2. **nginx serves static, Python serves `/api/*`.** Set `ui.serveStatic: false` in values, then bundle the assets into a ConfigMap nginx can mount:
      ```bash
      kubectl -n games create configmap windrose-ui-assets \
-       --from-file=index.html=./scripts/ui/index.html \
-       --from-file=app.css=./scripts/ui/app.css \
-       --from-file=app.js=./scripts/ui/app.js
+       --from-file=index.html=./ui/index.html \
+       --from-file=app.css=./ui/app.css \
+       --from-file=app.js=./ui/app.js
      ```
      Point nginx's `root` or `alias` at the mount and `proxy_pass` the `/api/*` location to the windrose Service.
 - **Unpatched idle CPU is ~2 cores** — a known upstream spin-loop bug in `boost::asio::detail::socket_select_interrupter::reset()`, unreachable from Engine.ini / launch args / Proton env (see `memory/windrose_idle_cpu_known_bug.md`). Optional binary patch at `scripts/patch-idle-cpu.py` injects a `Sleep(1)` into the hot loop; ~97% reduction on the builds measured so far. Opt in via `WINDROSE_PATCH_IDLE_CPU=1` (Helm: `patchIdleCpu: "1"`). The script auto-derives offsets from a unique byte signature so it tolerates Windrose rebuilds — it refuses cleanly if the signature moves. The UI's Idle-CPU card has a runtime override for rollback without redeploying. **Offered as-is with no warranty and no guarantees.** Operators run it against their own SteamCMD-pulled copy; this project does not distribute modified binaries. Applying may conflict with the Windrose EULA or Steam Subscriber Agreement — review the terms before enabling; full risk rests with you.
@@ -439,7 +443,9 @@ Everything below this line is for agents and humans editing this repo. Regular o
 - `Dockerfile`: game-server container image.
 - `scripts/entrypoint.sh`: source of truth for startup — SteamCMD seed (for `steamclient.so` only; no app depot download), Proton seed, files-wait loop, save-version migration, config reconciliation, Xvfb-socket wait, `exec proton`.
 - `scripts/ServerDescription_example.json` / `WorldDescription_example.json`: seed templates used in `env` config mode.
-- `scripts/ui/`: UI sidecar assets (baked into the same game-server image as `/opt/windrose-ui/`). `server.py` is the stdlib-only admin console (status, invite, config editor, backups, per-world editor, webhooks); `index.html` + `app.css` + `app.js` are the browser UI; `test_api.sh` is the canary smoke test.
+- `server.py` (repo root): stdlib-only admin console (status, invite, config editor, backups, per-world editor, webhooks). Baked into the same image as the game container at `/opt/windrose-ui/server.py`.
+- `ui/`: browser bundle (`index.html` + `app.css` + `app.js`), served by `server.py` from its sibling directory (`UI_STATIC_DIR` env var overrides when nginx owns assets).
+- `tests/`: stdlib-only unit + integration tests (`test_retention.py`, `test_restore.py`, `test_auto_backup.py`, `test_http.py`) plus the canary smoke test (`test_api.sh`). Run via `python3 tests/test_<name>.py`.
 - `docker-compose.yaml`: three-service local deployment (game + xvfb + ui) with `network_mode: host` on the game.
 - `namespace.yaml`, `pvc.yaml`, `statefulset.yaml`, `service.yaml`, `ingress.yaml`: plain Kubernetes manifests.
 - `kustomization.yaml`: thin wrapper over the plain manifests.
@@ -499,7 +505,7 @@ Important specifics:
 - Prefer small, synchronized changes across docs and deployment surfaces over fixing only one path.
 - Never commit real secrets. Passwords and webhook URLs come from env or Kubernetes Secrets.
 - If you touch runtime defaults, update this README (and the env-var table above).
-- If you change the UI JSON shape (`/api/status`, `/api/config`, etc.), update `scripts/ui/app.js` (and, where relevant, `scripts/ui/index.html`) in the same change. The browser and server must agree.
+- If you change the UI JSON shape (`/api/status`, `/api/config`, etc.), update `ui/app.js` (and, where relevant, `ui/index.html`) in the same change. The browser and server must agree.
 - If you touch published artifact names or tags, update both image and chart workflows in `.github/workflows/`.
 - Don't add community-Docker-isms that depend on anonymous SteamCMD depot download — that path is blocked for Windrose and we intentionally do not try.
 - `memory/` files under `~/.claude/projects/-home-seslly-seslly-github-windrose-self-hosted/memory/` are Claude Code's persistent notes. When you discover a non-obvious fact about how Windrose or Proton behaves (e.g. the `P2pProxyAddress` / ICE host-candidate fix, the `0.0.0.0 getsockname` dead end, the backend-assigned WorldIslandId), write it there so the next session has the context.

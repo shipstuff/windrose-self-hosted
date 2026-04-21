@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Unit tests for backup create + restore round-trip. Stdlib-only —
-runs via `python3 scripts/ui/test_restore.py`, no pytest dep.
+runs via `python3 tests/test_restore.py`, no pytest dep.
 
 Scenarios:
   1. create → restore on an unchanged tree is a no-op (content matches)
@@ -25,7 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 
 

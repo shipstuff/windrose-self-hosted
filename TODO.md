@@ -63,7 +63,7 @@ by hand.
 
 Plan:
 1. **Tagged artifact bundle.** On every `v*` tag, CI builds a
-   `windrose-ui-<version>.tar.gz` (just `scripts/ui/*` + `scripts/entrypoint.sh`
+   `windrose-ui-<version>.tar.gz` (`server.py` + `ui/*` + `scripts/entrypoint.sh`
    + `scripts/*_example.json`) and attaches it as a GitHub release
    asset (or publishes as a GHCR OCI artifact alongside the chart).
 2. **`install.sh --update [<version>]` flag.** Downloads the tagged

@@ -43,11 +43,11 @@ ui:
   # / app.js — useful when an external nginx (ingress or a sidecar) owns
   # the static assets + auth and only reverse-proxies /api/* here.
   # To bundle the static assets into a ConfigMap for nginx, run once
-  # outside Helm (assets are under scripts/ui/):
+  # outside Helm (assets are under ui/):
   #   kubectl -n games create configmap windrose-ui-assets \
-  #     --from-file=index.html=./scripts/ui/index.html \
-  #     --from-file=app.css=./scripts/ui/app.css \
-  #     --from-file=app.js=./scripts/ui/app.js
+  #     --from-file=index.html=./ui/index.html \
+  #     --from-file=app.css=./ui/app.css \
+  #     --from-file=app.js=./ui/app.js
   # and volumeMount that ConfigMap where your nginx serves from.
   serveStatic: true
   # Webhook notifications — Discord + generic JSON. Events are posted

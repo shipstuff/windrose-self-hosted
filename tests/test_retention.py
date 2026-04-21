@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Unit tests for the backup retention logic in server.py. Stdlib-only —
-runs via `python3 scripts/ui/test_retention.py`, no pytest dep.
+runs via `python3 tests/test_retention.py`, no pytest dep.
 
 Scenarios exercised:
   1. Pinned backups (prefixed manual-) survive unconditionally
@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 
 

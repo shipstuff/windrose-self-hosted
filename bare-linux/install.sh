@@ -38,6 +38,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPTS_SRC="${REPO_ROOT}/scripts"
+UI_SRC="${REPO_ROOT}/ui"
 
 WINDROSE_USER="${WINDROSE_USER:-steam}"
 WINDROSE_INSTALL_DIR="${WINDROSE_INSTALL_DIR:-/opt/windrose}"
@@ -190,15 +191,22 @@ install -m 0644 "${SCRIPTS_SRC}/ServerDescription_example.json" \
 install -m 0644 "${SCRIPTS_SRC}/WorldDescription_example.json" \
   /usr/local/share/WorldDescription_example.json
 
-for f in server.py index.html app.js app.css; do
+# Layout mirrors the repo: server.py at the install root, ui/ siblings.
+# server.py resolves STATIC_DIR as parent/ui so both paths must be
+# installed together. The legacy /opt/windrose-ui symlink points at
+# ${WINDROSE_INSTALL_DIR} so any existing references keep resolving
+# (server.py at /opt/windrose-ui/server.py, assets at /opt/windrose-ui/ui/).
+install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/ui"
+install -m 0755 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
+  "${REPO_ROOT}/server.py" "${WINDROSE_INSTALL_DIR}/server.py"
+for f in index.html app.js app.css; do
   install -m 0644 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
-    "${SCRIPTS_SRC}/ui/${f}" "${WINDROSE_INSTALL_DIR}/scripts/ui/${f}"
+    "${UI_SRC}/${f}" "${WINDROSE_INSTALL_DIR}/ui/${f}"
 done
-chmod 0755 "${WINDROSE_INSTALL_DIR}/scripts/ui/server.py"
-# server.py expects /opt/windrose-ui/ when referenced from k8s; add a
-# symlink so the UI path matches the container path. Harmless if it's
-# already there from a previous install.
-ln -snf "${WINDROSE_INSTALL_DIR}/scripts/ui" /opt/windrose-ui
+# Old install may have left a scripts/ui/ tree behind. Remove it so
+# operators don't stare at stale files that no longer participate.
+rm -rf "${WINDROSE_INSTALL_DIR}/scripts/ui" 2>/dev/null || true
+ln -snf "${WINDROSE_INSTALL_DIR}" /opt/windrose-ui
 
 # Idle-CPU patch script — install at /usr/local/bin/ to match the
 # Docker image layout so the entrypoint's _find_patch_script hits
@@ -412,7 +420,7 @@ EnvironmentFile=${WINDROSE_ENV_FILE}
 # works. The k8s side gets this via shareProcessNamespace; on bare
 # Linux the UI already sees the whole host PID namespace by default,
 # so no twist needed — this just confirms the expectation.
-ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/scripts/ui/server.py
+ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/server.py
 Restart=always
 RestartSec=5
 

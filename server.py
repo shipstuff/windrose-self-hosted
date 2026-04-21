@@ -66,7 +66,14 @@ R5_LOG                = R5_DIR / "Saved" / "Logs" / "R5.log"
 CONFIG_PATH           = R5_DIR / "ServerDescription.json"
 STAGED_CONFIG_PATH    = R5_DIR / "ServerDescription.staged.json"
 BACKUP_ROOT           = Path(os.environ.get("WINDROSE_BACKUP_ROOT", "/home/steam/backups"))
-STATIC_DIR            = Path(__file__).resolve().parent
+# Frontend assets live in a sibling ui/ directory. Deployments that
+# ship server.py and ui/ together at the same level (Docker image,
+# bare-Linux install, dev checkout) just work. An override env var
+# supports the pattern where nginx serves the bundle from a different
+# mount but the Python sidecar still handles /api/*.
+STATIC_DIR            = Path(os.environ.get(
+    "UI_STATIC_DIR", str(Path(__file__).resolve().parent / "ui"),
+))
 UI_PASSWORD                        = os.environ.get("UI_PASSWORD", "")
 # Opt-in flag that lets destructive actions (upload, server stop, config
 # apply, backup restore) run even when no password is set. Intended only
@@ -145,12 +152,12 @@ MAINTENANCE_FLAG_FILE = Path(os.environ.get(
 # RHEL / some Docker setups) a large save can OOM the host mid-stream.
 # Point this at a PVC-backed path (e.g. /home/steam/tmp) on those hosts.
 SAVES_DOWNLOAD_SCRATCH_DIR = os.environ.get("WINDROSE_DOWNLOAD_SCRATCH_DIR", "/tmp")
-# First: the Docker / bare-Linux install target. Second: alongside the
-# UI server file for repo-checkout + source-run scenarios (scripts/ui/server.py
-# -> scripts/patch-idle-cpu.py).
+# First: the Docker / bare-Linux install target. Second: the repo-root
+# source-run fallback (server.py at repo root, patch-idle-cpu.py lives
+# under scripts/).
 PATCH_SCRIPT_CANDIDATES = [
     Path("/usr/local/bin/patch-idle-cpu.py"),
-    Path(__file__).resolve().parent.parent / "patch-idle-cpu.py",
+    Path(__file__).resolve().parent / "scripts" / "patch-idle-cpu.py",
 ]
 _PATCH_STATE_CACHE: dict = {"mtime": None, "md5": None, "state": None, "reason": None}
 _PATCH_STATE_LOCK = threading.Lock()
