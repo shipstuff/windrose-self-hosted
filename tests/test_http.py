@@ -51,6 +51,9 @@ class _TestServer:
         server.BACKUP_RETAIN_DAYS = 7
         server.UI_PASSWORD = password
         server.UI_ENABLE_ADMIN_WITHOUT_PASSWORD = not password  # allow destructive for no-auth tests
+        # Maintenance flag file lives under R5_DIR by default — point it
+        # at the test's tmpdir so the test doesn't try to touch the host.
+        server.MAINTENANCE_FLAG_FILE = r5 / ".maintenance-mode"
 
         self._srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.port = self._srv.server_address[1]
@@ -402,6 +405,40 @@ def test_backup_upload_rejects_tar_without_saved():
             srv.shutdown()
 
 
+def test_maintenance_requires_strict_bool():
+    """Codex PR #2 review (2026-04-21, P2): the old bool(payload.get("active"))
+    coerce accepted any truthy JSON value, including the STRING "false",
+    as active=True. A misconfigured client could flip maintenance mode
+    on by accident. Require a real JSON boolean now."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            # String "false" used to be accepted as truthy → enable.
+            # Must reject with 400 now.
+            for bad in ({"active": "false"}, {"active": "true"},
+                        {"active": 1}, {"active": 0},
+                        {"active": None}):
+                code, _ = _json_req("POST", f"{srv.base}/api/maintenance", bad)
+                assert code == 400, f"expected 400 for {bad}, got {code}"
+            # Missing restart key should be fine (defaults to false).
+            code, _ = _json_req("POST", f"{srv.base}/api/maintenance", {"active": True})
+            assert code == 200, "valid true payload should succeed"
+            # Explicit restart=true is fine.
+            code, _ = _json_req("POST", f"{srv.base}/api/maintenance",
+                                {"active": False, "restart": False})
+            assert code == 200, "valid false payload should succeed"
+            # restart as string should be rejected too.
+            code, _ = _json_req("POST", f"{srv.base}/api/maintenance",
+                                {"active": True, "restart": "true"})
+            assert code == 400, f"restart string should be rejected, got {code}"
+        finally:
+            srv.shutdown()
+
+
 def test_backup_config_get_put_roundtrip():
     """GET returns defaults; PUT validates + persists; GET sees the update.
     Exercises the full UI edit-save-refresh loop."""
@@ -501,6 +538,7 @@ if __name__ == "__main__":
     _run("list game backups empty when absent", test_list_game_backups_empty_when_absent)
     _run("list + restore game backup round-trip", test_list_and_restore_game_backup)
     _run("restore unknown game backup returns 404", test_restore_unknown_game_backup_returns_404)
+    _run("maintenance POST requires strict JSON bools", test_maintenance_requires_strict_bool)
     _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
     _run("backup download → upload → restore round-trip", test_backup_download_upload_roundtrip)

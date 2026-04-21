@@ -309,6 +309,17 @@ elif [ -f "${WINDROSE_ENV_FILE}" ]; then
   done
 fi
 
+# Apply defaults NOW (post-merge) for managed keys whose shell var
+# might still be unset: a fresh install with no existing env file and
+# no CLI overrides leaves these empty, and the status echo at the end
+# of the script dereferences them under `set -u`. The heredoc already
+# uses ${:-} for the file contents, but that doesn't touch the shell
+# var. Keep these defaults in sync with the heredoc's ${:-defaults}.
+: "${UI_BIND:=127.0.0.1}"
+: "${UI_PORT:=28080}"
+: "${UI_PASSWORD:=}"
+: "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:=false}"
+
 log "writing env file ${WINDROSE_ENV_FILE}"
 tmp_env="$(mktemp)"
 cat > "${tmp_env}" <<EOF

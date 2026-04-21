@@ -574,7 +574,7 @@ reconcile_server_config() {
       local first_boot="false"
       if [ ! -f "${shadow}" ]; then
         first_boot="true"
-        echo "$(timestamp) INFO: env-mode: no shadow stamp present — treating live values as operator-owned and seeding shadow from env intent. Future boots will re-stamp keys that still match env."
+        echo "$(timestamp) INFO: env-mode: no shadow stamp present — treating live values as operator-owned and seeding shadow from the live file. Future boots will stamp env into keys that still match the shadow."
       fi
 
       # Decide per-key: should we skip (operator diverged) or stamp?
@@ -684,61 +684,77 @@ reconcile_server_config() {
           && mv "${WINDROSE_SERVER_CONFIG}.tmp" "${WINDROSE_SERVER_CONFIG}"
       fi
 
-      # Refresh shadow: for each key we STAMPED, record the env value we
-      # wrote. For each key we SKIPPED, preserve the old shadow value so
-      # the divergence marker survives. On first boot we seed every key.
-      # jq empty guard defends against a malformed shadow from a partial
-      # write or manual edit — a corrupt base would otherwise break boot.
-      local shadow_base='{}'
-      if [ -f "${shadow}" ] && jq empty "${shadow}" >/dev/null 2>&1; then
-        shadow_base="$(cat "${shadow}")"
-      elif [ -f "${shadow}" ]; then
-        echo "$(timestamp) WARNING: env-mode: shadow at ${shadow} is not valid JSON; treating as absent"
-        first_boot="true"
+      # Refresh shadow. Two cases:
+      #
+      # (a) First boot (no prior shadow): seed shadow with the LIVE
+      #     ServerDescription_Persistent values, NOT the env values.
+      #     This is the key correctness property — if we seeded with
+      #     env intent, any live-vs-env mismatch on the next boot
+      #     would be treated as "operator-modified forever" and env
+      #     mode would stop doing its job silently. Snapshotting live
+      #     means next boot sees live==shadow (stamp fires, env
+      #     applies) OR live!=shadow (operator genuinely changed
+      #     something between boots, preserve).
+      #
+      # (b) Steady state: for each managed key we stamped, record the
+      #     env value we just wrote; for each key we skipped, preserve
+      #     the old shadow value so the divergence marker survives.
+      #     A corrupt shadow file is treated as absent → falls through
+      #     to first-boot semantics, which is the safest recovery.
+      if [ "${first_boot}" = "true" ]; then
+        jq '{ ServerDescription_Persistent: (.ServerDescription_Persistent // {}) }' \
+          "${WINDROSE_SERVER_CONFIG}" > "${shadow}.tmp" \
+          && mv "${shadow}.tmp" "${shadow}" \
+          && echo "$(timestamp) INFO: env-mode: seeded shadow from live ${WINDROSE_SERVER_CONFIG}"
+      else
+        local shadow_base='{}'
+        if jq empty "${shadow}" >/dev/null 2>&1; then
+          shadow_base="$(cat "${shadow}")"
+        else
+          echo "$(timestamp) WARNING: env-mode: shadow at ${shadow} is not valid JSON; re-seeding from live on next boot"
+          rm -f "${shadow}"
+          return 0
+        fi
+        jq -n \
+          --argjson base "${shadow_base}" \
+          --arg name "${SERVER_NAME}" \
+          --arg invite "${INVITE_CODE}" \
+          --argjson protected "${protected_bool}" \
+          --arg password "${SERVER_PASSWORD}" \
+          --arg islandId "${WORLD_ISLAND_ID}" \
+          --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
+          --arg proxy "${P2P_PROXY_ADDRESS}" \
+          --argjson useDirect "${use_direct_bool}" \
+          --arg dcAddr "${DIRECT_CONNECTION_SERVER_ADDRESS}" \
+          --argjson dcPort "${DIRECT_CONNECTION_SERVER_PORT}" \
+          --arg dcProxy "${DIRECT_CONNECTION_PROXY_ADDRESS}" \
+          --arg s_pwp "${stamp_pwprotected}" \
+          --arg s_pw "${stamp_password}" \
+          --arg s_name "${stamp_name}" \
+          --arg s_max "${stamp_max}" \
+          --arg s_proxy "${stamp_proxy}" \
+          --arg s_invite "${stamp_invite}" \
+          --arg s_island "${stamp_island}" \
+          --arg s_dcUse "${stamp_dc_use}" \
+          --arg s_dcAddr "${stamp_dc_addr}" \
+          --arg s_dcPort "${stamp_dc_port}" \
+          --arg s_dcProxy "${stamp_dc_proxy}" '
+          ($base.ServerDescription_Persistent // {}) as $b
+          | { ServerDescription_Persistent: (
+              $b
+              | (if $s_pwp    == "true" then .IsPasswordProtected = $protected else . end)
+              | (if $s_pw     == "true" then .Password            = $password  else . end)
+              | (if $s_name   == "true" then .ServerName          = $name      else . end)
+              | (if $s_max    == "true" then .MaxPlayerCount      = $maxPlayers else . end)
+              | (if $s_proxy  == "true" then .P2pProxyAddress     = $proxy     else . end)
+              | (if $s_invite == "true" then .InviteCode          = $invite    else . end)
+              | (if $s_island == "true" then .WorldIslandId       = $islandId  else . end)
+              | (if $s_dcUse   == "true" then .UseDirectConnection          = $useDirect else . end)
+              | (if $s_dcAddr  == "true" then .DirectConnectionServerAddress = $dcAddr    else . end)
+              | (if $s_dcPort  == "true" then .DirectConnectionServerPort   = $dcPort    else . end)
+              | (if $s_dcProxy == "true" then .DirectConnectionProxyAddress = $dcProxy   else . end)
+            ) }' > "${shadow}.tmp" && mv "${shadow}.tmp" "${shadow}"
       fi
-      jq -n \
-        --argjson base "${shadow_base}" \
-        --arg name "${SERVER_NAME}" \
-        --arg invite "${INVITE_CODE}" \
-        --argjson protected "${protected_bool}" \
-        --arg password "${SERVER_PASSWORD}" \
-        --arg islandId "${WORLD_ISLAND_ID}" \
-        --argjson maxPlayers "${MAX_PLAYER_COUNT}" \
-        --arg proxy "${P2P_PROXY_ADDRESS}" \
-        --argjson useDirect "${use_direct_bool}" \
-        --arg dcAddr "${DIRECT_CONNECTION_SERVER_ADDRESS}" \
-        --argjson dcPort "${DIRECT_CONNECTION_SERVER_PORT}" \
-        --arg dcProxy "${DIRECT_CONNECTION_PROXY_ADDRESS}" \
-        --arg first "${first_boot}" \
-        --arg s_pwp "${stamp_pwprotected}" \
-        --arg s_pw "${stamp_password}" \
-        --arg s_name "${stamp_name}" \
-        --arg s_max "${stamp_max}" \
-        --arg s_proxy "${stamp_proxy}" \
-        --arg s_invite "${stamp_invite}" \
-        --arg s_island "${stamp_island}" \
-        --arg s_dcUse "${stamp_dc_use}" \
-        --arg s_dcAddr "${stamp_dc_addr}" \
-        --arg s_dcPort "${stamp_dc_port}" \
-        --arg s_dcProxy "${stamp_dc_proxy}" \
-        --arg direct_opt_in "${USE_DIRECT_CONNECTION}" '
-        ($base.ServerDescription_Persistent // {}) as $b
-        | ($first == "true") as $seed
-        | ($direct_opt_in != "") as $dc_opted_in
-        | { ServerDescription_Persistent: (
-            $b
-            | (if $seed or $s_pwp   == "true" then .IsPasswordProtected = $protected else . end)
-            | (if $seed or $s_pw    == "true" then .Password            = $password  else . end)
-            | (if $seed or $s_name  == "true" then .ServerName          = $name      else . end)
-            | (if $seed or $s_max   == "true" then .MaxPlayerCount      = $maxPlayers else . end)
-            | (if $seed or $s_proxy == "true" then .P2pProxyAddress     = $proxy     else . end)
-            | (if $s_invite == "true"                then .InviteCode    = $invite   else . end)
-            | (if $s_island == "true"                then .WorldIslandId = $islandId else . end)
-            | (if ($seed and $dc_opted_in) or $s_dcUse   == "true" then .UseDirectConnection          = $useDirect else . end)
-            | (if ($seed and $dc_opted_in) or $s_dcAddr  == "true" then .DirectConnectionServerAddress = $dcAddr    else . end)
-            | (if ($seed and $dc_opted_in) or $s_dcPort  == "true" then .DirectConnectionServerPort   = $dcPort    else . end)
-            | (if ($seed and $dc_opted_in) or $s_dcProxy == "true" then .DirectConnectionProxyAddress = $dcProxy   else . end)
-          ) }' > "${shadow}.tmp" && mv "${shadow}.tmp" "${shadow}"
       ;;
     managed)
       : "${WINDROSE_MANAGED_CONFIG_TEMPLATE:?managed mode requires WINDROSE_MANAGED_CONFIG_TEMPLATE}"

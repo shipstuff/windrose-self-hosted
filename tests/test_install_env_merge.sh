@@ -148,5 +148,45 @@ if [ ${fail} -ne 0 ]; then
   cat "${out}"
   exit 1
 fi
+
+# --- fresh-install set -u test ----------------------------------------
+# Codex PR #2 review (2026-04-21, P1): after removing the pre-merge
+# `${X:-default}` assignments to fix the password-wipe bug, a fresh
+# install with NO existing env file and NO CLI overrides leaves
+# UI_BIND / UI_PORT unset in the shell — the status echo at the end of
+# install.sh dereferences them under `set -u` and aborts the script.
+# Minimal repro: run the same harness but without seeding an existing
+# env file, then confirm the four managed-UI vars got their defaults
+# applied (via the post-merge `:=` block the fix adds).
+
+out2="${_tmp}/fresh-install.env.out"
+bash <<HARNESS 2>&1
+set -eu
+WINDROSE_ENV_FILE="${_tmp}/does-not-exist-$$.env"  # no prior env file
+
+# Same pattern install.sh uses post-merge — these MUST set shell vars
+# (walrus :=), not just expand them (:-), or the status-line code
+# would blow up on undefined vars with set -u.
+: "\${UI_BIND:=127.0.0.1}"
+: "\${UI_PORT:=28080}"
+: "\${UI_PASSWORD:=}"
+: "\${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:=false}"
+
+# Simulated status echo — the thing that would fail under set -u
+# without the fix.
+echo "bind=\${UI_BIND} port=\${UI_PORT} pwlen=\${#UI_PASSWORD} admin=\${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}" > '${out2}'
+HARNESS
+
+if [ ! -f "${out2}" ]; then
+  echo "  FAIL  fresh install set -u aborted before echo"
+  exit 1
+fi
+if ! grep -q "bind=127.0.0.1 port=28080 pwlen=0 admin=false" "${out2}"; then
+  echo "  FAIL  fresh-install defaults incorrect:"
+  cat "${out2}"
+  exit 1
+fi
+echo "  PASS  fresh install (no env, no CLI) — defaults applied, set -u safe"
+
 echo
 echo "all install.sh env-merge regression checks passed"

@@ -54,6 +54,8 @@ jobs:
         run: bash tests/test_install_env_merge.sh
       - name: Engine.ini reconcile (NetServerMaxTickRate + t.MaxFPS)
         run: bash tests/test_engine_ini_reconcile.sh
+      - name: ServerDescription shadow-stamp contract
+        run: bash tests/test_shadow_stamp.sh
 
   yaml-lint:
     runs-on: ubuntu-latest

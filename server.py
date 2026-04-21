@@ -2435,7 +2435,20 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(body) if body else {}
         except json.JSONDecodeError:
             self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"invalid JSON body\n"); return
-        want_active = bool(payload.get("active"))
+        # Strict bool validation: bool(payload.get("active")) accepts any
+        # non-empty JSON value (including the string "false") as truthy,
+        # which lets a malformed client flip maintenance mode on by
+        # accident. Require a real JSON boolean for both toggles.
+        if not isinstance(payload, dict):
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"body must be a JSON object\n"); return
+        want_active = payload.get("active")
+        if not isinstance(want_active, bool):
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain",
+                       b'"active" must be a JSON boolean (true|false)\n'); return
+        want_restart = payload.get("restart", False)
+        if not isinstance(want_restart, bool):
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain",
+                       b'"restart" must be a JSON boolean when present\n'); return
         if want_active:
             MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
             tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
@@ -2451,7 +2464,7 @@ class Handler(BaseHTTPRequestHandler):
         # maintenance state takes effect immediately instead of on the
         # next organic restart. Entering maintenance = stop the game now;
         # exiting = restart so the entrypoint rechecks the flag.
-        if payload.get("restart"):
+        if want_restart:
             try:
                 request_restart()
                 status["restartRequested"] = True
