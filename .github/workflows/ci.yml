@@ -40,6 +40,10 @@ jobs:
           python-version: "3.13"
       - name: Backup retention tests
         run: python3 scripts/ui/test_retention.py
+      - name: Backup create/restore round-trip tests
+        run: python3 scripts/ui/test_restore.py
+      - name: HTTP integration tests
+        run: python3 scripts/ui/test_http.py
 
   yaml-lint:
     runs-on: ubuntu-latest
