@@ -268,6 +268,79 @@ The endpoint accepts `.tar.gz` / `.tar` / `.zip`, auto-detects format by magic b
 
 The game stores its `PersistentServerId` in `ServerDescription.json`. On registration, Windrose's backend looks up the island keyed off PSID — your save's `WorldIslandId` is tied to the PSID that originally owned it. If you nuke `ServerDescription.json` as part of an update, the game mints a fresh PSID on next boot, the backend hands you a brand-new island, and your old save sits on disk untied to any server the backend knows about. See `memory/windrose_island_identity.md`.
 
+## Recover Your World
+
+Four recovery paths, from lightest-touch to nuclear. All are covered by the same principle: **the backup directory is the source of truth; never cherry-pick pieces of it onto a running live tree**. RocksDB + the game's internal bookkeeping under `Saved/` expect the whole subtree to be consistent with the identity JSONs.
+
+### 1. Restore a UI backup — the default recovery path
+
+Admin console → **Backups** card → **Ours** tab → **Restore** on the timestamp row you want. Equivalent `curl`:
+
+```bash
+curl -s -u admin:$PASSWORD -X POST \
+  http://<host>:28080/api/backups/<backup-id>/restore
+```
+
+This calls `restore_backup()`, which wipes the live `R5/Saved/` tree and drops in the backup's whole tree + `ServerDescription.json` + `WorldDescription.json` + `.backup-config.json` + `.idle-patch-override`. Triggers a restart; the backend sees the preserved PSID and hands back the same island. Fires a `backup.restored` webhook. **This is the only supported recovery primitive for world data loss** — rolling back piece-by-piece leaves the internal state inconsistent and the game may refuse to load the world.
+
+Backups show three row tags: `auto` (scheduler-created), `manual` (operator-clicked), `pinned` (`manual-` prefix — exempt from retention). All three restore identically.
+
+### 2. Merge a Windrose game auto-backup
+
+Admin console → **Backups** → **Default_Backups (game)** tab → **Restore**. Equivalent `curl`:
+
+```bash
+curl -s -u admin:$PASSWORD -X POST \
+  http://<host>:28080/api/game-backups/<timestamp>/restore
+```
+
+Use when a UI backup isn't recent enough and the game's own on-launch backup captured the state you want. Merges the backup's RocksDB tree on top of live, creates a pinned safety snapshot first (visible under the *Ours* tab with the `manual-` prefix). **Caveat:** game auto-backups are world-only — `ServerDescription.json` is untouched, so this won't help recover a lost PSID. If your island identity is also gone, use path #1 instead.
+
+### 3. Disaster mode — when the admin UI won't start
+
+If the UI sidecar is crash-looping or the game won't boot and you can't reach the API, the on-disk backup directory is still there. From the container / host shell:
+
+```bash
+# k8s
+kubectl -n games exec windrose-0 -c windrose-ui -- ls -1 /home/steam/backups
+
+# bare-Linux / compose (on host)
+ls -1 /home/steam/backups
+```
+
+Pick the timestamp, stop the game, and do a plain `rm -rf Saved/ && cp -a` dance:
+
+```bash
+# Inside the container (or on the bare-Linux host):
+cd /home/steam/windrose/WindowsServer/R5
+# Stop the game first — these files must not be in use.
+rm -rf Saved
+cp -a /home/steam/backups/<ts>/Saved .
+cp /home/steam/backups/<ts>/ServerDescription.json .
+cp /home/steam/backups/<ts>/WorldDescription.json .
+```
+
+Then bring the UI / game back up. This matches exactly what `restore_backup()` does programmatically — it exists so operators don't have to.
+
+### 4. Lost PSID → orphaned island
+
+If `ServerDescription.json` was deleted, mangled, or replaced (e.g. by a clumsy `cp` from a blank template), the game mints a fresh `PersistentServerId` on next boot, the backend hands back a brand-new `WorldIslandId`, and your old save sits on disk untied to any server the backend knows about. **Only path #1 fixes this** — a UI backup captures `ServerDescription.json` so the PSID comes back intact. Game auto-backups (#2) won't help here; they're world-only.
+
+If no backup has the right `ServerDescription.json` either, the world is unrecoverable from the backend's point of view — the save file is still on disk but there's no way to bind it back to an island without the PSID that originally owned it.
+
+### Prevention
+
+- **Pin before risky ops.** Before manually editing config files, running the idle-CPU patch for the first time, or swapping `WindowsServer/` via the upload flow, click **Pin** on the most recent backup in the *Ours* tab (or `POST /api/backups/{id}/pin`). Pinned entries ignore retention — they survive until you click Unpin.
+- **Keep the age window generous.** `WINDROSE_BACKUP_RETAIN_DAYS=7` is the floor we ship with, and retention combines count + age via OR (either rule keeping a backup is enough). So `retain=10 + retain_days=7` guarantees the most recent 10 survive forever and anything in the last week also survives, even if the auto-scheduler silently stalls.
+- **Watch for auto-backup drift.** The Backups row tagging shows `auto` vs `manual` — if you see no `auto` rows for multiple days despite active play, the scheduler likely isn't firing. Check the UI container's stderr for `[auto-backup]` lines.
+- **Don't build recovery tooling in `/tmp`.** Most deployments mount `/tmp` as tmpfs; a mid-operation container kill = data gone. All backups + staging in this repo land on the PVC (`/home/steam/backups/`) for exactly this reason.
+
+### What NOT to do
+
+- **Don't raw-`cp` a single world subtree** (`Saved/.../Worlds/<id>/`). RocksDB's `MANIFEST` + `CURRENT` files reference data in sibling `Saved/SaveProfiles/` paths; copying a world folder alone can mismatch those pointers and corrupt the load.
+- **Don't delete `ServerDescription.json`** thinking the game will helpfully re-mint. It will — and your existing save becomes unrebindable (see path #4).
+- **Don't amend / force-push a `.backup-config.json` directly** on disk while the scheduler is running. Use `PUT /api/backup-config` so the write is atomic; the scheduler re-reads the file each tick.
+
 ## Retrieve The Invite Code
 
 From the UI: the big code on the **Invite** card.
