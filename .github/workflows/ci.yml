@@ -57,6 +57,32 @@ jobs:
       - name: ServerDescription shadow-stamp contract
         run: bash tests/test_shadow_stamp.sh
 
+  compose-validate:
+    # Validates docker-compose.yaml parses cleanly with env-var
+    # substitution applied — catches broken `${VAR:-default}` syntax,
+    # missing keys, malformed volume/depends_on refs before an
+    # operator trips on them. Does NOT spin up containers: that would
+    # need a 3 GB SteamCMD pull + ~3 min per CI run for marginal
+    # coverage beyond what the k8s canary rollout already exercises.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: docker compose config --quiet
+      - name: verify persistent volumes are declared
+        run: |
+          # Guard against a regression where someone deletes the
+          # top-level `volumes:` block. Without named volumes, a
+          # `docker compose down` would lose save data.
+          docker compose config | grep -q "^volumes:" || {
+            echo "::error::docker-compose.yaml is missing named volumes — saves would not persist across down/up"
+            exit 1
+          }
+          docker compose config | grep -q "windrose-data" || {
+            echo "::error::windrose-data named volume missing — /home/steam would be ephemeral"
+            exit 1
+          }
+
   yaml-lint:
     runs-on: ubuntu-latest
     steps:
