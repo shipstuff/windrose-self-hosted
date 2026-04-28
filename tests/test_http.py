@@ -591,6 +591,30 @@ def test_mod_upload_stages_then_apply_materializes():
             srv.shutdown()
 
 
+def test_mod_upload_accepts_plain_pak():
+    """Raw .pak uploads should follow the same staged apply flow as archives."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, raw = _req("POST", f"{srv.base}/api/mods/upload",
+                             body=b"plain-pak",
+                             headers={"Content-Type": "application/octet-stream",
+                                      "X-Filename": "z_plainloot.pak"})
+            assert code == 200, f"plain pak upload failed: {code} {raw}"
+            assert (r5 / ".mods-staging" / "z_plainloot" / "z_plainloot.pak").read_bytes() == b"plain-pak"
+
+            code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"plain pak apply failed: {code} {apply_resp}"
+            assert apply_resp["modsApplied"] == ["z_plainloot"], apply_resp
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_plainloot.pak").read_bytes() == b"plain-pak"
+        finally:
+            srv.shutdown()
+
+
 def test_mod_disable_enable_are_staged_and_applied():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
@@ -787,6 +811,7 @@ if __name__ == "__main__":
     _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
     _run("mod upload stages then apply materializes", test_mod_upload_stages_then_apply_materializes)
+    _run("mod upload accepts plain pak", test_mod_upload_accepts_plain_pak)
     _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
     _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
     _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)
