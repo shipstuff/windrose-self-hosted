@@ -83,7 +83,7 @@ services:
       - windrose
     entrypoint: ["python3", "/opt/windrose-ui/server.py"]
     environment:
-      UI_BIND: ${UI_BIND:-127.0.0.1}
+      UI_BIND: "0.0.0.0"
       UI_PORT: ${UI_PORT:-28080}
       UI_PASSWORD: ${UI_PASSWORD:-}
       # Opt-in: allow destructive actions when no password is set (LAN-only).
