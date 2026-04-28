@@ -62,7 +62,7 @@ services:
     # Dedicated X display server. Lives in its own container so its lifecycle
     # and signal space can't interfere with Proton's (a backgrounded Xvfb in
     # the same bash as Proton kills Proton in ~3 s via SIGCHLD racing).
-    command: ["Xvfb", ":99", "-screen", "0", "1024x768x24", "-nolisten", "tcp"]
+    entrypoint: ["Xvfb", ":99", "-screen", "0", "1024x768x24", "-nolisten", "tcp"]
     volumes:
       - x11-socket:/tmp/.X11-unix
 
@@ -81,7 +81,7 @@ services:
     pid: service:windrose
     depends_on:
       - windrose
-    command: ["python3", "/opt/windrose-ui/server.py"]
+    entrypoint: ["python3", "/opt/windrose-ui/server.py"]
     environment:
       UI_BIND: ${UI_BIND:-127.0.0.1}
       UI_PORT: ${UI_PORT:-28080}
