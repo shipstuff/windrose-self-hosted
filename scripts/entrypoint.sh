@@ -170,9 +170,9 @@ restore_r5_state() {
   done
   for rel in "${steamcmd_preserved_dirs[@]}"; do
     if [ -d "${src}/${rel}" ]; then
-      rm -rf "${dst_r5}/${rel}"
-      mkdir -p "$(dirname "${dst_r5}/${rel}")"
-      cp -a "${src}/${rel}" "${dst_r5}/${rel}"
+      rm -rf "${dst_r5:?}/${rel}"
+      mkdir -p "$(dirname "${dst_r5:?}/${rel}")"
+      cp -a "${src}/${rel}" "${dst_r5:?}/${rel}"
     fi
   done
 }
