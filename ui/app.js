@@ -88,6 +88,7 @@ const modsEmpty        = document.getElementById("modsEmpty");
 const modsStagedTag    = document.getElementById("modsStagedTag");
 const modUploadFile    = document.getElementById("modUploadFile");
 const modUploadBtn     = document.getElementById("modUploadBtn");
+const modTrustAck      = document.getElementById("modTrustAck");
 const bsIdleMin       = document.getElementById("bsIdleMin");
 const bsFloorHr       = document.getElementById("bsFloorHr");
 const bsRetainCount   = document.getElementById("bsRetainCount");
@@ -1021,6 +1022,10 @@ uploadBtn.addEventListener("click", async () => {
 modUploadBtn.addEventListener("click", async () => {
   const file = modUploadFile.files[0];
   if (!file) { log("select a mod archive first"); return; }
+  if (!modTrustAck.checked) {
+    log("confirm you trust this mod before staging upload");
+    return;
+  }
   log(`staging mod ${file.name} (${formatBytes(file.size)})...`);
   modUploadBtn.disabled = true;
   try {
@@ -1031,6 +1036,7 @@ modUploadBtn.addEventListener("click", async () => {
     });
     log(`${res.ok ? "mod staged" : "mod stage failed"}: ${await res.text()}`);
     modUploadFile.value = "";
+    modTrustAck.checked = false;
   } catch (err) { log("mod upload error: " + err); }
   finally { modUploadBtn.disabled = false; loadStatus(); loadMods(); }
 });

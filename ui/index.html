@@ -261,10 +261,17 @@
     <div class="card admin-only hidden" id="modsCard">
       <h2>Mods <span id="modsStagedTag" class="tag hidden">pending restart</span></h2>
       <p class="muted">Upload server-side Unreal mod archives. Changes are staged and apply on the next server restart, before the game launches.</p>
+      <div class="warn-inline row">
+        Mods are third-party code/content loaded by the game server. Only install mods from sources you trust, and expect mismatched or broken mods to prevent players from joining until disabled.
+      </div>
       <div class="row">
         <input id="modUploadFile" type="file" accept=".pak,.zip,.tar,.tgz,.gz,application/zip,application/gzip,application/x-tar">
         <button id="modUploadBtn" class="danger" type="button">Stage upload</button>
       </div>
+      <label class="row muted">
+        <input id="modTrustAck" type="checkbox">
+        I trust this mod and understand it will be installed on the server after Apply + restart.
+      </label>
       <div id="modsEmpty" class="empty-note hidden">No mods uploaded.</div>
       <table id="modsTable">
         <thead><tr><th>Name</th><th>State</th><th>Uploaded</th><th>Size</th><th>Files</th><th></th></tr></thead>
