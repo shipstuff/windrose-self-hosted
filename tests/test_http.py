@@ -615,6 +615,58 @@ def test_mod_upload_accepts_plain_pak():
             srv.shutdown()
 
 
+def test_mod_apply_stops_game_before_promoting_files():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        original_find_game_pid = server.find_game_pid
+        original_request_restart = server.request_restart
+        original_wait_for_game_exit = server.wait_for_game_exit
+        original_apply_staged_mods = server.apply_staged_mods
+        events: list[str] = []
+        try:
+            code, _ = _req("POST", f"{srv.base}/api/mods/upload",
+                           body=_mod_zip(payload=b"ordered"),
+                           headers={"Content-Type": "application/zip",
+                                    "X-Filename": "10xloot.zip"})
+            assert code == 200
+
+            server.find_game_pid = lambda: (12345, 1024)
+
+            def fake_request_restart() -> None:
+                events.append("restart")
+
+            def fake_wait_for_game_exit(*_args, **_kwargs) -> bool:
+                events.append("wait")
+                assert server.MAINTENANCE_FLAG_FILE.is_file(), "maintenance guard missing before wait"
+                return True
+
+            def wrapped_apply_staged_mods() -> list[str]:
+                events.append("apply")
+                assert events[:2] == ["restart", "wait"], events
+                assert server.MAINTENANCE_FLAG_FILE.is_file(), "maintenance guard missing during mod promotion"
+                return original_apply_staged_mods()
+
+            server.request_restart = fake_request_restart
+            server.wait_for_game_exit = fake_wait_for_game_exit
+            server.apply_staged_mods = wrapped_apply_staged_mods
+
+            code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"apply failed: {code} {apply_resp}"
+            assert events == ["restart", "wait", "apply", "restart"], events
+            assert not server.MAINTENANCE_FLAG_FILE.exists(), "temporary maintenance guard not cleared"
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").read_bytes() == b"ordered"
+        finally:
+            server.find_game_pid = original_find_game_pid
+            server.request_restart = original_request_restart
+            server.wait_for_game_exit = original_wait_for_game_exit
+            server.apply_staged_mods = original_apply_staged_mods
+            srv.shutdown()
+
+
 def test_mod_disable_enable_are_staged_and_applied():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
@@ -812,6 +864,7 @@ if __name__ == "__main__":
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
     _run("mod upload stages then apply materializes", test_mod_upload_stages_then_apply_materializes)
     _run("mod upload accepts plain pak", test_mod_upload_accepts_plain_pak)
+    _run("mod apply stops game before promoting files", test_mod_apply_stops_game_before_promoting_files)
     _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
     _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
     _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)

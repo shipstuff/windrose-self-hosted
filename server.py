@@ -723,7 +723,6 @@ def create_backup(pin: bool = False) -> dict:
         src = R5_DIR / name
         if src.is_file():
             shutil.copy2(src, dst / name)
-    mods_copied = False
     for src, rel in (
         (mods_enabled_dir(), Path("Content/Paks/~mods")),
         (mods_disabled_dir(), Path("Content/Paks/~mods.disabled")),
@@ -731,11 +730,9 @@ def create_backup(pin: bool = False) -> dict:
     ):
         if src.is_dir():
             shutil.copytree(src, dst / rel, dirs_exist_ok=True)
-            mods_copied = True
-    if mods_copied or (dst / MODS_METADATA_NAME).is_file() or (dst / MODS_STAGED_METADATA_NAME).is_file():
-        (dst / MODS_BACKUP_MARKER_NAME).write_text(
-            datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii"
-        )
+    (dst / MODS_BACKUP_MARKER_NAME).write_text(
+        datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii"
+    )
     _prune_backups()
     return {"id": dir_name, "path": str(dst), "pinned": pin}
 
@@ -1191,6 +1188,26 @@ def request_restart() -> None:
               file=sys.stderr, flush=True)
     RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
     signal_game(signal.SIGTERM)
+
+
+def wait_for_game_exit(timeout_seconds: float = 60.0, poll_seconds: float = 0.5) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        pid, _ = find_game_pid()
+        if not pid:
+            return True
+        time.sleep(poll_seconds)
+    return find_game_pid()[0] is None
+
+
+def set_maintenance_flag(active: bool) -> None:
+    if active:
+        MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
+        tmp.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii")
+        tmp.replace(MAINTENANCE_FLAG_FILE)
+    else:
+        MAINTENANCE_FLAG_FILE.unlink(missing_ok=True)
 
 def signal_game(sig: int) -> tuple[bool, str]:
     """Send ``sig`` to whichever proton-wrapper/umu.exe/game pid we can see.
@@ -2556,10 +2573,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         applied_worlds: list[str] = []
         applied_mods: list[str] = []
+        resume_after_mod_apply = False
         if have_mods:
+            prior_maintenance = MAINTENANCE_FLAG_FILE.is_file()
+            pid, _ = find_game_pid()
+            if pid:
+                if not prior_maintenance:
+                    set_maintenance_flag(True)
+                    resume_after_mod_apply = True
+                request_restart()
+                if not wait_for_game_exit():
+                    if resume_after_mod_apply:
+                        set_maintenance_flag(False)
+                        request_restart()
+                    self._send(HTTPStatus.CONFLICT, "text/plain",
+                               b"game did not stop before mod apply; staged changes left pending\n")
+                    return
             try:
                 applied_mods = apply_staged_mods()
             except Exception as e:
+                if resume_after_mod_apply:
+                    set_maintenance_flag(False)
+                    request_restart()
                 self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"mod apply failed: {e}\n".encode())
                 return
         if have_server:
@@ -2573,6 +2608,8 @@ class Handler(BaseHTTPRequestHandler):
             tmp.replace(live)
             staged.unlink(missing_ok=True)
             applied_worlds.append(island_id)
+        if resume_after_mod_apply:
+            set_maintenance_flag(False)
         request_restart()
         fire_event("config.applied", serverName=(load_json(CONFIG_PATH) or {})
                    .get("ServerDescription_Persistent", {}).get("ServerName", ""),
@@ -2911,15 +2948,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.BAD_REQUEST, "text/plain",
                        b'"restart" must be a JSON boolean when present\n'); return
         if want_active:
-            MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
-            tmp.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii")
-            tmp.replace(MAINTENANCE_FLAG_FILE)
+            set_maintenance_flag(True)
         else:
-            try:
-                MAINTENANCE_FLAG_FILE.unlink()
-            except FileNotFoundError:
-                pass
+            set_maintenance_flag(False)
         status = {"active": MAINTENANCE_FLAG_FILE.is_file(), "flagFile": str(MAINTENANCE_FLAG_FILE)}
         # Optional: if caller asks, also signal the running game so the
         # maintenance state takes effect immediately instead of on the

@@ -895,7 +895,7 @@ if [ -f "${maint_flag}" ]; then
   # service failed and restart-loop. SIGTERM from the supervisor wakes
   # us up cleanly.
   trap 'echo "$(timestamp) INFO: SIGTERM received in maintenance mode; exiting."; exit 0' TERM INT
-  while [ -f "${maint_flag}" ]; do sleep 30 & wait $!; done
+  while [ -f "${maint_flag}" ]; do sleep "${WINDROSE_MAINTENANCE_POLL_SECONDS:-2}" & wait $!; done
   echo "$(timestamp) INFO: Maintenance flag cleared; proceeding with normal boot."
 fi
 
