@@ -138,6 +138,45 @@ server_files_present() {
     || [ -f "${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe" ]
 }
 
+steamcmd_preserved_files=(ServerDescription.json WorldDescription.json .mods.json .mods.staged.json)
+steamcmd_preserved_dirs=("Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging")
+
+preserve_r5_state() {
+  local src_r5="$1"
+  local dst="$2"
+
+  for f in "${steamcmd_preserved_files[@]}"; do
+    if [ -f "${src_r5}/${f}" ]; then
+      cp -a "${src_r5}/${f}" "${dst}/${f}"
+    fi
+  done
+  for rel in "${steamcmd_preserved_dirs[@]}"; do
+    if [ -d "${src_r5}/${rel}" ]; then
+      mkdir -p "${dst}/$(dirname "${rel}")"
+      cp -a "${src_r5}/${rel}" "${dst}/${rel}"
+    fi
+  done
+}
+
+restore_r5_state() {
+  local src="$1"
+  local dst_r5="$2"
+
+  mkdir -p "${dst_r5}"
+  for f in "${steamcmd_preserved_files[@]}"; do
+    if [ -f "${src}/${f}" ]; then
+      cp -a "${src}/${f}" "${dst_r5}/${f}"
+    fi
+  done
+  for rel in "${steamcmd_preserved_dirs[@]}"; do
+    if [ -d "${src}/${rel}" ]; then
+      rm -rf "${dst_r5}/${rel}"
+      mkdir -p "$(dirname "${dst_r5}/${rel}")"
+      cp -a "${src}/${rel}" "${dst_r5}/${rel}"
+    fi
+  done
+}
+
 # Pull (and keep up-to-date) the Windrose Dedicated Server via SteamCMD
 # app id 4129620. This is anonymous-downloadable — no Steam account /
 # license required. Preserves R5/Saved and R5/ServerDescription.json
@@ -173,18 +212,7 @@ install_via_steamcmd() {
       echo "$(timestamp) WARNING: Found abandoned preserve_dir ${stray} from a prior interrupted boot; restoring before proceeding"
       mkdir -p "${WINDROSE_SERVER_DIR}/R5"
       mv "${stray}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
-      for f in ServerDescription.json WorldDescription.json; do
-        [ -f "${stray}/${f}" ] && cp -a "${stray}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
-      done
-      for f in .mods.json .mods.staged.json; do
-        [ -f "${stray}/${f}" ] && cp -a "${stray}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
-      done
-      for rel in "Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging"; do
-        if [ -d "${stray}/${rel}" ]; then
-          mkdir -p "$(dirname "${WINDROSE_SERVER_DIR}/R5/${rel}")"
-          cp -a "${stray}/${rel}" "${WINDROSE_SERVER_DIR}/R5/${rel}"
-        fi
-      done
+      restore_r5_state "${stray}" "${WINDROSE_SERVER_DIR}/R5"
     fi
     rm -rf "${stray}"
   done
@@ -194,22 +222,7 @@ install_via_steamcmd() {
   if [ -d "${WINDROSE_SERVER_DIR}/R5/Saved" ]; then
     mv "${WINDROSE_SERVER_DIR}/R5/Saved" "${preserve_dir}/Saved"
   fi
-  for f in ServerDescription.json WorldDescription.json; do
-    if [ -f "${WINDROSE_SERVER_DIR}/R5/${f}" ]; then
-      cp -a "${WINDROSE_SERVER_DIR}/R5/${f}" "${preserve_dir}/${f}"
-    fi
-  done
-  for f in .mods.json .mods.staged.json; do
-    if [ -f "${WINDROSE_SERVER_DIR}/R5/${f}" ]; then
-      cp -a "${WINDROSE_SERVER_DIR}/R5/${f}" "${preserve_dir}/${f}"
-    fi
-  done
-  for rel in "Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging"; do
-    if [ -d "${WINDROSE_SERVER_DIR}/R5/${rel}" ]; then
-      mkdir -p "${preserve_dir}/$(dirname "${rel}")"
-      cp -a "${WINDROSE_SERVER_DIR}/R5/${rel}" "${preserve_dir}/${rel}"
-    fi
-  done
+  preserve_r5_state "${WINDROSE_SERVER_DIR}/R5" "${preserve_dir}"
 
   mkdir -p "${WINDROSE_SERVER_DIR}"
   # SteamCMD's anonymous app_update is flaky on the first attempt
@@ -259,23 +272,7 @@ EOF
     rm -rf "${WINDROSE_SERVER_DIR}/R5/Saved"
     mv "${preserve_dir}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
   fi
-  for f in ServerDescription.json WorldDescription.json; do
-    if [ -f "${preserve_dir}/${f}" ]; then
-      cp -a "${preserve_dir}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
-    fi
-  done
-  for f in .mods.json .mods.staged.json; do
-    if [ -f "${preserve_dir}/${f}" ]; then
-      cp -a "${preserve_dir}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
-    fi
-  done
-  for rel in "Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging"; do
-    if [ -d "${preserve_dir}/${rel}" ]; then
-      rm -rf "${WINDROSE_SERVER_DIR}/R5/${rel}"
-      mkdir -p "$(dirname "${WINDROSE_SERVER_DIR}/R5/${rel}")"
-      cp -a "${preserve_dir}/${rel}" "${WINDROSE_SERVER_DIR}/R5/${rel}"
-    fi
-  done
+  restore_r5_state "${preserve_dir}" "${WINDROSE_SERVER_DIR}/R5"
   rm -rf "${preserve_dir}"
 
   if [ "${rc}" -ne 0 ]; then
