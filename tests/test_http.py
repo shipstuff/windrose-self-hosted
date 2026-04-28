@@ -31,13 +31,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 
 
+WORLD_ID = "ABCDEF0123456789ABCDEF0123456789"
+
+
+def _server_description(name: str = "http-test", max_players: int = 4) -> dict:
+    return {
+        "ServerDescription_Persistent": {
+            "ServerName": name,
+            "MaxPlayerCount": max_players,
+            "IsPasswordProtected": False,
+            "Password": "",
+            "P2pProxyAddress": "127.0.0.1",
+            "PersistentServerId": "11111111111111111111111111111111",
+            "InviteCode": "ABC123",
+            "WorldIslandId": WORLD_ID,
+        }
+    }
+
+
+def _world_description(name: str = "HTTP World", preset: str = "Medium") -> dict:
+    return {
+        "WorldDescription": {
+            "islandId": WORLD_ID,
+            "WorldName": name,
+            "WorldPresetType": preset,
+            "WorldSettings": {
+                "BoolParameters": {},
+                "FloatParameters": {},
+                "TagParameters": {},
+            },
+        }
+    }
+
+
 def _seed_r5(r5: Path) -> None:
-    saved = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / "ABC123"
+    saved = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / WORLD_ID
     saved.mkdir(parents=True)
     (saved / "MANIFEST-000001").write_bytes(b"manifest")
     (saved / "CURRENT").write_text("MANIFEST-000001\n")
     (saved / "000005.sst").write_bytes(b"sst" * 200)
-    (r5 / "ServerDescription.json").write_text('{"ServerDescription_Persistent":{"ServerName":"http-test"}}')
+    (saved / "WorldDescription.json").write_text(json.dumps(_world_description()))
+    (r5 / "ServerDescription.json").write_text(json.dumps(_server_description()))
 
 
 class _TestServer:
@@ -48,6 +82,10 @@ class _TestServer:
     def __init__(self, r5: Path, backup_root: Path, password: str = ""):
         # Patch server module state — Handler reads these at request time.
         server.R5_DIR = r5
+        server.SAVE_ROOT = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB"
+        server.R5_LOG = r5 / "Saved" / "Logs" / "R5.log"
+        server.CONFIG_PATH = r5 / "ServerDescription.json"
+        server.STAGED_CONFIG_PATH = r5 / "ServerDescription.staged.json"
         server.BACKUP_ROOT = backup_root
         server.BACKUP_RETAIN = 10
         server.BACKUP_RETAIN_DAYS = 7
@@ -349,7 +387,7 @@ def test_backup_download_upload_roundtrip():
             assert name == "http-test", f"server name not restored (stuck on destination?): {name}"
             # RocksDB content byte-for-byte matches the seed.
             world = (r5_dst / "Saved" / "SaveProfiles" / "Default" /
-                     "RocksDB" / "0.10.0" / "Worlds" / "ABC123")
+                     "RocksDB" / "0.10.0" / "Worlds" / WORLD_ID)
             assert (world / "MANIFEST-000001").read_bytes() == b"manifest"
         finally:
             srv_dst.shutdown()
@@ -642,6 +680,75 @@ def test_backup_restore_includes_live_mod_state():
             srv.shutdown()
 
 
+def test_apply_promotes_server_world_and_mod_staging_together():
+    """One Apply+restart must promote every staged surface: server config,
+    per-world config, and mods. This guards the combined code path after
+    adding mod staging to the existing config/world apply flow."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            server_doc = _server_description(name="all-staged", max_players=6)
+            code, resp = _json_req("PUT", f"{srv.base}/api/config", server_doc)
+            assert code == 200, f"server config stage failed: {code} {resp}"
+            assert (r5 / "ServerDescription.staged.json").is_file()
+
+            world_doc = _world_description(name="All Staged World", preset="Hard")
+            code, resp = _json_req("PUT", f"{srv.base}/api/worlds/{WORLD_ID}/config", world_doc)
+            assert code == 200, f"world config stage failed: {code} {resp}"
+            world_staged = (
+                r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" /
+                "0.10.0" / "Worlds" / WORLD_ID / "WorldDescription.staged.json"
+            )
+            assert world_staged.is_file()
+
+            code, raw = _req("POST", f"{srv.base}/api/mods/upload",
+                             body=_mod_zip(payload=b"combined"),
+                             headers={"Content-Type": "application/zip",
+                                      "X-Filename": "10xloot.zip"})
+            assert code == 200, f"mod upload failed: {code} {raw}"
+            assert (r5 / ".mods.staged.json").is_file()
+
+            code, status = _json_req("GET", f"{srv.base}/api/status")
+            assert code == 200
+            assert status["stagedConfigPending"] is True, status
+            assert WORLD_ID in status["stagedWorlds"], status
+            assert status["stagedModsPending"] is True, status
+
+            code, applied = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"combined apply failed: {code} {applied}"
+            assert applied["serverApplied"] is True, applied
+            assert applied["worldsApplied"] == [WORLD_ID], applied
+            assert applied["modsApplied"] == ["z_10xloot"], applied
+
+            live_server = json.loads((r5 / "ServerDescription.json").read_text())
+            assert live_server["ServerDescription_Persistent"]["ServerName"] == "all-staged"
+            assert live_server["ServerDescription_Persistent"]["MaxPlayerCount"] == 6
+            assert not (r5 / "ServerDescription.staged.json").exists()
+
+            live_world_path = world_staged.with_name("WorldDescription.json")
+            live_world = json.loads(live_world_path.read_text())
+            assert live_world["WorldDescription"]["WorldName"] == "All Staged World"
+            assert live_world["WorldDescription"]["WorldPresetType"] == "Hard"
+            assert not world_staged.exists()
+
+            live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
+            assert live_pak.read_bytes() == b"combined"
+            assert not (r5 / ".mods.staged.json").exists()
+            assert not (r5 / ".mods-staging").exists()
+
+            code, status = _json_req("GET", f"{srv.base}/api/status")
+            assert code == 200
+            assert status["stagedConfigPending"] is False, status
+            assert status["stagedWorlds"] == [], status
+            assert status["stagedModsPending"] is False, status
+        finally:
+            srv.shutdown()
+
+
 def test_malformed_json_body_returns_400():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
@@ -683,6 +790,7 @@ if __name__ == "__main__":
     _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
     _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
     _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)
+    _run("combined apply promotes server + world + mods", test_apply_promotes_server_world_and_mod_staging_together)
     _run("backup download → upload → restore round-trip", test_backup_download_upload_roundtrip)
     _run("backup download unknown id → 404", test_backup_download_unknown_id_404)
     _run("backup upload rejects non-archive garbage", test_backup_upload_rejects_garbage)
