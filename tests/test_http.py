@@ -513,10 +513,10 @@ def test_restore_unknown_game_backup_returns_404():
             srv.shutdown()
 
 
-def test_mod_upload_stages_then_entrypoint_apply_materializes():
-    """Uploading a mod creates staged metadata/files only. The boot-time
-    apply helper promotes them into R5/Content/Paks/~mods and clears
-    the staged state."""
+def test_mod_upload_stages_then_apply_materializes():
+    """Uploading a mod creates staged metadata/files only. The normal
+    Apply+restart endpoint promotes it into R5/Content/Paks/~mods and
+    clears the staged state."""
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
         backup_root = Path(tmp) / "backups"
@@ -538,10 +538,8 @@ def test_mod_upload_stages_then_entrypoint_apply_materializes():
             assert status["stagedModsPending"] is True, status
             code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
             assert code == 200, f"mods-only apply should be accepted: {code} {apply_resp}"
-            assert apply_resp["modsPending"] is True, apply_resp
+            assert apply_resp["modsApplied"] == ["z_10xloot"], apply_resp
 
-            applied = server.apply_staged_mods()
-            assert applied == ["z_10xloot"], applied
             live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
             assert live_pak.read_bytes() == b"loot" * 128
             assert not (r5 / ".mods.staged.json").exists(), "staged metadata not cleared"
@@ -568,20 +566,23 @@ def test_mod_disable_enable_are_staged_and_applied():
                            headers={"Content-Type": "application/zip",
                                     "X-Filename": "10xloot.zip"})
             assert code == 200
-            server.apply_staged_mods()
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
 
             code, resp = _json_req("POST", f"{srv.base}/api/mods/z_10xloot/disable")
             assert code == 200, resp
             assert resp["staged"] is True, resp
-            # Live remains enabled until boot-time apply.
+            # Live remains enabled until Apply+restart.
             assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").is_file()
-            server.apply_staged_mods()
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
             assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists()
             assert (r5 / "Content" / "Paks" / "~mods.disabled" / "z_10xloot" / "z_10xloot.pak").is_file()
 
             code, resp = _json_req("POST", f"{srv.base}/api/mods/z_10xloot/enable")
             assert code == 200, resp
-            server.apply_staged_mods()
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
             assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").is_file()
         finally:
             srv.shutdown()
@@ -621,7 +622,8 @@ def test_backup_restore_includes_live_mod_state():
                            headers={"Content-Type": "application/zip",
                                     "X-Filename": "10xloot.zip"})
             assert code == 200
-            server.apply_staged_mods()
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
 
             code, created = _json_req("POST", f"{srv.base}/api/backups")
             assert code == 200, created
@@ -677,7 +679,7 @@ if __name__ == "__main__":
     _run("maintenance POST requires strict JSON bools", test_maintenance_requires_strict_bool)
     _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
-    _run("mod upload stages then apply materializes", test_mod_upload_stages_then_entrypoint_apply_materializes)
+    _run("mod upload stages then apply materializes", test_mod_upload_stages_then_apply_materializes)
     _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
     _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
     _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)

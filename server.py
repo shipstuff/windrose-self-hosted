@@ -2543,10 +2543,9 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _api_config_apply(self):
-        """Swap staged → live for the server config AND for every world
-        that has staged changes, then kick a restart. Accepts either the
-        server or per-world staging alone (both are optional) — empty
-        400s out so the UI can surface "nothing to apply" cleanly."""
+        """Swap staged → live for server config, worlds, and mods, then
+        kick a restart. Accepts any subset of staged changes — empty 400s
+        out so the UI can surface "nothing to apply" cleanly."""
         if not allow_destructive():
             self._forbidden(); return
         staged_worlds = self._staged_world_paths()
@@ -2556,6 +2555,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"no staged changes\n")
             return
         applied_worlds: list[str] = []
+        applied_mods: list[str] = []
+        if have_mods:
+            try:
+                applied_mods = apply_staged_mods()
+            except Exception as e:
+                self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"mod apply failed: {e}\n".encode())
+                return
         if have_server:
             tmp = CONFIG_PATH.with_suffix(".json.tmp")
             shutil.copy2(STAGED_CONFIG_PATH, tmp)
@@ -2571,11 +2577,11 @@ class Handler(BaseHTTPRequestHandler):
         fire_event("config.applied", serverName=(load_json(CONFIG_PATH) or {})
                    .get("ServerDescription_Persistent", {}).get("ServerName", ""),
                    worldsApplied=applied_worlds,
-                   modsPending=have_mods)
+                   modsApplied=applied_mods)
         self._json(HTTPStatus.OK, {
             "ok": True, "restartRequested": True,
             "serverApplied": have_server, "worldsApplied": applied_worlds,
-            "modsPending": have_mods,
+            "modsApplied": applied_mods,
         })
 
     def _api_config_discard(self):
@@ -2993,15 +2999,4 @@ def main():
         server.server_close()
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--apply-staged-mods":
-        try:
-            applied = apply_staged_mods()
-            if applied:
-                print("applied staged mods: " + ", ".join(applied), flush=True)
-            else:
-                print("no staged mods", flush=True)
-        except Exception as e:  # noqa: BLE001
-            print(f"failed to apply staged mods: {e}", file=sys.stderr, flush=True)
-            sys.exit(1)
-    else:
-        main()
+    main()

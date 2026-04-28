@@ -96,7 +96,7 @@ Uploads preserve `R5/Saved/`, `ServerDescription.json`, and `WorldDescription.js
 
 ### Optional: Upload Server-Side Mods
 
-For normal `.pak` style server-side mods, use the admin console's **Mods** card instead of replacing the whole `WindowsServer/` tree. Upload a `.pak`, `.zip`, `.tar`, or `.tar.gz`; the UI stages the files under `R5/.mods-staging/` and writes desired state to `R5/.mods.staged.json`. Click **Apply + restart** to promote the staged set into `R5/Content/Paks/~mods/` before the game launches. Disable/delete operations are staged the same way, so the live `~mods/` directory is not mutated while the game process is running.
+For normal `.pak` style server-side mods, use the admin console's **Mods** card instead of replacing the whole `WindowsServer/` tree. Upload a `.pak`, `.zip`, `.tar`, or `.tar.gz`; the UI stages the files under `R5/.mods-staging/` and writes desired state to `R5/.mods.staged.json`. Click **Apply + restart** to promote the staged set into `R5/Content/Paks/~mods/` and restart the game. Disable/delete operations are staged the same way.
 
 The entrypoint preserves `~mods/`, `~mods.disabled/`, `.mods.json`, `.mods.staged.json`, and `.mods-staging/` across SteamCMD updates. UI backups created after this feature include those files and restore them with the save/identity state.
 

@@ -902,14 +902,6 @@ if [ -f "${maint_flag}" ]; then
   echo "$(timestamp) INFO: Maintenance flag cleared; proceeding with normal boot."
 fi
 
-_ui_server_py="${WINDROSE_UI_SERVER_PY:-/opt/windrose-ui/server.py}"
-if [ -f "${_ui_server_py}" ] && [ -f "${WINDROSE_SERVER_DIR}/R5/.mods.staged.json" ]; then
-  echo "$(timestamp) INFO: Applying staged mod changes before launch"
-  python3 "${_ui_server_py}" --apply-staged-mods 2>&1 | while IFS= read -r _line; do
-    echo "$(timestamp) ${_line}"
-  done
-fi
-
 migrate_saves_on_version_change
 ensure_world_layout
 reconcile_server_config
