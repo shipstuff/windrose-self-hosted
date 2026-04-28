@@ -149,15 +149,10 @@ install_via_steamcmd() {
   # debugging corruption. Default off; set WINDROSE_STEAMCMD_VALIDATE=1
   # to enable. Also forced on if we see a partial install (dir exists but
   # binary missing).
-  local validate_arg=""
-  if [ "${WINDROSE_STEAMCMD_VALIDATE:-0}" = "1" ]; then
-    validate_arg="validate"
-  elif [ -d "${WINDROSE_SERVER_DIR}" ] \
-       && [ ! -f "${WINDROSE_SERVER_DIR}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe" ] \
-       && [ -n "$(ls -A "${WINDROSE_SERVER_DIR}" 2>/dev/null)" ]; then
-    # Partial install detected; force validate to clean it up.
-    validate_arg="validate"
-  fi
+  # Always pass `validate` to app_update. Costs ~30s on a populated
+  # 3 GB tree (re-checksum, no download), gives us idempotent install
+  # health on every boot, and matches the official Windrose FAQ
+  # command. Not worth conditionalizing.
 
   # Stash under WINDROSE_PATH (on the PVC), NOT /tmp — /tmp is
   # container-ephemeral, so a kubelet OOM-kill / eviction / node
@@ -196,20 +191,47 @@ install_via_steamcmd() {
     fi
   done
 
-  echo "$(timestamp) INFO: SteamCMD +app_update ${app_id} ${validate_arg:-(no-validate)}"
   mkdir -p "${WINDROSE_SERVER_DIR}"
-  # Arg order matters: +force_install_dir MUST precede +login anonymous.
-  # Valve's client literally prints "Please use force_install_dir before
-  # logon!" and fails app_update with "Missing configuration" otherwise.
-  # (Caught on an Ubuntu 24.04 bare-Linux install where the order-invert
-  # was a hard failure; Debian-13-in-container happens to tolerate the
-  # wrong order sometimes but don't count on it.)
-  local rc=0
-  "${STEAMCMD_PATH}/steamcmd.sh" \
-    +force_install_dir "${WINDROSE_SERVER_DIR}" \
-    +login anonymous \
-    +app_update "${app_id}" ${validate_arg} \
-    +quit || rc=$?
+  # SteamCMD's anonymous app_update is flaky on the first attempt
+  # within a container — fails with "ERROR! Failed to install app
+  # '4129620' (Missing configuration)" + exit 8 (which the script
+  # confusingly still reports as exit 0 sometimes), then succeeds on
+  # the very next attempt with no other change. Verified clean-room
+  # 2026-04-27: attempt #1 FAIL, #2 OK + downloads, #3 resumes at
+  # whatever % #2 reached. Probably a Steam-side anonymous-license
+  # caching quirk that warms up after the first call. Retry up to 3
+  # times; each attempt resumes the partial download so we don't pay
+  # the bandwidth twice.
+  #
+  # Existing populated installs are unaffected — verify-only runs
+  # don't go through the failing licensing path. So canary / prod /
+  # VPS kept working, masking the regression for fresh-install
+  # operators.
+  #
+  # Stdin heredoc instead of +command-line chain — the two are
+  # roughly equivalent, but heredoc reads more like the official
+  # Windrose / Steam dedicated-server FAQ examples that operators
+  # paste into interactive SteamCMD when debugging.
+  local rc=1
+  local attempt
+  for attempt in 1 2 3; do
+    echo "$(timestamp) INFO: SteamCMD app_update ${app_id} validate (attempt ${attempt})"
+    rc=0
+    "${STEAMCMD_PATH}/steamcmd.sh" <<EOF || rc=$?
+force_install_dir ${WINDROSE_SERVER_DIR}
+login anonymous
+app_update ${app_id} validate
+quit
+EOF
+    if server_files_present; then
+      rc=0
+      break
+    fi
+    if [ "${attempt}" -lt 3 ]; then
+      echo "$(timestamp) WARNING: SteamCMD app_update attempt ${attempt} did not produce server binary; retrying"
+      sleep 2
+    fi
+  done
 
   echo "$(timestamp) INFO: Restoring identity + save from ${preserve_dir}"
   mkdir -p "${WINDROSE_SERVER_DIR}/R5"
