@@ -220,6 +220,7 @@ table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
 th { color: var(--text-muted); font-weight: 500; font-size: 0.85rem; background: var(--surface-alt); }
 td.mono { font-family: ui-monospace, monospace; }
+tr.muted-row td { color: var(--text-dim); }
 .reveal { display: inline-flex; align-items: center; gap: 0.35rem; font-family: ui-monospace, monospace; }
 .reveal .mask-dots { letter-spacing: 0.1em; color: var(--text-dim); }
 .reveal button.link { font-family: system-ui, sans-serif; font-size: 0.75rem; }

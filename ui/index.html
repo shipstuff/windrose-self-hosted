@@ -31,7 +31,7 @@
 
     <div id="signInCard" class="card hidden">
       <h2>Sign in</h2>
-      <p class="muted">Admin features (config editor, backups, world edits, manual upload, stop server) unlock after a successful sign-in. Leave the username blank; only the password is checked.</p>
+      <p class="muted">Admin features (config editor, mods, backups, world edits, manual upload, stop server) unlock after a successful sign-in. Leave the username blank; only the password is checked.</p>
       <div class="form-grid">
         <label for="signInPassword">Password</label>
         <div class="field">
@@ -256,6 +256,20 @@
         <button id="configSaveBtn" class="danger">Stage changes</button>
         <button id="configRevertBtn" type="button">Discard staged</button>
       </div>
+    </div>
+
+    <div class="card admin-only hidden" id="modsCard">
+      <h2>Mods <span id="modsStagedTag" class="tag hidden">pending restart</span></h2>
+      <p class="muted">Upload server-side Unreal mod archives. Changes are staged and apply on the next server restart, before the game launches.</p>
+      <div class="row">
+        <input id="modUploadFile" type="file" accept=".pak,.zip,.tar,.tgz,.gz,application/zip,application/gzip,application/x-tar">
+        <button id="modUploadBtn" class="danger" type="button">Stage upload</button>
+      </div>
+      <div id="modsEmpty" class="empty-note hidden">No mods uploaded.</div>
+      <table id="modsTable">
+        <thead><tr><th>Name</th><th>State</th><th>Uploaded</th><th>Size</th><th>Files</th><th></th></tr></thead>
+        <tbody id="modsBody"></tbody>
+      </table>
     </div>
 
     <!-- Backups -->

@@ -82,6 +82,12 @@ const backupPaneGame   = document.getElementById("backupPaneGame");
 const gameBackupsBody  = document.getElementById("gameBackupsBody");
 const gameBackupsTable = document.getElementById("gameBackupsTable");
 const gameBackupsEmpty = document.getElementById("gameBackupsEmpty");
+const modsBody         = document.getElementById("modsBody");
+const modsTable        = document.getElementById("modsTable");
+const modsEmpty        = document.getElementById("modsEmpty");
+const modsStagedTag    = document.getElementById("modsStagedTag");
+const modUploadFile    = document.getElementById("modUploadFile");
+const modUploadBtn     = document.getElementById("modUploadBtn");
 const bsIdleMin       = document.getElementById("bsIdleMin");
 const bsFloorHr       = document.getElementById("bsFloorHr");
 const bsRetainCount   = document.getElementById("bsRetainCount");
@@ -431,6 +437,53 @@ function renderBackups(backups) {
   });
 }
 
+function formatIso(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function modStateLabel(mod) {
+  const state = mod.enabled ? "enabled" : "disabled";
+  return mod.pendingAction ? `${state} (${mod.pendingAction} pending)` : state;
+}
+
+function renderMods(payload) {
+  const mods = payload?.mods || [];
+  modsStagedTag.classList.toggle("hidden", !payload?.staged);
+  if (!mods.length) {
+    modsTable.classList.add("hidden"); modsEmpty.classList.remove("hidden"); return;
+  }
+  modsTable.classList.remove("hidden"); modsEmpty.classList.add("hidden");
+  modsBody.innerHTML = "";
+  mods.forEach(m => {
+    const pendingDelete = m.pendingAction === "delete";
+    const tr = document.createElement("tr");
+    if (pendingDelete) tr.classList.add("muted-row");
+    const files = (m.files || []).join(", ");
+    const toggle = m.enabled
+      ? `<button class="link mod-disable-btn" data-id="${escapeHtml(m.id)}">disable</button>`
+      : `<button class="link mod-enable-btn" data-id="${escapeHtml(m.id)}">enable</button>`;
+    tr.innerHTML = `
+      <td>${escapeHtml(m.displayName || m.id)}</td>
+      <td>${escapeHtml(modStateLabel(m))}</td>
+      <td>${escapeHtml(formatIso(m.uploadedAt))}</td>
+      <td>${escapeHtml(formatBytes(m.sizeBytes || 0))}</td>
+      <td class="mono">${escapeHtml(files)}</td>
+      <td>${pendingDelete ? "" : toggle} <button class="link mod-delete-btn" data-id="${escapeHtml(m.id)}">delete</button></td>`;
+    modsBody.appendChild(tr);
+  });
+  modsBody.querySelectorAll(".mod-enable-btn").forEach(b => {
+    b.addEventListener("click", () => stageModToggle(b.dataset.id, true));
+  });
+  modsBody.querySelectorAll(".mod-disable-btn").forEach(b => {
+    b.addEventListener("click", () => stageModToggle(b.dataset.id, false));
+  });
+  modsBody.querySelectorAll(".mod-delete-btn").forEach(b => {
+    b.addEventListener("click", () => stageModDelete(b.dataset.id));
+  });
+}
+
 function renderGameBackups(backups) {
   if (!backups.length) {
     gameBackupsTable.classList.add("hidden"); gameBackupsEmpty.classList.remove("hidden"); return;
@@ -670,11 +723,12 @@ function applyStatus(data) {
   // modal before our sign-in button is even clicked).
   if (showAdmin && !window._adminHydrated) {
     window._adminHydrated = true;
-    loadConfig(); loadBackups(); loadBackupConfig(); loadIdlePatch(); loadMaintenance();
+    loadConfig(); loadBackups(); loadMods(); loadBackupConfig(); loadIdlePatch(); loadMaintenance();
   } else if (!showAdmin) {
     window._adminHydrated = false;
   }
   [uploadBtn, configSaveBtn, configRevertBtn, backupCreateBtn, worldUploadBtn,
+   modUploadBtn,
    restartServerBtn, stopServerBtn, startServerBtn, discardAllStagedBtn,
    worldStageBtn, worldDiscardBtn,
    ipEnableBtn, ipDisableBtn, ipAutoBtn, ipApplyRestartBtn,
@@ -687,7 +741,7 @@ function applyStatus(data) {
   // ANY staged changes exist (server config or per-world). Keep
   // "Discard all staged" visible in the same window.
   const stagedWorldCount = Array.isArray(data.stagedWorlds) ? data.stagedWorlds.length : 0;
-  const anyStaged = !!data.stagedConfigPending || stagedWorldCount > 0;
+  const anyStaged = !!data.stagedConfigPending || stagedWorldCount > 0 || !!data.stagedModsPending;
   restartServerBtn.textContent = anyStaged ? "Apply + restart" : "Restart server";
   discardAllStagedBtn.classList.toggle("hidden", !anyStaged);
 
@@ -717,7 +771,7 @@ function applyStatus(data) {
   if (authed) {
     adminBanner.classList.remove("hidden");
     adminBannerLead.textContent = "⚠ Admin-only.";
-    adminBannerText.innerHTML = "Signed in. Destructive actions (restart, upload, backup restore, world edits) are enabled.";
+    adminBannerText.innerHTML = "Signed in. Destructive actions (restart, upload, mods, backup restore, world edits) are enabled.";
   } else if (!authNeeded && !destructive) {
     // Auth disabled + destructive disabled: read-only admin console.
     adminBanner.classList.remove("hidden");
@@ -785,6 +839,14 @@ async function loadBackups() {
     if (!res.ok) return;
     renderBackups((await res.json()).backups || []);
   } catch (err) { log("backups load failed: " + err); }
+}
+
+async function loadMods() {
+  try {
+    const res = await authFetch("/api/mods");
+    if (!res.ok) return;
+    renderMods(await res.json());
+  } catch (err) { log("mods load failed: " + err); }
 }
 
 async function loadGameBackups() {
@@ -937,7 +999,7 @@ async function stageConfig(json) {
 }
 
 // --- Event wiring -------------------------------------------------
-refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadBackupConfig(); loadIdlePatch(); loadMaintenance(); });
+refreshBtn.addEventListener("click", () => { loadStatus(); loadConfig(); loadBackups(); loadMods(); loadBackupConfig(); loadIdlePatch(); loadMaintenance(); });
 downloadSavesBtn.addEventListener("click", () => { window.location.href = "/api/saves/download"; });
 
 uploadBtn.addEventListener("click", async () => {
@@ -955,6 +1017,37 @@ uploadBtn.addEventListener("click", async () => {
   } catch (err) { log("upload error: " + err); }
   finally { uploadBtn.disabled = false; loadStatus(); loadBackups(); }
 });
+
+modUploadBtn.addEventListener("click", async () => {
+  const file = modUploadFile.files[0];
+  if (!file) { log("select a mod archive first"); return; }
+  log(`staging mod ${file.name} (${formatBytes(file.size)})...`);
+  modUploadBtn.disabled = true;
+  try {
+    const res = await authFetch("/api/mods/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", "X-Filename": file.name },
+      body: file,
+    });
+    log(`${res.ok ? "mod staged" : "mod stage failed"}: ${await res.text()}`);
+    modUploadFile.value = "";
+  } catch (err) { log("mod upload error: " + err); }
+  finally { modUploadBtn.disabled = false; loadStatus(); loadMods(); }
+});
+
+async function stageModToggle(id, enabled) {
+  const action = enabled ? "enable" : "disable";
+  const res = await authFetch(`/api/mods/${id}/${action}`, { method: "POST" });
+  log(`${res.ok ? "mod staged" : "mod stage failed"}: ${await res.text()}`);
+  loadStatus(); loadMods();
+}
+
+async function stageModDelete(id) {
+  if (!confirm(`Delete mod ${id} on next restart?`)) return;
+  const res = await authFetch(`/api/mods/${id}`, { method: "DELETE" });
+  log(`${res.ok ? "mod delete staged" : "mod delete failed"}: ${await res.text()}`);
+  loadStatus(); loadMods();
+}
 
 configSaveBtn.addEventListener("click", () => {
   // Prefer the raw textarea's current value (it's the most-recent
@@ -979,7 +1072,8 @@ configEditor.addEventListener("input", syncRawToForm);
 // game back up.
 restartServerBtn.addEventListener("click", async () => {
   const hasStaged = !!(lastStatus?.stagedConfigPending ||
-    (Array.isArray(lastStatus?.stagedWorlds) && lastStatus.stagedWorlds.length));
+    (Array.isArray(lastStatus?.stagedWorlds) && lastStatus.stagedWorlds.length) ||
+    lastStatus?.stagedModsPending);
   const prompt = hasStaged
     ? "Apply staged changes and restart the server? In-progress players will be disconnected."
     : "Restart the game server? In-progress players will be disconnected.";
@@ -987,7 +1081,7 @@ restartServerBtn.addEventListener("click", async () => {
   const url = hasStaged ? "/api/config/apply" : "/api/server/restart";
   const res = await authFetch(url, { method: "POST" });
   log(`${res.ok ? "ok" : "failed"}: ${await res.text()}`);
-  setTimeout(() => { loadStatus(); loadConfig(); }, 1500);
+  setTimeout(() => { loadStatus(); loadConfig(); loadMods(); }, 1500);
 });
 
 stopServerBtn.addEventListener("click", async () => {
@@ -1005,7 +1099,7 @@ startServerBtn.addEventListener("click", async () => {
   setTimeout(loadStatus, 1500);
 });
 discardAllStagedBtn.addEventListener("click", async () => {
-  if (!confirm("Discard all staged changes (server config + every world)?")) return;
+  if (!confirm("Discard all staged changes (server config + every world + mods)?")) return;
   // Server staging first (if any)...
   if (lastStatus?.stagedConfigPending) {
     await authFetch("/api/config", { method: "DELETE" });
@@ -1014,8 +1108,11 @@ discardAllStagedBtn.addEventListener("click", async () => {
   for (const id of (lastStatus?.stagedWorlds || [])) {
     await authFetch(`/api/worlds/${id}/config`, { method: "DELETE" });
   }
+  if (lastStatus?.stagedModsPending) {
+    await authFetch("/api/mods/staged", { method: "DELETE" });
+  }
   log("all staged discarded");
-  loadStatus(); loadConfig();
+  loadStatus(); loadConfig(); loadMods();
 });
 
 async function openWorldEditor(islandId) {

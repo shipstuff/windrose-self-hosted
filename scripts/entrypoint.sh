@@ -176,6 +176,15 @@ install_via_steamcmd() {
       for f in ServerDescription.json WorldDescription.json; do
         [ -f "${stray}/${f}" ] && cp -a "${stray}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
       done
+      for f in .mods.json .mods.staged.json; do
+        [ -f "${stray}/${f}" ] && cp -a "${stray}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
+      done
+      for rel in "Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging"; do
+        if [ -d "${stray}/${rel}" ]; then
+          mkdir -p "$(dirname "${WINDROSE_SERVER_DIR}/R5/${rel}")"
+          cp -a "${stray}/${rel}" "${WINDROSE_SERVER_DIR}/R5/${rel}"
+        fi
+      done
     fi
     rm -rf "${stray}"
   done
@@ -188,6 +197,17 @@ install_via_steamcmd() {
   for f in ServerDescription.json WorldDescription.json; do
     if [ -f "${WINDROSE_SERVER_DIR}/R5/${f}" ]; then
       cp -a "${WINDROSE_SERVER_DIR}/R5/${f}" "${preserve_dir}/${f}"
+    fi
+  done
+  for f in .mods.json .mods.staged.json; do
+    if [ -f "${WINDROSE_SERVER_DIR}/R5/${f}" ]; then
+      cp -a "${WINDROSE_SERVER_DIR}/R5/${f}" "${preserve_dir}/${f}"
+    fi
+  done
+  for rel in "Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging"; do
+    if [ -d "${WINDROSE_SERVER_DIR}/R5/${rel}" ]; then
+      mkdir -p "${preserve_dir}/$(dirname "${rel}")"
+      cp -a "${WINDROSE_SERVER_DIR}/R5/${rel}" "${preserve_dir}/${rel}"
     fi
   done
 
@@ -242,6 +262,18 @@ EOF
   for f in ServerDescription.json WorldDescription.json; do
     if [ -f "${preserve_dir}/${f}" ]; then
       cp -a "${preserve_dir}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
+    fi
+  done
+  for f in .mods.json .mods.staged.json; do
+    if [ -f "${preserve_dir}/${f}" ]; then
+      cp -a "${preserve_dir}/${f}" "${WINDROSE_SERVER_DIR}/R5/${f}"
+    fi
+  done
+  for rel in "Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging"; do
+    if [ -d "${preserve_dir}/${rel}" ]; then
+      rm -rf "${WINDROSE_SERVER_DIR}/R5/${rel}"
+      mkdir -p "$(dirname "${WINDROSE_SERVER_DIR}/R5/${rel}")"
+      cp -a "${preserve_dir}/${rel}" "${WINDROSE_SERVER_DIR}/R5/${rel}"
     fi
   done
   rm -rf "${preserve_dir}"
@@ -868,6 +900,14 @@ if [ -f "${maint_flag}" ]; then
   trap 'echo "$(timestamp) INFO: SIGTERM received in maintenance mode; exiting."; exit 0' TERM INT
   while [ -f "${maint_flag}" ]; do sleep 30 & wait $!; done
   echo "$(timestamp) INFO: Maintenance flag cleared; proceeding with normal boot."
+fi
+
+_ui_server_py="${WINDROSE_UI_SERVER_PY:-/opt/windrose-ui/server.py}"
+if [ -f "${_ui_server_py}" ] && [ -f "${WINDROSE_SERVER_DIR}/R5/.mods.staged.json" ]; then
+  echo "$(timestamp) INFO: Applying staged mod changes before launch"
+  python3 "${_ui_server_py}" --apply-staged-mods 2>&1 | while IFS= read -r _line; do
+    echo "$(timestamp) ${_line}"
+  done
 fi
 
 migrate_saves_on_version_change

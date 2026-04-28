@@ -33,7 +33,7 @@ Public view (not signed in) — invite code, server status, connected players, r
 
 ![Public view: invite + status + players + resources](docs/screenshots/01-public-view.jpg)
 
-Admin view (signed in) — adds the Worlds card with per-row editor, Server Config with stage/apply/discard, Backups, Manual WindowsServer update, and the live log tail:
+Admin view (signed in) — adds the Worlds card with per-row editor, Server Config with stage/apply/discard, Mods, Backups, Manual WindowsServer update, and the live log tail:
 
 ![Admin view: worlds + server config + backups + log](docs/screenshots/02-admin-view.jpg)
 
@@ -93,6 +93,12 @@ kubectl -n games cp "<path>/WindowsServer" windrose-0:/home/steam/windrose/Windo
 ```
 
 Uploads preserve `R5/Saved/`, `ServerDescription.json`, and `WorldDescription.json`; a timestamped snapshot of the previous tree lands in `/home/steam/backups/<utc>/`.
+
+### Optional: Upload Server-Side Mods
+
+For normal `.pak` style server-side mods, use the admin console's **Mods** card instead of replacing the whole `WindowsServer/` tree. Upload a `.pak`, `.zip`, `.tar`, or `.tar.gz`; the UI stages the files under `R5/.mods-staging/` and writes desired state to `R5/.mods.staged.json`. Click **Apply + restart** to promote the staged set into `R5/Content/Paks/~mods/` before the game launches. Disable/delete operations are staged the same way, so the live `~mods/` directory is not mutated while the game process is running.
+
+The entrypoint preserves `~mods/`, `~mods.disabled/`, `.mods.json`, `.mods.staged.json`, and `.mods-staging/` across SteamCMD updates. UI backups created after this feature include those files and restore them with the save/identity state.
 
 ## Install On Kubernetes With Helm
 
@@ -408,6 +414,12 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | POST   | `/api/backups/{id}/restore`                   | *destructive* | Swap a named backup's saves + identity back into the live tree. **This is the only supported recovery path — never raw-`cp` parts of a backup in place, the game's internal state under `Saved/` expects the whole tree to be consistent.** Fires `backup.restored`. |
 | GET    | `/api/backups/{id}/download`                  | authed        | Stream a full backup (Saved/ + ServerDescription + WorldDescription + .backup-config + .idle-patch-override) as `.tar.gz`. Same shape `POST /api/backups/upload` accepts — the two form a round-trip for server migration (download on host A → upload on host B → restore). |
 | POST   | `/api/backups/upload`                         | *destructive* | Accept a `.tar.gz` (shape from Download above), extract into a new `manual-imported-<ts>/` pinned backup dir, and return its id. Caller typically follows with `POST /api/backups/{id}/restore` to complete a migration. Fires `backup.created` with `source: "imported"`. |
+| GET    | `/api/mods`                                    | authed        | List live/staged server-side mods and their files, upload time, enabled state, and pending action. |
+| POST   | `/api/mods/upload`                             | *destructive* | Stage a `.pak`, `.zip`, `.tar`, or `.tar.gz` mod upload. Does not touch live `~mods/`; apply via `POST /api/config/apply` + restart. |
+| POST   | `/api/mods/{id}/enable`                        | *destructive* | Stage a mod enable for next restart. |
+| POST   | `/api/mods/{id}/disable`                       | *destructive* | Stage a mod disable for next restart. |
+| DELETE | `/api/mods/{id}`                               | *destructive* | Stage removal of a mod from the desired next-boot set. |
+| DELETE | `/api/mods/staged`                             | *destructive* | Discard all staged mod changes and staged upload files. |
 | GET    | `/api/backup-config`                          | authed        | Current effective auto-backup config (idleMinutes, floorHours, retainCount, retainDays) + the env-seeded defaults + last-run status. |
 | PUT    | `/api/backup-config`                          | *destructive* | Persist auto-backup config atomically to `$R5_DIR/.backup-config.json`. Validates range + type; file is authoritative thereafter. |
 | GET    | `/api/game-backups`                           | authed        | Windrose's own auto-backups under `SaveProfiles/Default_Backups/` (world-only snapshots on the game's own schedule). |

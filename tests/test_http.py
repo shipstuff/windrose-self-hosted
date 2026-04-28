@@ -14,6 +14,7 @@ point at tmpdirs BEFORE starting the server — the Handler class reads
 them at request time, so late-binding works.
 """
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -22,6 +23,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+import zipfile
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -98,6 +100,13 @@ def _run(case: str, fn) -> None:
         print(f"  FAIL  {case}: {e}")
         raise
     print(f"  PASS  {case}")
+
+
+def _mod_zip(filename: str = "z_10xloot.pak", payload: bytes = b"pak-data") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(filename, payload)
+    return buf.getvalue()
 
 
 # --- scenarios --------------------------------------------------------------
@@ -504,6 +513,133 @@ def test_restore_unknown_game_backup_returns_404():
             srv.shutdown()
 
 
+def test_mod_upload_stages_then_entrypoint_apply_materializes():
+    """Uploading a mod creates staged metadata/files only. The boot-time
+    apply helper promotes them into R5/Content/Paks/~mods and clears
+    the staged state."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            body = _mod_zip(payload=b"loot" * 128)
+            code, raw = _req("POST", f"{srv.base}/api/mods/upload",
+                             body=body,
+                             headers={"Content-Type": "application/zip",
+                                      "X-Filename": "10xloot-50-1-07.zip"})
+            assert code == 200, f"mod upload failed: {code} {raw}"
+            assert (r5 / ".mods.staged.json").is_file(), "staged metadata missing"
+            assert (r5 / ".mods-staging" / "z_10xloot" / "z_10xloot.pak").is_file()
+            assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists(), "live mod dir mutated before apply"
+
+            code, status = _json_req("GET", f"{srv.base}/api/status")
+            assert status["stagedModsPending"] is True, status
+            code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"mods-only apply should be accepted: {code} {apply_resp}"
+            assert apply_resp["modsPending"] is True, apply_resp
+
+            applied = server.apply_staged_mods()
+            assert applied == ["z_10xloot"], applied
+            live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
+            assert live_pak.read_bytes() == b"loot" * 128
+            assert not (r5 / ".mods.staged.json").exists(), "staged metadata not cleared"
+
+            code, mods = _json_req("GET", f"{srv.base}/api/mods")
+            assert code == 200
+            assert mods["staged"] is False, mods
+            assert mods["mods"][0]["id"] == "z_10xloot", mods
+            assert mods["mods"][0]["enabled"] is True, mods
+        finally:
+            srv.shutdown()
+
+
+def test_mod_disable_enable_are_staged_and_applied():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, _ = _req("POST", f"{srv.base}/api/mods/upload",
+                           body=_mod_zip(),
+                           headers={"Content-Type": "application/zip",
+                                    "X-Filename": "10xloot.zip"})
+            assert code == 200
+            server.apply_staged_mods()
+
+            code, resp = _json_req("POST", f"{srv.base}/api/mods/z_10xloot/disable")
+            assert code == 200, resp
+            assert resp["staged"] is True, resp
+            # Live remains enabled until boot-time apply.
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").is_file()
+            server.apply_staged_mods()
+            assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists()
+            assert (r5 / "Content" / "Paks" / "~mods.disabled" / "z_10xloot" / "z_10xloot.pak").is_file()
+
+            code, resp = _json_req("POST", f"{srv.base}/api/mods/z_10xloot/enable")
+            assert code == 200, resp
+            server.apply_staged_mods()
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").is_file()
+        finally:
+            srv.shutdown()
+
+
+def test_mod_upload_rejects_path_traversal_zip():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("../evil.pak", b"bad")
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, body = _req("POST", f"{srv.base}/api/mods/upload",
+                              body=buf.getvalue(),
+                              headers={"Content-Type": "application/zip",
+                                       "X-Filename": "bad.zip"})
+            assert code == 400, f"expected 400 for unsafe archive, got {code}"
+            assert b"unsafe archive path" in body, body
+        finally:
+            srv.shutdown()
+
+
+def test_backup_restore_includes_live_mod_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, _ = _req("POST", f"{srv.base}/api/mods/upload",
+                           body=_mod_zip(payload=b"backup-me"),
+                           headers={"Content-Type": "application/zip",
+                                    "X-Filename": "10xloot.zip"})
+            assert code == 200
+            server.apply_staged_mods()
+
+            code, created = _json_req("POST", f"{srv.base}/api/backups")
+            assert code == 200, created
+            bid = created["id"]
+            assert (backup_root / bid / ".mods-included").is_file(), "backup missing mod marker"
+            shutil.rmtree(r5 / "Content" / "Paks" / "~mods")
+            (r5 / ".mods.json").unlink()
+
+            code, restore_resp = _json_req("POST", f"{srv.base}/api/backups/{bid}/restore")
+            assert code == 200, restore_resp
+            live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
+            assert live_pak.read_bytes() == b"backup-me"
+            mods_doc = json.loads((r5 / ".mods.json").read_text())
+            assert mods_doc["mods"][0]["id"] == "z_10xloot", mods_doc
+        finally:
+            srv.shutdown()
+
+
 def test_malformed_json_body_returns_400():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
@@ -541,6 +677,10 @@ if __name__ == "__main__":
     _run("maintenance POST requires strict JSON bools", test_maintenance_requires_strict_bool)
     _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
+    _run("mod upload stages then apply materializes", test_mod_upload_stages_then_entrypoint_apply_materializes)
+    _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
+    _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
+    _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)
     _run("backup download → upload → restore round-trip", test_backup_download_upload_roundtrip)
     _run("backup download unknown id → 404", test_backup_download_unknown_id_404)
     _run("backup upload rejects non-archive garbage", test_backup_upload_rejects_garbage)
