@@ -905,6 +905,21 @@ reconcile_server_config
 maybe_disable_sentry
 maybe_patch_idle_cpu
 
+if [ -f "${WINDROSE_SERVER_DIR}/R5/.mods.staged.json" ]; then
+  _ui_server="${WINDROSE_UI_SERVER:-/opt/windrose-ui/server.py}"
+  if [ ! -f "${_ui_server}" ] && [ -f "/opt/windrose/server.py" ]; then
+    _ui_server="/opt/windrose/server.py"
+  fi
+  if [ -f "${_ui_server}" ]; then
+    python3 "${_ui_server}" --reconcile-staged-mods 2>&1 | while IFS= read -r _line; do
+      echo "$(timestamp) ${_line}"
+    done
+  else
+    echo "$(timestamp) ERROR: Staged mods are pending, but admin server.py was not found for startup reconciliation"
+    exit 1
+  fi
+fi
+
 # Reconcile Engine.ini's NetServerMaxTickRate + t.MaxFPS from
 # NET_SERVER_MAX_TICK_RATE env on every boot. Uses a shadow-stamp
 # pattern identical to the ServerDescription.json reconcile: we remember

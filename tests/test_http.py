@@ -615,7 +615,7 @@ def test_mod_upload_accepts_plain_pak():
             srv.shutdown()
 
 
-def test_mod_apply_stops_game_before_promoting_files():
+def test_mod_apply_defers_running_signal_mode_to_restart():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
         backup_root = Path(tmp) / "backups"
@@ -623,8 +623,8 @@ def test_mod_apply_stops_game_before_promoting_files():
         _seed_r5(r5)
         srv = _TestServer(r5, backup_root)
         original_find_game_pid = server.find_game_pid
-        original_request_restart = server.request_restart
-        original_wait_for_game_exit = server.wait_for_game_exit
+        original_systemctl_available = server._systemctl_available
+        original_request_restart_later = server.request_restart_later
         original_apply_staged_mods = server.apply_staged_mods
         events: list[str] = []
         try:
@@ -635,34 +635,28 @@ def test_mod_apply_stops_game_before_promoting_files():
             assert code == 200
 
             server.find_game_pid = lambda: (12345, 1024)
+            server._systemctl_available = lambda: False
 
-            def fake_request_restart() -> None:
-                events.append("restart")
+            def fake_request_restart_later(*_args, **_kwargs) -> None:
+                events.append("restart_later")
 
-            def fake_wait_for_game_exit(*_args, **_kwargs) -> bool:
-                events.append("wait")
-                assert server.MAINTENANCE_FLAG_FILE.is_file(), "maintenance guard missing before wait"
-                return True
+            def fail_apply_staged_mods() -> list[str]:
+                raise AssertionError("signal-mode apply should defer mod promotion to startup")
 
-            def wrapped_apply_staged_mods() -> list[str]:
-                events.append("apply")
-                assert events[:2] == ["restart", "wait"], events
-                assert server.MAINTENANCE_FLAG_FILE.is_file(), "maintenance guard missing during mod promotion"
-                return original_apply_staged_mods()
-
-            server.request_restart = fake_request_restart
-            server.wait_for_game_exit = fake_wait_for_game_exit
-            server.apply_staged_mods = wrapped_apply_staged_mods
+            server.request_restart_later = fake_request_restart_later
+            server.apply_staged_mods = fail_apply_staged_mods
 
             code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
             assert code == 200, f"apply failed: {code} {apply_resp}"
-            assert events == ["restart", "wait", "apply", "restart"], events
-            assert not server.MAINTENANCE_FLAG_FILE.exists(), "temporary maintenance guard not cleared"
-            assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").read_bytes() == b"ordered"
+            assert apply_resp["modsApplied"] == [], apply_resp
+            assert apply_resp["modsDeferred"] == ["z_10xloot"], apply_resp
+            assert events == ["restart_later"], events
+            assert (r5 / ".mods.staged.json").is_file(), "staged metadata should survive until restart"
+            assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists()
         finally:
             server.find_game_pid = original_find_game_pid
-            server.request_restart = original_request_restart
-            server.wait_for_game_exit = original_wait_for_game_exit
+            server._systemctl_available = original_systemctl_available
+            server.request_restart_later = original_request_restart_later
             server.apply_staged_mods = original_apply_staged_mods
             srv.shutdown()
 
@@ -864,7 +858,7 @@ if __name__ == "__main__":
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
     _run("mod upload stages then apply materializes", test_mod_upload_stages_then_apply_materializes)
     _run("mod upload accepts plain pak", test_mod_upload_accepts_plain_pak)
-    _run("mod apply stops game before promoting files", test_mod_apply_stops_game_before_promoting_files)
+    _run("mod apply defers running signal mode to restart", test_mod_apply_defers_running_signal_mode_to_restart)
     _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
     _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
     _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)

@@ -1190,6 +1190,14 @@ def request_restart() -> None:
     signal_game(signal.SIGTERM)
 
 
+def request_restart_later(delay_seconds: float = 0.25) -> None:
+    def _run() -> None:
+        time.sleep(delay_seconds)
+        request_restart()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def wait_for_game_exit(timeout_seconds: float = 60.0, poll_seconds: float = 0.5) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -1208,6 +1216,31 @@ def set_maintenance_flag(active: bool) -> None:
         tmp.replace(MAINTENANCE_FLAG_FILE)
     else:
         MAINTENANCE_FLAG_FILE.unlink(missing_ok=True)
+
+
+def stop_game_for_file_mutation() -> tuple[bool, str]:
+    if _systemctl_available():
+        ok, msg = systemctl_dispatch("stop")
+        if not ok:
+            return False, msg
+        if wait_for_game_exit():
+            return True, msg
+        return False, "game did not stop after systemctl stop"
+
+    pid, _ = find_game_pid()
+    if not pid:
+        return True, "game process not running"
+    RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True, "game process already exited"
+    except PermissionError as e:
+        return False, f"pid {pid}: permission denied ({e})"
+    if wait_for_game_exit():
+        return True, f"sent signal {signal.SIGTERM} to game pid {pid}"
+    return False, "game did not stop before timeout"
+
 
 def signal_game(sig: int) -> tuple[bool, str]:
     """Send ``sig`` to whichever proton-wrapper/umu.exe/game pid we can see.
@@ -1235,15 +1268,18 @@ def signal_game(sig: int) -> tuple[bool, str]:
         candidates.append(pid)
     if not candidates:
         return False, "no game process found"
+    sent: list[int] = []
     last_err = ""
-    for p in candidates:
+    for p in dict.fromkeys(candidates):
         try:
             os.kill(p, sig)
-            return True, f"sent signal {sig} to pid {p}"
+            sent.append(p)
         except PermissionError as e:
             last_err = f"pid {p}: permission denied ({e})"
         except ProcessLookupError:
             continue
+    if sent:
+        return True, f"sent signal {sig} to pids {','.join(str(p) for p in sent)}"
     return False, last_err or "all signal attempts failed"
 
 # --- Schema validation ------------------------------------------------------
@@ -1518,6 +1554,10 @@ def _mod_by_id(doc: dict, mod_id: str) -> dict | None:
     return None
 
 
+def _mod_ids(doc: dict) -> list[str]:
+    return [_safe_mod_id(str(m.get("id", ""))) for m in doc.get("mods", []) if m.get("id")]
+
+
 def list_mods_state() -> dict:
     live = _read_mods_doc(mods_metadata_path())
     staged = _read_mods_doc(mods_staged_metadata_path()) if mods_staged_metadata_path().is_file() else None
@@ -1750,6 +1790,13 @@ def apply_staged_mods() -> list[str]:
         shutil.rmtree(tmp_enabled, ignore_errors=True)
         shutil.rmtree(tmp_disabled, ignore_errors=True)
         raise
+
+
+def staged_mod_ids() -> list[str]:
+    staged_path = mods_staged_metadata_path()
+    if not staged_path.is_file():
+        return []
+    return _mod_ids(_read_mods_doc(staged_path))
 
 # --- Upload handling --------------------------------------------------------
 UPLOAD_CHUNK = 1 << 20  # 1 MiB
@@ -2573,30 +2620,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         applied_worlds: list[str] = []
         applied_mods: list[str] = []
+        deferred_mods: list[str] = []
         resume_after_mod_apply = False
         if have_mods:
             prior_maintenance = MAINTENANCE_FLAG_FILE.is_file()
             pid, _ = find_game_pid()
-            if pid:
+            defer_mod_apply = bool(pid) and not _systemctl_available()
+            if defer_mod_apply:
+                deferred_mods = staged_mod_ids()
+            elif pid:
                 if not prior_maintenance:
                     set_maintenance_flag(True)
                     resume_after_mod_apply = True
-                request_restart()
-                if not wait_for_game_exit():
+                ok, msg = stop_game_for_file_mutation()
+                if not ok:
                     if resume_after_mod_apply:
                         set_maintenance_flag(False)
-                        request_restart()
+                        request_restart_later()
                     self._send(HTTPStatus.CONFLICT, "text/plain",
-                               b"game did not stop before mod apply; staged changes left pending\n")
+                               f"game did not stop before mod apply: {msg}; staged changes left pending\n".encode())
                     return
-            try:
-                applied_mods = apply_staged_mods()
-            except Exception as e:
-                if resume_after_mod_apply:
-                    set_maintenance_flag(False)
-                    request_restart()
-                self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"mod apply failed: {e}\n".encode())
-                return
+            if not defer_mod_apply:
+                try:
+                    applied_mods = apply_staged_mods()
+                except Exception as e:
+                    if resume_after_mod_apply:
+                        set_maintenance_flag(False)
+                        request_restart_later()
+                    self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"mod apply failed: {e}\n".encode())
+                    return
         if have_server:
             tmp = CONFIG_PATH.with_suffix(".json.tmp")
             shutil.copy2(STAGED_CONFIG_PATH, tmp)
@@ -2610,7 +2662,12 @@ class Handler(BaseHTTPRequestHandler):
             applied_worlds.append(island_id)
         if resume_after_mod_apply:
             set_maintenance_flag(False)
-        request_restart()
+        if deferred_mods:
+            request_restart_later()
+        elif resume_after_mod_apply:
+            request_restart_later()
+        else:
+            request_restart()
         fire_event("config.applied", serverName=(load_json(CONFIG_PATH) or {})
                    .get("ServerDescription_Persistent", {}).get("ServerName", ""),
                    worldsApplied=applied_worlds,
@@ -2618,7 +2675,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, {
             "ok": True, "restartRequested": True,
             "serverApplied": have_server, "worldsApplied": applied_worlds,
-            "modsApplied": applied_mods,
+            "modsApplied": applied_mods, "modsDeferred": deferred_mods,
         })
 
     def _api_config_discard(self):
@@ -2998,7 +3055,24 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, status)
 
 # --- Main -------------------------------------------------------------------
+def cli_apply_staged_mods() -> int:
+    try:
+        applied = apply_staged_mods()
+    except Exception as e:
+        print(f"mod apply failed: {e}", file=sys.stderr, flush=True)
+        return 1
+    if applied:
+        print(json.dumps({"modsApplied": applied}), flush=True)
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--reconcile-staged-mods":
+            raise SystemExit(cli_apply_staged_mods())
+        print(f"unknown argument: {sys.argv[1]}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"windrose admin console on {BIND}:{PORT}", flush=True)
     print(f"  windrose dir:   {WINDROSE_SERVER_DIR}", flush=True)
