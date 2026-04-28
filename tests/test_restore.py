@@ -134,6 +134,31 @@ def test_restore_removes_files_added_after_backup():
         assert not new_world.exists(), f"restore left stale dir behind: {new_world}"
 
 
+def test_restore_empty_mod_state_clears_live_mods():
+    """A backup taken before mods exist still represents an explicit empty mod
+    state. Restoring it must remove mods installed later."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        _patch_paths(r5, backup_root)
+
+        bkp = server.create_backup()
+        assert (backup_root / bkp["id"] / server.MODS_BACKUP_MARKER_NAME).is_file()
+
+        live_mod_dir = r5 / "Content" / "Paks" / "~mods"
+        live_mod_dir.mkdir(parents=True)
+        (live_mod_dir / "z_later.pak").write_bytes(b"later")
+        (r5 / server.MODS_METADATA_NAME).write_text(
+            '{"schemaVersion":1,"mods":[{"id":"z_later","files":["z_later.pak"]}]}'
+        )
+
+        server.restore_backup(bkp["id"])
+        assert not live_mod_dir.exists(), "restore left post-backup mod files behind"
+        assert not (r5 / server.MODS_METADATA_NAME).exists(), "restore left post-backup mod metadata behind"
+
+
 def test_identity_files_restored():
     """ServerDescription.json + WorldDescription.json must be restored
     alongside Saved/. This is the bit that PSID recovery depends on."""
@@ -200,6 +225,7 @@ if __name__ == "__main__":
     _run("no-op round-trip (identical content)", test_noop_roundtrip)
     _run("mutations wiped by restore", test_mutations_are_wiped_by_restore)
     _run("post-backup files removed by restore", test_restore_removes_files_added_after_backup)
+    _run("empty mod state clears later live mods", test_restore_empty_mod_state_clears_live_mods)
     _run("identity JSONs restored", test_identity_files_restored)
     _run("missing backup id raises FileNotFoundError", test_missing_backup_id_raises)
     _run("RocksDB bytes survive byte-for-byte", test_rocksdb_bytes_survive_roundtrip)

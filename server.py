@@ -18,6 +18,8 @@ Routing:
     GET  /api/backups         list /home/steam/backups/*
     POST /api/backups         create a manual snapshot now
     POST /api/backups/{id}/restore   swap backup -> live (destructive)
+    GET  /api/mods           list uploaded mods + staged state
+    POST /api/mods/upload    stage a .pak/.zip/.tar mod upload
 
 Auth:
     If UI_PASSWORD is set, HTTP basic auth is required on everything
@@ -127,6 +129,12 @@ GAME_CPU_LIMIT_STR    = os.environ.get("WINDROSE_GAME_CPU_LIMIT", "")
 GAME_MEM_LIMIT_STR    = os.environ.get("WINDROSE_GAME_MEM_LIMIT", "")
 
 CPU_STATE_PATH        = Path("/tmp/windrose-ui-cpu.state")
+
+MODS_METADATA_NAME        = ".mods.json"
+MODS_STAGED_METADATA_NAME = ".mods.staged.json"
+MODS_STAGE_DIR_NAME       = ".mods-staging"
+MODS_BACKUP_MARKER_NAME   = ".mods-included"
+MOD_FILE_SUFFIXES         = (".pak", ".utoc", ".ucas")
 
 # Idle-CPU patch UI override file. Entrypoint consults this on every boot
 # to decide whether to apply or revert the binary patch (see
@@ -709,10 +717,22 @@ def create_backup(pin: bool = False) -> dict:
         "WorldDescription.json",
         ".backup-config.json",
         ".idle-patch-override",
+        MODS_METADATA_NAME,
+        MODS_STAGED_METADATA_NAME,
     ):
         src = R5_DIR / name
         if src.is_file():
             shutil.copy2(src, dst / name)
+    for src, rel in (
+        (mods_enabled_dir(), Path("Content/Paks/~mods")),
+        (mods_disabled_dir(), Path("Content/Paks/~mods.disabled")),
+        (mods_stage_root(), Path(MODS_STAGE_DIR_NAME)),
+    ):
+        if src.is_dir():
+            shutil.copytree(src, dst / rel, dirs_exist_ok=True)
+    (dst / MODS_BACKUP_MARKER_NAME).write_text(
+        datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii"
+    )
     _prune_backups()
     return {"id": dir_name, "path": str(dst), "pinned": pin}
 
@@ -1074,10 +1094,30 @@ def restore_backup(bid: str) -> None:
         "WorldDescription.json",
         ".backup-config.json",
         ".idle-patch-override",
+        MODS_METADATA_NAME,
+        MODS_STAGED_METADATA_NAME,
     ):
         s = src / name
         if s.is_file():
             shutil.copy2(s, R5_DIR / name)
+    if (src / MODS_BACKUP_MARKER_NAME).is_file():
+        for dst in (mods_enabled_dir(), mods_disabled_dir(), mods_stage_root()):
+            shutil.rmtree(dst, ignore_errors=True)
+        for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
+            (R5_DIR / name).unlink(missing_ok=True)
+        for rel, dst in (
+            (Path("Content/Paks/~mods"), mods_enabled_dir()),
+            (Path("Content/Paks/~mods.disabled"), mods_disabled_dir()),
+            (Path(MODS_STAGE_DIR_NAME), mods_stage_root()),
+        ):
+            s = src / rel
+            if s.is_dir():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(s, dst)
+        for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
+            s = src / name
+            if s.is_file():
+                shutil.copy2(s, R5_DIR / name)
 
 # --- Restart / stop signaling ----------------------------------------------
 RESTART_SENTINEL = Path("/tmp/windrose-restart-requested")
@@ -1149,6 +1189,59 @@ def request_restart() -> None:
     RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
     signal_game(signal.SIGTERM)
 
+
+def request_restart_later(delay_seconds: float = 0.25) -> None:
+    def _run() -> None:
+        time.sleep(delay_seconds)
+        request_restart()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def wait_for_game_exit(timeout_seconds: float = 60.0, poll_seconds: float = 0.5) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        pid, _ = find_game_pid()
+        if not pid:
+            return True
+        time.sleep(poll_seconds)
+    return find_game_pid()[0] is None
+
+
+def set_maintenance_flag(active: bool) -> None:
+    if active:
+        MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
+        tmp.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii")
+        tmp.replace(MAINTENANCE_FLAG_FILE)
+    else:
+        MAINTENANCE_FLAG_FILE.unlink(missing_ok=True)
+
+
+def stop_game_for_file_mutation() -> tuple[bool, str]:
+    if _systemctl_available():
+        ok, msg = systemctl_dispatch("stop")
+        if not ok:
+            return False, msg
+        if wait_for_game_exit():
+            return True, msg
+        return False, "game did not stop after systemctl stop"
+
+    pid, _ = find_game_pid()
+    if not pid:
+        return True, "game process not running"
+    RESTART_SENTINEL.write_text(datetime.now(timezone.utc).isoformat())
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True, "game process already exited"
+    except PermissionError as e:
+        return False, f"pid {pid}: permission denied ({e})"
+    if wait_for_game_exit():
+        return True, f"sent signal {signal.SIGTERM} to game pid {pid}"
+    return False, "game did not stop before timeout"
+
+
 def signal_game(sig: int) -> tuple[bool, str]:
     """Send ``sig`` to whichever proton-wrapper/umu.exe/game pid we can see.
 
@@ -1175,15 +1268,18 @@ def signal_game(sig: int) -> tuple[bool, str]:
         candidates.append(pid)
     if not candidates:
         return False, "no game process found"
+    sent: list[int] = []
     last_err = ""
-    for p in candidates:
+    for p in dict.fromkeys(candidates):
         try:
             os.kill(p, sig)
-            return True, f"sent signal {sig} to pid {p}"
+            sent.append(p)
         except PermissionError as e:
             last_err = f"pid {p}: permission denied ({e})"
         except ProcessLookupError:
             continue
+    if sent:
+        return True, f"sent signal {sig} to pids {','.join(str(p) for p in sent)}"
     return False, last_err or "all signal attempts failed"
 
 # --- Schema validation ------------------------------------------------------
@@ -1366,6 +1462,342 @@ def hmac_compare(a: str, b: str) -> bool:
     import hmac
     return hmac.compare_digest(a.encode(), b.encode())
 
+# --- Mod management ---------------------------------------------------------
+def mods_enabled_dir() -> Path:
+    return R5_DIR / "Content" / "Paks" / "~mods"
+
+
+def mods_disabled_dir() -> Path:
+    return R5_DIR / "Content" / "Paks" / "~mods.disabled"
+
+
+def mods_metadata_path() -> Path:
+    return R5_DIR / MODS_METADATA_NAME
+
+
+def mods_staged_metadata_path() -> Path:
+    return R5_DIR / MODS_STAGED_METADATA_NAME
+
+
+def mods_stage_root() -> Path:
+    return R5_DIR / MODS_STAGE_DIR_NAME
+
+
+def _empty_mods_doc() -> dict:
+    return {"schemaVersion": 1, "mods": []}
+
+
+def _safe_mod_id(raw: str) -> str:
+    stem = Path(raw).name
+    for suffix in (".tar.gz", ".tgz", ".zip", ".tar", ".pak", ".utoc", ".ucas"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", stem).strip("._-")
+    return (safe or "mod")[:80]
+
+
+def _display_name_from_id(mod_id: str) -> str:
+    name = re.sub(r"^[zZ]_", "", mod_id)
+    name = name.replace("_", " ").replace("-", " ").strip()
+    return name or mod_id
+
+
+def _read_mods_doc(path: Path) -> dict:
+    raw = load_json(path) if path.is_file() else None
+    if not isinstance(raw, dict):
+        return _empty_mods_doc()
+    mods = raw.get("mods")
+    if not isinstance(mods, list):
+        return _empty_mods_doc()
+    cleaned = []
+    for mod in mods:
+        if not isinstance(mod, dict):
+            continue
+        mod_id = _safe_mod_id(str(mod.get("id") or ""))
+        if not mod_id:
+            continue
+        files = [Path(str(f)).name for f in mod.get("files", []) if str(f)]
+        cleaned.append({
+            **mod,
+            "id": mod_id,
+            "displayName": str(mod.get("displayName") or _display_name_from_id(mod_id)),
+            "enabled": bool(mod.get("enabled", True)),
+            "files": files,
+        })
+    return {"schemaVersion": 1, "mods": cleaned}
+
+
+def _mods_base_doc() -> dict:
+    staged = mods_staged_metadata_path()
+    return _read_mods_doc(staged if staged.is_file() else mods_metadata_path())
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _write_staged_mods_doc(doc: dict) -> None:
+    _write_json_atomic(mods_staged_metadata_path(), {
+        "schemaVersion": 1,
+        "mods": sorted(doc.get("mods", []), key=lambda m: str(m.get("displayName", m.get("id", ""))).lower()),
+    })
+
+
+def _mod_by_id(doc: dict, mod_id: str) -> dict | None:
+    for mod in doc.get("mods", []):
+        if mod.get("id") == mod_id:
+            return mod
+    return None
+
+
+def _mod_ids(doc: dict) -> list[str]:
+    return [_safe_mod_id(str(m.get("id", ""))) for m in doc.get("mods", []) if m.get("id")]
+
+
+def list_mods_state() -> dict:
+    live = _read_mods_doc(mods_metadata_path())
+    staged = _read_mods_doc(mods_staged_metadata_path()) if mods_staged_metadata_path().is_file() else None
+    effective = staged or live
+    staged_ids = {m.get("id") for m in staged.get("mods", [])} if staged else set()
+    live_ids = {m.get("id") for m in live.get("mods", [])}
+    rows = []
+    for mod in effective.get("mods", []):
+        mod_id = mod.get("id", "")
+        live_mod = _mod_by_id(live, mod_id)
+        pending = None
+        if staged:
+            if mod_id not in live_ids:
+                pending = "add"
+            elif live_mod and bool(live_mod.get("enabled", True)) != bool(mod.get("enabled", True)):
+                pending = "enable" if mod.get("enabled") else "disable"
+            elif live_mod and (
+                live_mod.get("sha256") != mod.get("sha256") or
+                live_mod.get("files") != mod.get("files")
+            ):
+                pending = "replace"
+        row = {**mod, "pendingAction": pending}
+        rows.append(row)
+    if staged:
+        for mod in live.get("mods", []):
+            if mod.get("id") not in staged_ids:
+                rows.append({**mod, "pendingAction": "delete"})
+    rows.sort(key=lambda m: str(m.get("displayName", m.get("id", ""))).lower())
+    return {
+        "mods": rows,
+        "staged": staged is not None,
+        "livePath": str(mods_metadata_path()),
+        "stagedPath": str(mods_staged_metadata_path()),
+        "modsDir": str(mods_enabled_dir()),
+    }
+
+
+def _archive_member_is_safe(name: str) -> bool:
+    if not name or name.startswith(("/", "\\")):
+        return False
+    parts = [p for p in name.replace("\\", "/").split("/") if p]
+    return ".." not in parts
+
+
+def safe_extract_mod_archive(upload_path: Path, stage_dir: Path, filename_hint: str) -> None:
+    hint = filename_hint.lower()
+    with open(upload_path, "rb") as f:
+        magic = f.read(4)
+    if magic.startswith(b"\x1f\x8b") or hint.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(upload_path, "r:gz") as t:
+            for member in t.getmembers():
+                if not _archive_member_is_safe(member.name):
+                    raise ValueError(f"unsafe archive path: {member.name}")
+                if member.issym() or member.islnk() or member.isdev():
+                    raise ValueError(f"unsupported archive member: {member.name}")
+            t.extractall(stage_dir)
+        return
+    if magic.startswith(b"PK\x03\x04") or hint.endswith(".zip"):
+        with zipfile.ZipFile(upload_path) as z:
+            for info in z.infolist():
+                if not _archive_member_is_safe(info.filename):
+                    raise ValueError(f"unsafe archive path: {info.filename}")
+                if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                    raise ValueError(f"unsupported archive member: {info.filename}")
+            z.extractall(stage_dir)
+        return
+    if hint.endswith(".tar"):
+        with tarfile.open(upload_path, "r:") as t:
+            for member in t.getmembers():
+                if not _archive_member_is_safe(member.name):
+                    raise ValueError(f"unsafe archive path: {member.name}")
+                if member.issym() or member.islnk() or member.isdev():
+                    raise ValueError(f"unsupported archive member: {member.name}")
+            t.extractall(stage_dir)
+        return
+    if hint.endswith(MOD_FILE_SUFFIXES):
+        shutil.copy2(upload_path, stage_dir / Path(filename_hint).name)
+        return
+    raise ValueError("unrecognized mod format (need .pak / .zip / .tar.gz / .tar)")
+
+
+def _collect_mod_files(stage_dir: Path) -> list[Path]:
+    files = []
+    seen_names: set[str] = set()
+    for p in sorted(stage_dir.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in MOD_FILE_SUFFIXES:
+            continue
+        if p.name in seen_names:
+            raise ValueError(f"archive contains duplicate mod filename: {p.name}")
+        seen_names.add(p.name)
+        files.append(p)
+    if not files:
+        raise ValueError("archive does not contain any .pak/.utoc/.ucas files")
+    return files
+
+
+def _hash_files(files: list[Path]) -> str:
+    h = hashlib.sha256()
+    for p in files:
+        h.update(p.name.encode("utf-8", "replace") + b"\0")
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+    return h.hexdigest()
+
+
+def stage_mod_upload(body_stream, content_length: int, filename: str) -> dict:
+    work = Path(tempfile.mkdtemp(prefix="windrose-mod-upload-"))
+    try:
+        upload = work / "upload.bin"
+        with upload.open("wb") as out:
+            remaining = content_length
+            while remaining > 0:
+                chunk = body_stream.read(min(UPLOAD_CHUNK, remaining))
+                if not chunk:
+                    break
+                out.write(chunk)
+                remaining -= len(chunk)
+        stage = work / "stage"
+        stage.mkdir()
+        safe_extract_mod_archive(upload, stage, filename)
+        files = _collect_mod_files(stage)
+        mod_id = _safe_mod_id(files[0].stem if len(files) == 1 else filename)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        staged_dir = mods_stage_root() / mod_id
+        shutil.rmtree(staged_dir, ignore_errors=True)
+        staged_dir.mkdir(parents=True, exist_ok=True)
+        installed_names = []
+        size = 0
+        for src in files:
+            dst = staged_dir / src.name
+            shutil.copy2(src, dst)
+            installed_names.append(src.name)
+            size += src.stat().st_size
+
+        doc = _mods_base_doc()
+        existing = _mod_by_id(doc, mod_id) or {}
+        mods = [m for m in doc.get("mods", []) if m.get("id") != mod_id]
+        mods.append({
+            **existing,
+            "id": mod_id,
+            "displayName": existing.get("displayName") or _display_name_from_id(mod_id),
+            "enabled": True,
+            "files": installed_names,
+            "sourceFilename": Path(filename).name,
+            "sizeBytes": size,
+            "sha256": _hash_files([staged_dir / n for n in installed_names]),
+            "uploadedAt": now,
+            "lastEnabledAt": now,
+        })
+        doc["mods"] = mods
+        _write_staged_mods_doc(doc)
+        return list_mods_state()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def stage_mod_enabled(mod_id: str, enabled: bool) -> dict:
+    mod_id = _safe_mod_id(mod_id)
+    doc = _mods_base_doc()
+    mod = _mod_by_id(doc, mod_id)
+    if not mod:
+        raise FileNotFoundError(mod_id)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    mod["enabled"] = enabled
+    mod["lastEnabledAt" if enabled else "lastDisabledAt"] = now
+    _write_staged_mods_doc(doc)
+    return list_mods_state()
+
+
+def stage_mod_delete(mod_id: str) -> dict:
+    mod_id = _safe_mod_id(mod_id)
+    doc = _mods_base_doc()
+    if not _mod_by_id(doc, mod_id) and not _mod_by_id(_read_mods_doc(mods_metadata_path()), mod_id):
+        raise FileNotFoundError(mod_id)
+    doc["mods"] = [m for m in doc.get("mods", []) if m.get("id") != mod_id]
+    shutil.rmtree(mods_stage_root() / mod_id, ignore_errors=True)
+    _write_staged_mods_doc(doc)
+    return list_mods_state()
+
+
+def discard_staged_mods() -> None:
+    mods_staged_metadata_path().unlink(missing_ok=True)
+    shutil.rmtree(mods_stage_root(), ignore_errors=True)
+
+
+def apply_staged_mods() -> list[str]:
+    staged_path = mods_staged_metadata_path()
+    if not staged_path.is_file():
+        return []
+    doc = _read_mods_doc(staged_path)
+    paks_root = R5_DIR / "Content" / "Paks"
+    paks_root.mkdir(parents=True, exist_ok=True)
+    tmp_enabled = paks_root / f".~mods.apply-{os.getpid()}"
+    tmp_disabled = paks_root / f".~mods.disabled.apply-{os.getpid()}"
+    shutil.rmtree(tmp_enabled, ignore_errors=True)
+    shutil.rmtree(tmp_disabled, ignore_errors=True)
+    tmp_enabled.mkdir(parents=True, exist_ok=True)
+    tmp_disabled.mkdir(parents=True, exist_ok=True)
+    applied: list[str] = []
+    try:
+        for mod in doc.get("mods", []):
+            mod_id = _safe_mod_id(str(mod.get("id", "")))
+            files = [Path(str(f)).name for f in mod.get("files", [])]
+            stage_dir = mods_stage_root() / mod_id
+            out_dir = tmp_enabled if mod.get("enabled", True) else (tmp_disabled / mod_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for name in files:
+                candidates = [
+                    stage_dir / name,
+                    mods_enabled_dir() / name,
+                    mods_disabled_dir() / mod_id / name,
+                ]
+                src = next((p for p in candidates if p.is_file()), None)
+                if not src:
+                    raise FileNotFoundError(f"missing staged/live file for mod {mod_id}: {name}")
+                shutil.copy2(src, out_dir / name)
+            applied.append(mod_id)
+
+        shutil.rmtree(mods_enabled_dir(), ignore_errors=True)
+        shutil.rmtree(mods_disabled_dir(), ignore_errors=True)
+        tmp_enabled.rename(mods_enabled_dir())
+        tmp_disabled.rename(mods_disabled_dir())
+        _write_json_atomic(mods_metadata_path(), doc)
+        staged_path.unlink(missing_ok=True)
+        shutil.rmtree(mods_stage_root(), ignore_errors=True)
+        return applied
+    except Exception:
+        shutil.rmtree(tmp_enabled, ignore_errors=True)
+        shutil.rmtree(tmp_disabled, ignore_errors=True)
+        raise
+
+
+def staged_mod_ids() -> list[str]:
+    staged_path = mods_staged_metadata_path()
+    if not staged_path.is_file():
+        return []
+    return _mod_ids(_read_mods_doc(staged_path))
+
 # --- Upload handling --------------------------------------------------------
 UPLOAD_CHUNK = 1 << 20  # 1 MiB
 
@@ -1415,6 +1847,21 @@ def preserve_identity(preserve: Path) -> None:
         s = R5_DIR / name
         if s.is_file():
             shutil.copy2(s, preserve / name)
+    # Manual WindowsServer replacement wipes the tree. Keep operator-
+    # installed mods and staged mod intent with the identity/save state.
+    for src, rel in (
+        (mods_enabled_dir(), Path("Content/Paks/~mods")),
+        (mods_disabled_dir(), Path("Content/Paks/~mods.disabled")),
+        (mods_stage_root(), Path(MODS_STAGE_DIR_NAME)),
+    ):
+        if src.is_dir():
+            dst = preserve / rel
+            shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst)
+    for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
+        s = R5_DIR / name
+        if s.is_file():
+            shutil.copy2(s, preserve / name)
 
 def restore_identity(preserve: Path) -> None:
     R5_DIR.mkdir(parents=True, exist_ok=True)
@@ -1424,6 +1871,20 @@ def restore_identity(preserve: Path) -> None:
         shutil.rmtree(saved_dst, ignore_errors=True)
         shutil.move(str(saved_src), str(saved_dst))
     for name in ("ServerDescription.json", "WorldDescription.json"):
+        s = preserve / name
+        if s.is_file():
+            shutil.copy2(s, R5_DIR / name)
+    for rel, dst in (
+        (Path("Content/Paks/~mods"), mods_enabled_dir()),
+        (Path("Content/Paks/~mods.disabled"), mods_disabled_dir()),
+        (Path(MODS_STAGE_DIR_NAME), mods_stage_root()),
+    ):
+        src = preserve / rel
+        if src.is_dir():
+            shutil.rmtree(dst, ignore_errors=True)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(src, dst)
+    for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
         s = preserve / name
         if s.is_file():
             shutil.copy2(s, R5_DIR / name)
@@ -1739,6 +2200,9 @@ class Handler(BaseHTTPRequestHandler):
         ("GET",    "/api/backups",            "_api_backups_list"),
         ("POST",   "/api/backups",            "_api_backups_create"),
         ("POST",   "/api/backups/upload",     "_api_backups_upload"),
+        ("GET",    "/api/mods",               "_api_mods_list"),
+        ("POST",   "/api/mods/upload",        "_api_mods_upload"),
+        ("DELETE", "/api/mods/staged",        "_api_mods_discard"),
         ("GET",    "/api/backup-config",      "_api_backup_config_get"),
         ("PUT",    "/api/backup-config",      "_api_backup_config_put"),
         ("GET",    "/api/game-backups",       "_api_game_backups_list"),
@@ -1799,6 +2263,15 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/game-backups/([A-Za-z0-9\-_T.Z]+)/restore$", path)
         if method == "POST" and m:
             self._api_game_backups_restore(m.group(1))
+            return
+        # Dynamic: /api/mods/{id}/enable|disable|DELETE
+        m = re.match(r"^/api/mods/([A-Za-z0-9_.-]+)/(enable|disable)$", path)
+        if method == "POST" and m:
+            self._api_mods_enable(m.group(1), m.group(2) == "enable")
+            return
+        m = re.match(r"^/api/mods/([A-Za-z0-9_.-]+)$", path)
+        if method == "DELETE" and m and m.group(1) != "staged":
+            self._api_mods_delete(m.group(1))
             return
         # Dynamic: /api/worlds/{islandId}/upload
         m = re.match(r"^/api/worlds/([0-9A-Fa-f]{32})/upload$", path)
@@ -1916,6 +2389,7 @@ class Handler(BaseHTTPRequestHandler):
             data["players"]             = raw_players
             data["allowDestructive"]    = allow_destructive()
             data["stagedConfigPending"] = STAGED_CONFIG_PATH.is_file()
+            data["stagedModsPending"]   = mods_staged_metadata_path().is_file()
             # Per-world staging — islandIds that have a
             # WorldDescription.staged.json waiting to apply. The UI uses
             # this both to tag world rows and to decide whether the
@@ -2133,18 +2607,48 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _api_config_apply(self):
-        """Swap staged → live for the server config AND for every world
-        that has staged changes, then kick a restart. Accepts either the
-        server or per-world staging alone (both are optional) — empty
-        400s out so the UI can surface "nothing to apply" cleanly."""
+        """Swap staged → live for server config, worlds, and mods, then
+        kick a restart. Accepts any subset of staged changes — empty 400s
+        out so the UI can surface "nothing to apply" cleanly."""
         if not allow_destructive():
             self._forbidden(); return
         staged_worlds = self._staged_world_paths()
         have_server = STAGED_CONFIG_PATH.is_file()
-        if not have_server and not staged_worlds:
+        have_mods = mods_staged_metadata_path().is_file()
+        if not have_server and not staged_worlds and not have_mods:
             self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"no staged changes\n")
             return
         applied_worlds: list[str] = []
+        applied_mods: list[str] = []
+        deferred_mods: list[str] = []
+        resume_after_mod_apply = False
+        if have_mods:
+            prior_maintenance = MAINTENANCE_FLAG_FILE.is_file()
+            pid, _ = find_game_pid()
+            defer_mod_apply = bool(pid) and not _systemctl_available()
+            if defer_mod_apply:
+                deferred_mods = staged_mod_ids()
+            elif pid:
+                if not prior_maintenance:
+                    set_maintenance_flag(True)
+                    resume_after_mod_apply = True
+                ok, msg = stop_game_for_file_mutation()
+                if not ok:
+                    if resume_after_mod_apply:
+                        set_maintenance_flag(False)
+                        request_restart_later()
+                    self._send(HTTPStatus.CONFLICT, "text/plain",
+                               f"game did not stop before mod apply: {msg}; staged changes left pending\n".encode())
+                    return
+            if not defer_mod_apply:
+                try:
+                    applied_mods = apply_staged_mods()
+                except Exception as e:
+                    if resume_after_mod_apply:
+                        set_maintenance_flag(False)
+                        request_restart_later()
+                    self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"mod apply failed: {e}\n".encode())
+                    return
         if have_server:
             tmp = CONFIG_PATH.with_suffix(".json.tmp")
             shutil.copy2(STAGED_CONFIG_PATH, tmp)
@@ -2156,13 +2660,22 @@ class Handler(BaseHTTPRequestHandler):
             tmp.replace(live)
             staged.unlink(missing_ok=True)
             applied_worlds.append(island_id)
-        request_restart()
+        if resume_after_mod_apply:
+            set_maintenance_flag(False)
+        if deferred_mods:
+            request_restart_later()
+        elif resume_after_mod_apply:
+            request_restart_later()
+        else:
+            request_restart()
         fire_event("config.applied", serverName=(load_json(CONFIG_PATH) or {})
                    .get("ServerDescription_Persistent", {}).get("ServerName", ""),
-                   worldsApplied=applied_worlds)
+                   worldsApplied=applied_worlds,
+                   modsApplied=applied_mods)
         self._json(HTTPStatus.OK, {
             "ok": True, "restartRequested": True,
             "serverApplied": have_server, "worldsApplied": applied_worlds,
+            "modsApplied": applied_mods, "modsDeferred": deferred_mods,
         })
 
     def _api_config_discard(self):
@@ -2308,6 +2821,48 @@ class Handler(BaseHTTPRequestHandler):
         fire_event("backup.created", backupId=bkp.get("id", ""))
         self._json(HTTPStatus.OK, bkp)
 
+    def _api_mods_list(self):
+        self._json(HTTPStatus.OK, list_mods_state())
+
+    def _api_mods_upload(self):
+        if not allow_destructive():
+            self._forbidden("mod upload disabled (set UI_PASSWORD or UI_ENABLE_ADMIN_WITHOUT_PASSWORD=true)")
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"missing body\n"); return
+        filename = self.headers.get("X-Filename", "mod.zip")
+        try:
+            self._json(HTTPStatus.OK, stage_mod_upload(self.rfile, length, filename))
+        except Exception as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode())
+
+    def _api_mods_enable(self, mod_id: str, enabled: bool):
+        if not allow_destructive():
+            self._forbidden(); return
+        try:
+            self._json(HTTPStatus.OK, stage_mod_enabled(mod_id, enabled))
+        except FileNotFoundError:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such mod\n")
+        except Exception as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode())
+
+    def _api_mods_delete(self, mod_id: str):
+        if not allow_destructive():
+            self._forbidden(); return
+        try:
+            self._json(HTTPStatus.OK, stage_mod_delete(mod_id))
+        except FileNotFoundError:
+            self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such mod\n")
+        except Exception as e:
+            self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode())
+
+    def _api_mods_discard(self):
+        if not allow_destructive():
+            self._forbidden(); return
+        discard_staged_mods()
+        self._json(HTTPStatus.OK, list_mods_state())
+
     def _api_backups_set_pin(self, bid: str, pin: bool):
         if not allow_destructive():
             self._forbidden(); return
@@ -2450,15 +3005,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.BAD_REQUEST, "text/plain",
                        b'"restart" must be a JSON boolean when present\n'); return
         if want_active:
-            MAINTENANCE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = MAINTENANCE_FLAG_FILE.parent / (MAINTENANCE_FLAG_FILE.name + ".tmp")
-            tmp.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="ascii")
-            tmp.replace(MAINTENANCE_FLAG_FILE)
+            set_maintenance_flag(True)
         else:
-            try:
-                MAINTENANCE_FLAG_FILE.unlink()
-            except FileNotFoundError:
-                pass
+            set_maintenance_flag(False)
         status = {"active": MAINTENANCE_FLAG_FILE.is_file(), "flagFile": str(MAINTENANCE_FLAG_FILE)}
         # Optional: if caller asks, also signal the running game so the
         # maintenance state takes effect immediately instead of on the
@@ -2506,7 +3055,24 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, status)
 
 # --- Main -------------------------------------------------------------------
+def cli_apply_staged_mods() -> int:
+    try:
+        applied = apply_staged_mods()
+    except Exception as e:
+        print(f"mod apply failed: {e}", file=sys.stderr, flush=True)
+        return 1
+    if applied:
+        print(json.dumps({"modsApplied": applied}), flush=True)
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--reconcile-staged-mods":
+            raise SystemExit(cli_apply_staged_mods())
+        print(f"unknown argument: {sys.argv[1]}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"windrose admin console on {BIND}:{PORT}", flush=True)
     print(f"  windrose dir:   {WINDROSE_SERVER_DIR}", flush=True)

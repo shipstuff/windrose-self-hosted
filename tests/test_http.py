@@ -14,6 +14,7 @@ point at tmpdirs BEFORE starting the server — the Handler class reads
 them at request time, so late-binding works.
 """
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -22,6 +23,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+import zipfile
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,13 +31,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
 
 
+WORLD_ID = "ABCDEF0123456789ABCDEF0123456789"
+
+
+def _server_description(name: str = "http-test", max_players: int = 4) -> dict:
+    return {
+        "ServerDescription_Persistent": {
+            "ServerName": name,
+            "MaxPlayerCount": max_players,
+            "IsPasswordProtected": False,
+            "Password": "",
+            "P2pProxyAddress": "127.0.0.1",
+            "PersistentServerId": "11111111111111111111111111111111",
+            "InviteCode": "ABC123",
+            "WorldIslandId": WORLD_ID,
+        }
+    }
+
+
+def _world_description(name: str = "HTTP World", preset: str = "Medium") -> dict:
+    return {
+        "WorldDescription": {
+            "islandId": WORLD_ID,
+            "WorldName": name,
+            "WorldPresetType": preset,
+            "WorldSettings": {
+                "BoolParameters": {},
+                "FloatParameters": {},
+                "TagParameters": {},
+            },
+        }
+    }
+
+
 def _seed_r5(r5: Path) -> None:
-    saved = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / "ABC123"
+    saved = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / WORLD_ID
     saved.mkdir(parents=True)
     (saved / "MANIFEST-000001").write_bytes(b"manifest")
     (saved / "CURRENT").write_text("MANIFEST-000001\n")
     (saved / "000005.sst").write_bytes(b"sst" * 200)
-    (r5 / "ServerDescription.json").write_text('{"ServerDescription_Persistent":{"ServerName":"http-test"}}')
+    (saved / "WorldDescription.json").write_text(json.dumps(_world_description()))
+    (r5 / "ServerDescription.json").write_text(json.dumps(_server_description()))
 
 
 class _TestServer:
@@ -46,6 +82,10 @@ class _TestServer:
     def __init__(self, r5: Path, backup_root: Path, password: str = ""):
         # Patch server module state — Handler reads these at request time.
         server.R5_DIR = r5
+        server.SAVE_ROOT = r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB"
+        server.R5_LOG = r5 / "Saved" / "Logs" / "R5.log"
+        server.CONFIG_PATH = r5 / "ServerDescription.json"
+        server.STAGED_CONFIG_PATH = r5 / "ServerDescription.staged.json"
         server.BACKUP_ROOT = backup_root
         server.BACKUP_RETAIN = 10
         server.BACKUP_RETAIN_DAYS = 7
@@ -98,6 +138,13 @@ def _run(case: str, fn) -> None:
         print(f"  FAIL  {case}: {e}")
         raise
     print(f"  PASS  {case}")
+
+
+def _mod_zip(filename: str = "z_10xloot.pak", payload: bytes = b"pak-data") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(filename, payload)
+    return buf.getvalue()
 
 
 # --- scenarios --------------------------------------------------------------
@@ -340,7 +387,7 @@ def test_backup_download_upload_roundtrip():
             assert name == "http-test", f"server name not restored (stuck on destination?): {name}"
             # RocksDB content byte-for-byte matches the seed.
             world = (r5_dst / "Saved" / "SaveProfiles" / "Default" /
-                     "RocksDB" / "0.10.0" / "Worlds" / "ABC123")
+                     "RocksDB" / "0.10.0" / "Worlds" / WORLD_ID)
             assert (world / "MANIFEST-000001").read_bytes() == b"manifest"
         finally:
             srv_dst.shutdown()
@@ -504,6 +551,274 @@ def test_restore_unknown_game_backup_returns_404():
             srv.shutdown()
 
 
+def test_mod_upload_stages_then_apply_materializes():
+    """Uploading a mod creates staged metadata/files only. The normal
+    Apply+restart endpoint promotes it into R5/Content/Paks/~mods and
+    clears the staged state."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            body = _mod_zip(payload=b"loot" * 128)
+            code, raw = _req("POST", f"{srv.base}/api/mods/upload",
+                             body=body,
+                             headers={"Content-Type": "application/zip",
+                                      "X-Filename": "10xloot-50-1-07.zip"})
+            assert code == 200, f"mod upload failed: {code} {raw}"
+            assert (r5 / ".mods.staged.json").is_file(), "staged metadata missing"
+            assert (r5 / ".mods-staging" / "z_10xloot" / "z_10xloot.pak").is_file()
+            assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists(), "live mod dir mutated before apply"
+
+            code, status = _json_req("GET", f"{srv.base}/api/status")
+            assert status["stagedModsPending"] is True, status
+            code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"mods-only apply should be accepted: {code} {apply_resp}"
+            assert apply_resp["modsApplied"] == ["z_10xloot"], apply_resp
+
+            live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
+            assert live_pak.read_bytes() == b"loot" * 128
+            assert not (r5 / ".mods.staged.json").exists(), "staged metadata not cleared"
+
+            code, mods = _json_req("GET", f"{srv.base}/api/mods")
+            assert code == 200
+            assert mods["staged"] is False, mods
+            assert mods["mods"][0]["id"] == "z_10xloot", mods
+            assert mods["mods"][0]["enabled"] is True, mods
+        finally:
+            srv.shutdown()
+
+
+def test_mod_upload_accepts_plain_pak():
+    """Raw .pak uploads should follow the same staged apply flow as archives."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, raw = _req("POST", f"{srv.base}/api/mods/upload",
+                             body=b"plain-pak",
+                             headers={"Content-Type": "application/octet-stream",
+                                      "X-Filename": "z_plainloot.pak"})
+            assert code == 200, f"plain pak upload failed: {code} {raw}"
+            assert (r5 / ".mods-staging" / "z_plainloot" / "z_plainloot.pak").read_bytes() == b"plain-pak"
+
+            code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"plain pak apply failed: {code} {apply_resp}"
+            assert apply_resp["modsApplied"] == ["z_plainloot"], apply_resp
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_plainloot.pak").read_bytes() == b"plain-pak"
+        finally:
+            srv.shutdown()
+
+
+def test_mod_apply_defers_running_signal_mode_to_restart():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        original_find_game_pid = server.find_game_pid
+        original_systemctl_available = server._systemctl_available
+        original_request_restart_later = server.request_restart_later
+        original_apply_staged_mods = server.apply_staged_mods
+        events: list[str] = []
+        try:
+            code, _ = _req("POST", f"{srv.base}/api/mods/upload",
+                           body=_mod_zip(payload=b"ordered"),
+                           headers={"Content-Type": "application/zip",
+                                    "X-Filename": "10xloot.zip"})
+            assert code == 200
+
+            server.find_game_pid = lambda: (12345, 1024)
+            server._systemctl_available = lambda: False
+
+            def fake_request_restart_later(*_args, **_kwargs) -> None:
+                events.append("restart_later")
+
+            def fail_apply_staged_mods() -> list[str]:
+                raise AssertionError("signal-mode apply should defer mod promotion to startup")
+
+            server.request_restart_later = fake_request_restart_later
+            server.apply_staged_mods = fail_apply_staged_mods
+
+            code, apply_resp = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"apply failed: {code} {apply_resp}"
+            assert apply_resp["modsApplied"] == [], apply_resp
+            assert apply_resp["modsDeferred"] == ["z_10xloot"], apply_resp
+            assert events == ["restart_later"], events
+            assert (r5 / ".mods.staged.json").is_file(), "staged metadata should survive until restart"
+            assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists()
+        finally:
+            server.find_game_pid = original_find_game_pid
+            server._systemctl_available = original_systemctl_available
+            server.request_restart_later = original_request_restart_later
+            server.apply_staged_mods = original_apply_staged_mods
+            srv.shutdown()
+
+
+def test_mod_disable_enable_are_staged_and_applied():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, _ = _req("POST", f"{srv.base}/api/mods/upload",
+                           body=_mod_zip(),
+                           headers={"Content-Type": "application/zip",
+                                    "X-Filename": "10xloot.zip"})
+            assert code == 200
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
+
+            code, resp = _json_req("POST", f"{srv.base}/api/mods/z_10xloot/disable")
+            assert code == 200, resp
+            assert resp["staged"] is True, resp
+            # Live remains enabled until Apply+restart.
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").is_file()
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
+            assert not (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").exists()
+            assert (r5 / "Content" / "Paks" / "~mods.disabled" / "z_10xloot" / "z_10xloot.pak").is_file()
+
+            code, resp = _json_req("POST", f"{srv.base}/api/mods/z_10xloot/enable")
+            assert code == 200, resp
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
+            assert (r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak").is_file()
+        finally:
+            srv.shutdown()
+
+
+def test_mod_upload_rejects_path_traversal_zip():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("../evil.pak", b"bad")
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, body = _req("POST", f"{srv.base}/api/mods/upload",
+                              body=buf.getvalue(),
+                              headers={"Content-Type": "application/zip",
+                                       "X-Filename": "bad.zip"})
+            assert code == 400, f"expected 400 for unsafe archive, got {code}"
+            assert b"unsafe archive path" in body, body
+        finally:
+            srv.shutdown()
+
+
+def test_backup_restore_includes_live_mod_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            code, _ = _req("POST", f"{srv.base}/api/mods/upload",
+                           body=_mod_zip(payload=b"backup-me"),
+                           headers={"Content-Type": "application/zip",
+                                    "X-Filename": "10xloot.zip"})
+            assert code == 200
+            code, _ = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200
+
+            code, created = _json_req("POST", f"{srv.base}/api/backups")
+            assert code == 200, created
+            bid = created["id"]
+            assert (backup_root / bid / ".mods-included").is_file(), "backup missing mod marker"
+            shutil.rmtree(r5 / "Content" / "Paks" / "~mods")
+            (r5 / ".mods.json").unlink()
+
+            code, restore_resp = _json_req("POST", f"{srv.base}/api/backups/{bid}/restore")
+            assert code == 200, restore_resp
+            live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
+            assert live_pak.read_bytes() == b"backup-me"
+            mods_doc = json.loads((r5 / ".mods.json").read_text())
+            assert mods_doc["mods"][0]["id"] == "z_10xloot", mods_doc
+        finally:
+            srv.shutdown()
+
+
+def test_apply_promotes_server_world_and_mod_staging_together():
+    """One Apply+restart must promote every staged surface: server config,
+    per-world config, and mods. This guards the combined code path after
+    adding mod staging to the existing config/world apply flow."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        srv = _TestServer(r5, backup_root)
+        try:
+            server_doc = _server_description(name="all-staged", max_players=6)
+            code, resp = _json_req("PUT", f"{srv.base}/api/config", server_doc)
+            assert code == 200, f"server config stage failed: {code} {resp}"
+            assert (r5 / "ServerDescription.staged.json").is_file()
+
+            world_doc = _world_description(name="All Staged World", preset="Hard")
+            code, resp = _json_req("PUT", f"{srv.base}/api/worlds/{WORLD_ID}/config", world_doc)
+            assert code == 200, f"world config stage failed: {code} {resp}"
+            world_staged = (
+                r5 / "Saved" / "SaveProfiles" / "Default" / "RocksDB" /
+                "0.10.0" / "Worlds" / WORLD_ID / "WorldDescription.staged.json"
+            )
+            assert world_staged.is_file()
+
+            code, raw = _req("POST", f"{srv.base}/api/mods/upload",
+                             body=_mod_zip(payload=b"combined"),
+                             headers={"Content-Type": "application/zip",
+                                      "X-Filename": "10xloot.zip"})
+            assert code == 200, f"mod upload failed: {code} {raw}"
+            assert (r5 / ".mods.staged.json").is_file()
+
+            code, status = _json_req("GET", f"{srv.base}/api/status")
+            assert code == 200
+            assert status["stagedConfigPending"] is True, status
+            assert WORLD_ID in status["stagedWorlds"], status
+            assert status["stagedModsPending"] is True, status
+
+            code, applied = _json_req("POST", f"{srv.base}/api/config/apply")
+            assert code == 200, f"combined apply failed: {code} {applied}"
+            assert applied["serverApplied"] is True, applied
+            assert applied["worldsApplied"] == [WORLD_ID], applied
+            assert applied["modsApplied"] == ["z_10xloot"], applied
+
+            live_server = json.loads((r5 / "ServerDescription.json").read_text())
+            assert live_server["ServerDescription_Persistent"]["ServerName"] == "all-staged"
+            assert live_server["ServerDescription_Persistent"]["MaxPlayerCount"] == 6
+            assert not (r5 / "ServerDescription.staged.json").exists()
+
+            live_world_path = world_staged.with_name("WorldDescription.json")
+            live_world = json.loads(live_world_path.read_text())
+            assert live_world["WorldDescription"]["WorldName"] == "All Staged World"
+            assert live_world["WorldDescription"]["WorldPresetType"] == "Hard"
+            assert not world_staged.exists()
+
+            live_pak = r5 / "Content" / "Paks" / "~mods" / "z_10xloot.pak"
+            assert live_pak.read_bytes() == b"combined"
+            assert not (r5 / ".mods.staged.json").exists()
+            assert not (r5 / ".mods-staging").exists()
+
+            code, status = _json_req("GET", f"{srv.base}/api/status")
+            assert code == 200
+            assert status["stagedConfigPending"] is False, status
+            assert status["stagedWorlds"] == [], status
+            assert status["stagedModsPending"] is False, status
+        finally:
+            srv.shutdown()
+
+
 def test_malformed_json_body_returns_400():
     with tempfile.TemporaryDirectory() as tmp:
         r5 = Path(tmp) / "R5"
@@ -541,6 +856,13 @@ if __name__ == "__main__":
     _run("maintenance POST requires strict JSON bools", test_maintenance_requires_strict_bool)
     _run("backup-config get/put roundtrip", test_backup_config_get_put_roundtrip)
     _run("backup-config PUT rejects bad shapes", test_backup_config_put_rejects_bad_shape)
+    _run("mod upload stages then apply materializes", test_mod_upload_stages_then_apply_materializes)
+    _run("mod upload accepts plain pak", test_mod_upload_accepts_plain_pak)
+    _run("mod apply defers running signal mode to restart", test_mod_apply_defers_running_signal_mode_to_restart)
+    _run("mod enable/disable are staged", test_mod_disable_enable_are_staged_and_applied)
+    _run("mod upload rejects traversal zip", test_mod_upload_rejects_path_traversal_zip)
+    _run("backup restore includes live mod state", test_backup_restore_includes_live_mod_state)
+    _run("combined apply promotes server + world + mods", test_apply_promotes_server_world_and_mod_staging_together)
     _run("backup download → upload → restore round-trip", test_backup_download_upload_roundtrip)
     _run("backup download unknown id → 404", test_backup_download_unknown_id_404)
     _run("backup upload rejects non-archive garbage", test_backup_upload_rejects_garbage)
