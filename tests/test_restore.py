@@ -134,6 +134,40 @@ def test_restore_removes_files_added_after_backup():
         assert not new_world.exists(), f"restore left stale dir behind: {new_world}"
 
 
+def test_restore_saved_mountpoint_clears_contents_in_place():
+    """Mounted Saved/ dirs cannot be removed, but their contents must be
+    replaced exactly with the backup contents."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        _patch_paths(r5, backup_root)
+
+        bkp = server.create_backup()
+        saved = r5 / "Saved"
+        stale_world = saved / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / "STALE"
+        stale_world.mkdir(parents=True)
+        (stale_world / "CURRENT").write_text("stale\n")
+        backed_up_world = saved / "SaveProfiles" / "Default" / "RocksDB" / "0.10.0" / "Worlds" / "ABC123"
+        (backed_up_world / "CURRENT").unlink()
+
+        old_is_mount = Path.is_mount
+
+        def fake_is_mount(path: Path) -> bool:
+            return path == saved or old_is_mount(path)
+
+        Path.is_mount = fake_is_mount
+        try:
+            server.restore_backup(bkp["id"])
+        finally:
+            Path.is_mount = old_is_mount
+
+        assert saved.is_dir(), "restore removed mounted Saved directory"
+        assert not stale_world.exists(), "restore left stale mounted Saved contents behind"
+        assert (backed_up_world / "CURRENT").read_text() == "MANIFEST-000001\n"
+
+
 def test_restore_empty_mod_state_clears_live_mods():
     """A backup taken before mods exist still represents an explicit empty mod
     state. Restoring it must remove mods installed later."""
@@ -258,6 +292,7 @@ if __name__ == "__main__":
     _run("no-op round-trip (identical content)", test_noop_roundtrip)
     _run("mutations wiped by restore", test_mutations_are_wiped_by_restore)
     _run("post-backup files removed by restore", test_restore_removes_files_added_after_backup)
+    _run("mounted Saved contents replaced in place", test_restore_saved_mountpoint_clears_contents_in_place)
     _run("empty mod state clears later live mods", test_restore_empty_mod_state_clears_live_mods)
     _run("empty mod state clears mounted mod contents", test_restore_empty_mod_state_clears_mounted_mod_dir_contents)
     _run("identity JSONs restored", test_identity_files_restored)

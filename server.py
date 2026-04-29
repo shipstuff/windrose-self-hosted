@@ -1080,15 +1080,16 @@ def restore_backup(bid: str) -> None:
     document-manager caches, and RocksDB manifest pointers all need to
     match the world payload they reference. This function rm -rf's the
     entire live Saved/ tree first, then drops in the backup's full
-    Saved/ tree + ServerDescription/WorldDescription JSON.
+    Saved/ tree + ServerDescription/WorldDescription JSON. When Saved/
+    is a PVC mountpoint, the mount directory itself is preserved and only
+    its contents are replaced.
     """
     src = BACKUP_ROOT / bid
     if not src.is_dir():
         raise FileNotFoundError(bid)
     if (src / "Saved").is_dir():
         dst = R5_DIR / "Saved"
-        shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src / "Saved", dst)
+        _replace_dir(src / "Saved", dst)
     for name in (
         "ServerDescription.json",
         "WorldDescription.json",

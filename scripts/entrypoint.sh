@@ -141,6 +141,53 @@ server_files_present() {
 steamcmd_preserved_files=(ServerDescription.json WorldDescription.json .mods.json .mods.staged.json)
 steamcmd_preserved_dirs=("Content/Paks/~mods" "Content/Paks/~mods.disabled" ".mods-staging")
 
+path_is_mount() {
+  command -v mountpoint >/dev/null 2>&1 && mountpoint -q "$1"
+}
+
+clear_dir_contents() {
+  local dir="$1"
+  [ -d "${dir}" ] || return 0
+  find "${dir}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+}
+
+copy_dir_contents() {
+  local src="$1"
+  local dst="$2"
+  mkdir -p "${dst}"
+  cp -a "${src}/." "${dst}/"
+}
+
+stash_dir_for_steamcmd() {
+  local src="$1"
+  local dst="$2"
+
+  [ -d "${src}" ] || return 0
+  rm -rf "${dst:?}"
+  mkdir -p "$(dirname "${dst}")"
+  if path_is_mount "${src}"; then
+    mkdir -p "${dst}"
+    copy_dir_contents "${src}" "${dst}"
+  else
+    mv "${src}" "${dst}"
+  fi
+}
+
+restore_dir_from_steamcmd_stash() {
+  local src="$1"
+  local dst="$2"
+
+  [ -d "${src}" ] || return 0
+  mkdir -p "$(dirname "${dst}")"
+  if path_is_mount "${dst}"; then
+    clear_dir_contents "${dst}"
+    copy_dir_contents "${src}" "${dst}"
+  else
+    rm -rf "${dst:?}"
+    mv "${src}" "${dst}"
+  fi
+}
+
 preserve_r5_state() {
   local src_r5="$1"
   local dst="$2"
@@ -170,9 +217,7 @@ restore_r5_state() {
   done
   for rel in "${steamcmd_preserved_dirs[@]}"; do
     if [ -d "${src}/${rel}" ]; then
-      rm -rf "${dst_r5:?}/${rel}"
-      mkdir -p "$(dirname "${dst_r5:?}/${rel}")"
-      cp -a "${src}/${rel}" "${dst_r5:?}/${rel}"
+      restore_dir_from_steamcmd_stash "${src}/${rel}" "${dst_r5}/${rel}"
     fi
   done
 }
@@ -211,7 +256,7 @@ install_via_steamcmd() {
     if [ -d "${stray}/Saved" ] && [ ! -d "${WINDROSE_SERVER_DIR}/R5/Saved" ]; then
       echo "$(timestamp) WARNING: Found abandoned preserve_dir ${stray} from a prior interrupted boot; restoring before proceeding"
       mkdir -p "${WINDROSE_SERVER_DIR}/R5"
-      mv "${stray}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
+      restore_dir_from_steamcmd_stash "${stray}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
       restore_r5_state "${stray}" "${WINDROSE_SERVER_DIR}/R5"
     fi
     rm -rf "${stray}"
@@ -220,7 +265,7 @@ install_via_steamcmd() {
 
   echo "$(timestamp) INFO: Stashing identity + save before SteamCMD app_update (preserve_dir ${preserve_dir})"
   if [ -d "${WINDROSE_SERVER_DIR}/R5/Saved" ]; then
-    mv "${WINDROSE_SERVER_DIR}/R5/Saved" "${preserve_dir}/Saved"
+    stash_dir_for_steamcmd "${WINDROSE_SERVER_DIR}/R5/Saved" "${preserve_dir}/Saved"
   fi
   preserve_r5_state "${WINDROSE_SERVER_DIR}/R5" "${preserve_dir}"
 
@@ -269,8 +314,7 @@ EOF
   echo "$(timestamp) INFO: Restoring identity + save from ${preserve_dir}"
   mkdir -p "${WINDROSE_SERVER_DIR}/R5"
   if [ -d "${preserve_dir}/Saved" ]; then
-    rm -rf "${WINDROSE_SERVER_DIR}/R5/Saved"
-    mv "${preserve_dir}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
+    restore_dir_from_steamcmd_stash "${preserve_dir}/Saved" "${WINDROSE_SERVER_DIR}/R5/Saved"
   fi
   restore_r5_state "${preserve_dir}" "${WINDROSE_SERVER_DIR}/R5"
   rm -rf "${preserve_dir}"
