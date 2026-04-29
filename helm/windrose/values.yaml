@@ -74,11 +74,22 @@ ui:
       key: discord-webhook-url
 
 persistence:
-  existingClaim: ""
-  size: 20Gi
-  accessMode: ReadWriteOnce
-  storageClassName: ""
-  subPath: steam-root
+  # Default is the legacy-compatible single PVC. For split runtime/state/backups
+  # storage, override both claims[] and mounts[] with direct mountpoints.
+  claims:
+    - name: data
+      existingClaim: ""
+      size: 20Gi
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+  mounts:
+    - name: data
+      mountPath: /home/steam
+      subPath: steam-root
+
+# Additional env vars injected into the game and UI containers. Names must be
+# unique and cannot duplicate chart-managed env vars.
+env: []
 
 # hostNetwork so Windrose's UPnP / NAT-punched UDP bindings are reachable at
 # the node's real interface.

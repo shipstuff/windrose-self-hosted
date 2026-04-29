@@ -1,3 +1,6 @@
+{{- include "windrose.validatePersistence" . -}}
+{{- include "windrose.validateEnv" . -}}
+{{- $persistence := include "windrose.persistenceSpec" . | fromYaml -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -111,6 +114,9 @@ spec:
               value: {{ .Values.serverConfig.source | default "steamcmd" | quote }}
             - name: DISPLAY
               value: ":{{ .Values.xvfb.display | default 99 }}"
+            {{- with .Values.env }}
+{{ toYaml . | indent 12 }}
+            {{- end }}
             {{- if eq .Values.serverConfig.mode "managed" }}
             - name: WINDROSE_MANAGED_CONFIG_TEMPLATE
               value: "/etc/windrose/managed/ServerDescription.json"
@@ -135,9 +141,7 @@ spec:
           resources:
 {{ toYaml .Values.resources.game | indent 12 }}
           volumeMounts:
-            - name: data
-              mountPath: /home/steam
-              subPath: {{ .Values.persistence.subPath | quote }}
+{{ toYaml $persistence.mounts | indent 12 }}
             {{- if .Values.xvfb.enabled }}
             - name: x11-socket
               mountPath: /tmp/.X11-unix
@@ -253,6 +257,9 @@ spec:
               value: {{ .Values.resources.game.limits.cpu | default "" | quote }}
             - name: WINDROSE_GAME_MEM_LIMIT
               value: {{ .Values.resources.game.limits.memory | default "" | quote }}
+            {{- with .Values.env }}
+{{ toYaml . | indent 12 }}
+            {{- end }}
           ports:
             - name: ui
               containerPort: {{ .Values.service.port }}
@@ -260,13 +267,14 @@ spec:
           resources:
 {{ toYaml .Values.resources.ui | indent 12 }}
           volumeMounts:
-            - name: data
-              mountPath: /home/steam
-              subPath: {{ .Values.persistence.subPath | quote }}
+{{ toYaml $persistence.mounts | indent 12 }}
       volumes:
-        - name: data
+        {{- $root := . }}
+        {{- range $persistence.claims }}
+        - name: {{ .name }}
           persistentVolumeClaim:
-            claimName: {{ include "windrose.pvcName" . }}
+            claimName: {{ include "windrose.persistenceClaimName" (dict "root" $root "claim" .) }}
+        {{- end }}
         {{- if .Values.xvfb.enabled }}
         - name: x11-socket
           emptyDir: {}
