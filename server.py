@@ -1089,7 +1089,7 @@ def restore_backup(bid: str) -> None:
         raise FileNotFoundError(bid)
     if (src / "Saved").is_dir():
         dst = R5_DIR / "Saved"
-        _replace_dir(src / "Saved", dst)
+        _replace_dir_preserving_mountpoint(src / "Saved", dst)
     for name in (
         "ServerDescription.json",
         "WorldDescription.json",
@@ -1113,7 +1113,7 @@ def restore_backup(bid: str) -> None:
         ):
             s = src / rel
             if s.is_dir():
-                _replace_dir(s, dst)
+                _replace_dir_preserving_mountpoint(s, dst)
         for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
             s = src / name
             if s.is_file():
@@ -1540,13 +1540,16 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
-def _clear_dir_contents(path: Path) -> None:
+def _clear_dir_contents(path: Path, skip: set[Path] | None = None) -> None:
     if not path.exists():
         return
     if not path.is_dir():
         path.unlink()
         return
+    skip = skip or set()
     for child in path.iterdir():
+        if child in skip:
+            continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
         else:
@@ -1564,10 +1567,18 @@ def _remove_dir_or_clear_mount(path: Path) -> None:
         path.unlink()
 
 
-def _replace_dir(src: Path, dst: Path) -> None:
+def _replace_dir_preserving_mountpoint(src: Path, dst: Path) -> None:
     if dst.exists() and dst.is_dir() and dst.is_mount():
-        _clear_dir_contents(dst)
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+        # A mountpoint directory cannot be replaced atomically. Stage a full
+        # source copy inside the mounted filesystem first so copy/read failures
+        # leave the existing live contents intact.
+        with tempfile.TemporaryDirectory(prefix=".windrose-replace-", dir=dst) as tmp_name:
+            tmp = Path(tmp_name)
+            payload = tmp / "payload"
+            shutil.copytree(src, payload)
+            _clear_dir_contents(dst, skip={tmp})
+            for child in payload.iterdir():
+                shutil.move(str(child), str(dst / child.name))
         return
     if dst.exists() and not dst.is_dir():
         dst.unlink()
@@ -1815,8 +1826,8 @@ def apply_staged_mods() -> list[str]:
                 shutil.copy2(src, out_dir / name)
             applied.append(mod_id)
 
-        _replace_dir(tmp_enabled, mods_enabled_dir())
-        _replace_dir(tmp_disabled, mods_disabled_dir())
+        _replace_dir_preserving_mountpoint(tmp_enabled, mods_enabled_dir())
+        _replace_dir_preserving_mountpoint(tmp_disabled, mods_disabled_dir())
         _write_json_atomic(mods_metadata_path(), doc)
         staged_path.unlink(missing_ok=True)
         shutil.rmtree(mods_stage_root(), ignore_errors=True)

@@ -145,19 +145,6 @@ path_is_mount() {
   command -v mountpoint >/dev/null 2>&1 && mountpoint -q "$1"
 }
 
-clear_dir_contents() {
-  local dir="$1"
-  [ -d "${dir}" ] || return 0
-  find "${dir}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-}
-
-copy_dir_contents() {
-  local src="$1"
-  local dst="$2"
-  mkdir -p "${dst}"
-  cp -a "${src}/." "${dst}/"
-}
-
 stash_dir_for_steamcmd() {
   local src="$1"
   local dst="$2"
@@ -166,8 +153,7 @@ stash_dir_for_steamcmd() {
   rm -rf "${dst:?}"
   mkdir -p "$(dirname "${dst}")"
   if path_is_mount "${src}"; then
-    mkdir -p "${dst}"
-    copy_dir_contents "${src}" "${dst}"
+    echo "$(timestamp) INFO: ${src} is a mountpoint; leaving it mounted in place during SteamCMD update"
   else
     mv "${src}" "${dst}"
   fi
@@ -180,8 +166,7 @@ restore_dir_from_steamcmd_stash() {
   [ -d "${src}" ] || return 0
   mkdir -p "$(dirname "${dst}")"
   if path_is_mount "${dst}"; then
-    clear_dir_contents "${dst}"
-    copy_dir_contents "${src}" "${dst}"
+    echo "$(timestamp) INFO: ${dst} is a mountpoint; keeping mounted contents in place after SteamCMD update"
   else
     rm -rf "${dst:?}"
     mv "${src}" "${dst}"

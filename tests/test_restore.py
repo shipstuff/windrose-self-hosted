@@ -168,6 +168,49 @@ def test_restore_saved_mountpoint_clears_contents_in_place():
         assert (backed_up_world / "CURRENT").read_text() == "MANIFEST-000001\n"
 
 
+def test_restore_saved_mountpoint_copy_failure_keeps_live_contents():
+    """For mounted Saved/, copy/read failures must happen before we clear the
+    live mount contents."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        _patch_paths(r5, backup_root)
+
+        bkp = server.create_backup()
+        saved = r5 / "Saved"
+        live_marker = saved / "live-marker.txt"
+        live_marker.write_text("still-live\n")
+
+        old_is_mount = Path.is_mount
+        old_copytree = shutil.copytree
+        backup_saved = backup_root / bkp["id"] / "Saved"
+
+        def fake_is_mount(path: Path) -> bool:
+            return path == saved or old_is_mount(path)
+
+        def failing_copytree(src, dst, *args, **kwargs):
+            if Path(src) == backup_saved:
+                raise OSError("simulated backup read failure")
+            return old_copytree(src, dst, *args, **kwargs)
+
+        Path.is_mount = fake_is_mount
+        shutil.copytree = failing_copytree
+        try:
+            raised = False
+            try:
+                server.restore_backup(bkp["id"])
+            except OSError:
+                raised = True
+        finally:
+            shutil.copytree = old_copytree
+            Path.is_mount = old_is_mount
+
+        assert raised, "restore should surface the copy/read failure"
+        assert live_marker.read_text() == "still-live\n", "restore cleared live mounted contents before copy completed"
+
+
 def test_restore_empty_mod_state_clears_live_mods():
     """A backup taken before mods exist still represents an explicit empty mod
     state. Restoring it must remove mods installed later."""
@@ -293,6 +336,7 @@ if __name__ == "__main__":
     _run("mutations wiped by restore", test_mutations_are_wiped_by_restore)
     _run("post-backup files removed by restore", test_restore_removes_files_added_after_backup)
     _run("mounted Saved contents replaced in place", test_restore_saved_mountpoint_clears_contents_in_place)
+    _run("mounted Saved copy failure keeps live contents", test_restore_saved_mountpoint_copy_failure_keeps_live_contents)
     _run("empty mod state clears later live mods", test_restore_empty_mod_state_clears_live_mods)
     _run("empty mod state clears mounted mod contents", test_restore_empty_mod_state_clears_mounted_mod_dir_contents)
     _run("identity JSONs restored", test_identity_files_restored)
