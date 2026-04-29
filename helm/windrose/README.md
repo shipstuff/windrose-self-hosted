@@ -20,7 +20,7 @@ From the published OCI chart (once a `v*` tag is pushed and CI runs
 
 ```bash
 helm upgrade --install windrose oci://ghcr.io/shipstuff/charts/windrose \
-  --version 0.1.0 \
+  --version 0.2.1 \
   --namespace games --create-namespace
 ```
 
@@ -313,6 +313,7 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 | Value | Default | Purpose |
 |---|---|---|
 | `securityContext.{runAsUser,runAsGroup,fsGroup}` | `10000` | Non-root throughout; `fsGroup` lets the PVC be owned by the same id. |
+| `securityContext.fsGroupChangePolicy` | `OnRootMismatch` | Avoids recursive PVC ownership walks on every mount when the volume root already has the expected group. |
 | `containerSecurityContext.allowPrivilegeEscalation` | `false` | |
 | `containerSecurityContext.readOnlyRootFilesystem` | `false` | SteamCMD writes to `$HOME`; can't be read-only. |
 | `containerSecurityContext.capabilities.drop` | `[ALL]` | The UI sidecar re-adds `CAP_KILL` in its own spec (needed to signal the sibling game process under shared PID namespace). |

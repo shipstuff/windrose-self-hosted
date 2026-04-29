@@ -12,7 +12,7 @@ terminationGracePeriodSeconds: 45
 
 image:
   repository: ghcr.io/shipstuff/windrose-server
-  tag: "0.2.0"
+  tag: "0.2.1"
   pullPolicy: Always
 
 # Deprecated: UI now runs from the same image as the game (stdlib Python
@@ -310,6 +310,7 @@ securityContext:
   runAsUser: 10000
   runAsGroup: 10000
   fsGroup: 10000
+  fsGroupChangePolicy: OnRootMismatch
 
 containerSecurityContext:
   allowPrivilegeEscalation: false
