@@ -36,9 +36,7 @@ spec:
 {{ toYaml . | indent 8 }}
       {{- end }}
       securityContext:
-        runAsUser: {{ .Values.securityContext.runAsUser }}
-        runAsGroup: {{ .Values.securityContext.runAsGroup }}
-        fsGroup: {{ .Values.securityContext.fsGroup }}
+{{ toYaml .Values.securityContext | indent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml . | indent 8 }}
