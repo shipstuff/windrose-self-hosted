@@ -1102,7 +1102,7 @@ def restore_backup(bid: str) -> None:
             shutil.copy2(s, R5_DIR / name)
     if (src / MODS_BACKUP_MARKER_NAME).is_file():
         for dst in (mods_enabled_dir(), mods_disabled_dir(), mods_stage_root()):
-            shutil.rmtree(dst, ignore_errors=True)
+            _remove_dir_or_clear_mount(dst)
         for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
             (R5_DIR / name).unlink(missing_ok=True)
         for rel, dst in (
@@ -1112,8 +1112,7 @@ def restore_backup(bid: str) -> None:
         ):
             s = src / rel
             if s.is_dir():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(s, dst)
+                _replace_dir(s, dst)
         for name in (MODS_METADATA_NAME, MODS_STAGED_METADATA_NAME):
             s = src / name
             if s.is_file():
@@ -1540,6 +1539,43 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _clear_dir_contents(path: Path) -> None:
+    if not path.exists():
+        return
+    if not path.is_dir():
+        path.unlink()
+        return
+    for child in path.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _remove_dir_or_clear_mount(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir() and path.is_mount():
+        _clear_dir_contents(path)
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _replace_dir(src: Path, dst: Path) -> None:
+    if dst.exists() and dst.is_dir() and dst.is_mount():
+        _clear_dir_contents(dst)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        return
+    if dst.exists() and not dst.is_dir():
+        dst.unlink()
+    elif dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst)
+
+
 def _write_staged_mods_doc(doc: dict) -> None:
     _write_json_atomic(mods_staged_metadata_path(), {
         "schemaVersion": 1,
@@ -1778,13 +1814,13 @@ def apply_staged_mods() -> list[str]:
                 shutil.copy2(src, out_dir / name)
             applied.append(mod_id)
 
-        shutil.rmtree(mods_enabled_dir(), ignore_errors=True)
-        shutil.rmtree(mods_disabled_dir(), ignore_errors=True)
-        tmp_enabled.rename(mods_enabled_dir())
-        tmp_disabled.rename(mods_disabled_dir())
+        _replace_dir(tmp_enabled, mods_enabled_dir())
+        _replace_dir(tmp_disabled, mods_disabled_dir())
         _write_json_atomic(mods_metadata_path(), doc)
         staged_path.unlink(missing_ok=True)
         shutil.rmtree(mods_stage_root(), ignore_errors=True)
+        shutil.rmtree(tmp_enabled, ignore_errors=True)
+        shutil.rmtree(tmp_disabled, ignore_errors=True)
         return applied
     except Exception:
         shutil.rmtree(tmp_enabled, ignore_errors=True)

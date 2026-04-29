@@ -159,6 +159,39 @@ def test_restore_empty_mod_state_clears_live_mods():
         assert not (r5 / server.MODS_METADATA_NAME).exists(), "restore left post-backup mod metadata behind"
 
 
+def test_restore_empty_mod_state_clears_mounted_mod_dir_contents():
+    """Mounted mod dirs cannot be removed, but their contents must be cleared."""
+    with tempfile.TemporaryDirectory() as tmp:
+        r5 = Path(tmp) / "R5"
+        backup_root = Path(tmp) / "backups"
+        backup_root.mkdir()
+        _seed_r5(r5)
+        _patch_paths(r5, backup_root)
+
+        bkp = server.create_backup()
+        live_mod_dir = r5 / "Content" / "Paks" / "~mods"
+        live_mod_dir.mkdir(parents=True)
+        (live_mod_dir / "z_later.pak").write_bytes(b"later")
+        (r5 / server.MODS_METADATA_NAME).write_text(
+            '{"schemaVersion":1,"mods":[{"id":"z_later","files":["z_later.pak"]}]}'
+        )
+
+        old_is_mount = Path.is_mount
+
+        def fake_is_mount(path: Path) -> bool:
+            return path == live_mod_dir or old_is_mount(path)
+
+        Path.is_mount = fake_is_mount
+        try:
+            server.restore_backup(bkp["id"])
+        finally:
+            Path.is_mount = old_is_mount
+
+        assert live_mod_dir.is_dir(), "restore removed mounted mod directory"
+        assert not any(live_mod_dir.iterdir()), "restore left mounted mod contents behind"
+        assert not (r5 / server.MODS_METADATA_NAME).exists(), "restore left post-backup mod metadata behind"
+
+
 def test_identity_files_restored():
     """ServerDescription.json + WorldDescription.json must be restored
     alongside Saved/. This is the bit that PSID recovery depends on."""
@@ -226,6 +259,7 @@ if __name__ == "__main__":
     _run("mutations wiped by restore", test_mutations_are_wiped_by_restore)
     _run("post-backup files removed by restore", test_restore_removes_files_added_after_backup)
     _run("empty mod state clears later live mods", test_restore_empty_mod_state_clears_live_mods)
+    _run("empty mod state clears mounted mod contents", test_restore_empty_mod_state_clears_mounted_mod_dir_contents)
     _run("identity JSONs restored", test_identity_files_restored)
     _run("missing backup id raises FileNotFoundError", test_missing_backup_id_raises)
     _run("RocksDB bytes survive byte-for-byte", test_rocksdb_bytes_survive_roundtrip)
