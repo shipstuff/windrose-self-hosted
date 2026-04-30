@@ -174,10 +174,19 @@ _PATCH_STATE_LOCK = threading.Lock()
 WEBHOOK_URL           = os.environ.get("WINDROSE_WEBHOOK_URL", "").strip()
 WEBHOOK_DISCORD_URL   = os.environ.get("WINDROSE_DISCORD_WEBHOOK_URL", "").strip()
 WEBHOOK_EVENTS_RAW    = os.environ.get("WINDROSE_WEBHOOK_EVENTS",
-    "server.online,server.offline,player.join,player.leave").strip()
+    "server.online,server.offline,server.crashed,"
+    "player.join,player.leave,"
+    "backup.failed,backup.restore.failed,config.apply.failed").strip()
 WEBHOOK_TIMEOUT       = float(os.environ.get("WINDROSE_WEBHOOK_TIMEOUT", "5"))
 WEBHOOK_POLL_SECONDS  = float(os.environ.get("WINDROSE_WEBHOOK_POLL_SECONDS", "15"))
 WEBHOOK_EVENTS        = {e.strip() for e in WEBHOOK_EVENTS_RAW.split(",") if e.strip()}
+
+# Set by /api/server/{stop,restart} so EventDetector can distinguish an
+# operator-initiated stop (fires server.offline) from an unexpected exit
+# (fires server.crashed). Plain float to keep this lock-free; the worst
+# race is one missed crash-classification across two consecutive 15s polls.
+_LAST_OPERATOR_STOP_AT: float = 0.0
+_OPERATOR_STOP_GRACE_SECONDS: float = 30.0
 
 # --- Utility: resource quantity parsing -------------------------------------
 def parse_cpu_to_mcpu(q: str) -> int:
@@ -983,6 +992,7 @@ def trigger_auto_backup(reason: str) -> dict | None:
         print(f"[auto-backup] {msg}", file=sys.stderr, flush=True)
         with _auto_state_lock:
             _auto_state["lastResult"] = msg
+        fire_event("backup.failed", source="auto", reason=str(e), trigger=reason)
         return None
     bkp_dir = Path(bkp["path"])
     _mark_auto_backup(bkp_dir)
@@ -2016,13 +2026,17 @@ def handle_upload(body_stream, content_length: int, filename: str) -> dict:
 # gets a raw JSON body.
 
 _WEBHOOK_COLORS = {
-    "server.online":  0x2ecc71,   # green
-    "server.offline": 0xe74c3c,   # red
-    "player.join":    0x3498db,   # blue
-    "player.leave":   0x95a5a6,   # grey
-    "config.applied": 0xf1c40f,   # yellow
-    "backup.created": 0x9b59b6,   # purple
-    "backup.restored": 0x8e44ad,
+    "server.online":         0x2ecc71,   # green
+    "server.offline":        0xe74c3c,   # red
+    "server.crashed":        0xc0392b,   # darker red
+    "player.join":           0x3498db,   # blue
+    "player.leave":          0x95a5a6,   # grey
+    "config.applied":        0xf1c40f,   # yellow
+    "config.apply.failed":   0xc0392b,   # darker red
+    "backup.created":        0x9b59b6,   # purple
+    "backup.restored":       0x8e44ad,
+    "backup.failed":         0xc0392b,   # darker red
+    "backup.restore.failed": 0xc0392b,   # darker red
 }
 
 def redact_url(url: str) -> str:
@@ -2066,7 +2080,9 @@ def build_discord_payload(event: dict) -> dict:
         lines.append(f"**Invite:** `{event.get('inviteCode','?')}`")
         lines.append(f"**Region:** {event.get('backendRegion','?') or '?'}")
     elif name == "server.offline":
-        lines.append("Server went down (game process no longer visible).")
+        lines.append("Server stopped (operator-initiated within the grace window).")
+    elif name == "server.crashed":
+        lines.append("Server went down unexpectedly (no recent stop/restart from the admin UI).")
     elif name == "player.join":
         lines.append(f"**{event.get('name','?')}** joined")
         lines.append(f"Players: {event.get('playerCount',0)} / {event.get('maxPlayerCount','?')}")
@@ -2075,8 +2091,17 @@ def build_discord_payload(event: dict) -> dict:
         lines.append(f"Players: {event.get('playerCount',0)} / {event.get('maxPlayerCount','?')}")
     elif name == "config.applied":
         lines.append("Staged config applied — server restarting.")
+    elif name == "config.apply.failed":
+        lines.append(f"**Stage:** {event.get('stage','?')}")
+        lines.append(f"**Reason:** {event.get('reason','?')}")
     elif name in ("backup.created", "backup.restored"):
         lines.append(f"Backup: `{event.get('backupId','?')}`")
+    elif name == "backup.failed":
+        lines.append(f"**Source:** {event.get('source','?')}")
+        lines.append(f"**Reason:** {event.get('reason','?')}")
+    elif name == "backup.restore.failed":
+        lines.append(f"**Backup:** `{event.get('backupId','?')}`")
+        lines.append(f"**Reason:** {event.get('reason','?')}")
     footer = f"{event.get('serverName','Windrose')} · {event.get('timestamp','')}"
     return {
         "embeds": [{
@@ -2157,7 +2182,17 @@ class EventDetector(threading.Thread):
                 if self._prev_online is False and online:
                     fire_event("server.online", **common)
                 elif self._prev_online is True and not online:
-                    fire_event("server.offline", **common)
+                    # Distinguish operator-initiated stop from unexpected
+                    # exit: if /api/server/{stop,restart} fired within the
+                    # last _OPERATOR_STOP_GRACE_SECONDS, treat as a clean
+                    # offline; otherwise the game went away on its own and
+                    # we report a crash. Both events get the same payload
+                    # shape so subscribers can treat them interchangeably.
+                    elapsed = time.time() - _LAST_OPERATOR_STOP_AT
+                    if elapsed < _OPERATOR_STOP_GRACE_SECONDS:
+                        fire_event("server.offline", **common)
+                    else:
+                        fire_event("server.crashed", **common)
                 joined = set(players) - set(self._prev_players)
                 left = set(self._prev_players) - set(players)
                 for aid in joined:
@@ -2523,6 +2558,8 @@ class Handler(BaseHTTPRequestHandler):
         # auto-restart. On k8s/compose where systemctl isn't reachable,
         # fall through to the SIGTERM path (kubelet / compose restart
         # policies will typically bring the game back).
+        global _LAST_OPERATOR_STOP_AT
+        _LAST_OPERATOR_STOP_AT = time.time()
         if _systemctl_available():
             ok, msg = systemctl_dispatch("stop")
             if ok:
@@ -2646,6 +2683,7 @@ class Handler(BaseHTTPRequestHandler):
                     if resume_after_mod_apply:
                         set_maintenance_flag(False)
                         request_restart_later()
+                    fire_event("config.apply.failed", stage="stop-for-mods", reason=msg)
                     self._send(HTTPStatus.CONFLICT, "text/plain",
                                f"game did not stop before mod apply: {msg}; staged changes left pending\n".encode())
                     return
@@ -2656,6 +2694,7 @@ class Handler(BaseHTTPRequestHandler):
                     if resume_after_mod_apply:
                         set_maintenance_flag(False)
                         request_restart_later()
+                    fire_event("config.apply.failed", stage="apply-mods", reason=str(e))
                     self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"mod apply failed: {e}\n".encode())
                     return
         if have_server:
@@ -2707,6 +2746,8 @@ class Handler(BaseHTTPRequestHandler):
         restart-on-exit otherwise."""
         if not allow_destructive():
             self._forbidden(); return
+        global _LAST_OPERATOR_STOP_AT
+        _LAST_OPERATOR_STOP_AT = time.time()
         if _systemctl_available():
             ok, msg = systemctl_dispatch("restart")
             if ok:
@@ -2826,7 +2867,12 @@ class Handler(BaseHTTPRequestHandler):
                 pass  # treat as unpinned; don't fail just because body is junk
         if "pin=1" in (self.headers.get("X-Query-String", "") or ""):
             pin = True
-        bkp = create_backup(pin=pin)
+        try:
+            bkp = create_backup(pin=pin)
+        except Exception as e:  # noqa: BLE001 — surface to operator + webhook
+            fire_event("backup.failed", source="manual", reason=str(e), pinned=pin)
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode())
+            return
         fire_event("backup.created", backupId=bkp.get("id", ""))
         self._json(HTTPStatus.OK, bkp)
 
@@ -2889,8 +2935,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             restore_backup(bid)
         except FileNotFoundError:
+            fire_event("backup.restore.failed", backupId=bid, reason="no such backup")
             self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such backup\n"); return
         except Exception as e:
+            fire_event("backup.restore.failed", backupId=bid, reason=str(e))
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
         request_restart()
         fire_event("backup.restored", backupId=bid)
@@ -2930,8 +2978,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             bkp = import_backup_archive(self.rfile, length, filename)
         except ValueError as e:
+            fire_event("backup.failed", source="imported", reason=str(e), filename=filename)
             self._send(HTTPStatus.BAD_REQUEST, "text/plain", f"{e}\n".encode()); return
         except Exception as e:  # noqa: BLE001
+            fire_event("backup.failed", source="imported", reason=str(e), filename=filename)
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
         fire_event("backup.created", backupId=bkp["id"], source="imported")
         self._json(HTTPStatus.OK, bkp)
@@ -2977,8 +3027,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             restore_game_backup(ts)
         except FileNotFoundError:
+            fire_event("backup.restore.failed", backupId=f"game:{ts}", reason="no such game backup")
             self._send(HTTPStatus.NOT_FOUND, "text/plain", b"no such game backup\n"); return
         except Exception as e:
+            fire_event("backup.restore.failed", backupId=f"game:{ts}", reason=str(e))
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"{e}\n".encode()); return
         request_restart()
         fire_event("backup.restored", backupId=f"game:{ts}")
