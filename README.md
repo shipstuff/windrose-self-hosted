@@ -191,10 +191,10 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `FILES_WAIT_TIMEOUT_SECONDS` | `0` | 0 = wait forever for `WindowsServer/` to appear before launching. Only relevant when `WINDROSE_SERVER_SOURCE=files`. |
 | `PROTON_USE_XALIA` | `0` | Xalia crashes on headless Proton; leave off. |
 
-**Idle-CPU patch**
+**Legacy idle-CPU patch**
 | Env var | Default | Purpose |
 |---|---|---|
-| `WINDROSE_PATCH_IDLE_CPU` | `0` | `1` → entrypoint builds a `WindroseServer-Win64-Shipping.patched.exe` sibling of the Steam-managed original on every start (caching by source md5), and launches that instead. The original is never modified, so SteamCMD's app_update has nothing to revert. **Experimental, no warranty** — see Caveats and the script header. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
+| `WINDROSE_PATCH_IDLE_CPU` | `0` | Legacy workaround for older/pinned server builds that predate Windrose's official idle-CPU fix. Current SteamCMD builds should leave this `0`. `1` builds a `WindroseServer-Win64-Shipping.patched.exe` sibling of the Steam-managed original and launches that instead. The original is never modified, so SteamCMD's app_update has nothing to revert. **Experimental, no warranty** — see Caveats and the script header. Bare-Linux `install.sh` prompts for confirmation when flipping to `1`; set `WINDROSE_PATCH_ACK_RISK=1` to bypass for headless operators. |
 | `WINDROSE_PATCH_OVERRIDE_FILE` | `$R5_DIR/.idle-patch-override` | Runtime override written by the admin UI's Idle-CPU card. `disabled` forces OFF (patched sibling is removed on next restart, game launches original); `enabled` forces ON regardless of env. Absent = follow `WINDROSE_PATCH_IDLE_CPU`. |
 
 **Admin UI (`windrose-ui` sidecar)**
@@ -532,9 +532,9 @@ CI runs these plus JSON validation and YAML lint.
        --from-file=app.js=./ui/app.js
      ```
      Point nginx's `root` or `alias` at the mount and `proxy_pass` the `/api/*` location to the windrose Service.
-- **Unpatched idle CPU is ~2 cores** — a known upstream spin-loop bug in `boost::asio::detail::socket_select_interrupter::reset()`, unreachable from Engine.ini / launch args / Proton env (see `memory/windrose_idle_cpu_known_bug.md`). Optional binary patch at `scripts/patch-idle-cpu.py` injects a `Sleep(1)` into the hot loop; ~97% reduction on the builds measured so far. Opt in via `WINDROSE_PATCH_IDLE_CPU=1` (Helm: `patchIdleCpu: "1"`). The script auto-derives offsets from a unique byte signature so it tolerates Windrose rebuilds — it refuses cleanly if the signature moves. The UI's Idle-CPU card has a runtime override for rollback without redeploying. **Offered as-is with no warranty and no guarantees.** Operators run it against their own SteamCMD-pulled copy; this project does not distribute modified binaries. Applying may conflict with the Windrose EULA or Steam Subscriber Agreement — review the terms before enabling; full risk rests with you.
+- **Legacy idle-CPU patch.** Older Windrose dedicated-server builds had an upstream spin-loop bug in `boost::asio::detail::socket_select_interrupter::reset()` that burned ~2 CPU cores while idle (see `memory/windrose_idle_cpu_known_bug.md`). Windrose's April 30, 2026 server update includes an official CPU fix, so current SteamCMD installs should keep `WINDROSE_PATCH_IDLE_CPU=0` (Helm: `patchIdleCpu: "0"`). The optional binary patch remains only for operators running older/pinned server files that still exhibit the historical spin. It injects a `Sleep(1)` into the old hot loop and refuses cleanly if the signature is not present. **Offered as-is with no warranty and no guarantees.** Operators run it against their own SteamCMD-pulled copy; this project does not distribute modified binaries. Applying may conflict with the Windrose EULA or Steam Subscriber Agreement — review the terms before enabling; full risk rests with you.
 
-  Sizing floors (validated on DigitalOcean bare-Linux droplets 2026-04-18/19, unpatched):
+  Historical sizing floors (validated on DigitalOcean bare-Linux droplets 2026-04-18/19 before the official idle-CPU fix):
   - **1 vCPU / any RAM**: unplayable. Idle bug pegs the core, no headroom for the P2P handshake; client times out in `UePreloginVerified` and Coturn resets after ~180 s.
   - **2 vCPU / 2 GB**: unplayable for a different reason — a delayed ~500 MiB allocation at t≈9 min crashes page reclamation regardless of swap.
   - **2 vCPU / 4 GB, fresh world**: marginal. On slower shared vCPUs (typical DO / Hetzner / Linode small tiers) terrain generation saturates both cores during the first-connect handshake; Coturn times out at ~180 s and the client bounces to menu.

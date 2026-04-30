@@ -266,15 +266,11 @@ worldConfig:
   presetType: Medium
 
 protonUseXalia: "0"
-# Binary-patch the shipping EXE at boot to throttle the idle-CPU busy-
-# loop (boost::asio socket_select_interrupter::reset spinning under
-# Wine). When set to "1", the entrypoint runs `patch-idle-cpu.py`
-# against the game binary before launch. Drops idle CPU from ~200% to
-# ~5%. Safe to leave off for a conservative default — the patch is
-# tied to a specific build md5 and is a no-op on unknown builds, but
-# operators might still prefer to review the script (in
-# scripts/patch-idle-cpu.py) before enabling. See the same file for the
-# reverse-engineering rationale and rollback (--revert).
+# Legacy workaround for older/pinned server builds before Windrose's
+# official idle-CPU fix. Current SteamCMD installs should keep this "0".
+# When set to "1", the entrypoint runs `patch-idle-cpu.py` against the
+# game binary before launch. Read the disclaimer in the main README and
+# scripts/patch-idle-cpu.py before enabling.
 patchIdleCpu: "0"
 filesWaitTimeoutSeconds: "0"
 
@@ -286,9 +282,10 @@ resources:
       memory: 4Gi
     limits:
       memory: 16Gi
-      # Unpatched idle: ~2 cores (upstream spin bug). Mitigate with
-      # patchIdleCpu: "1" (preferred) or a cgroup cap below. Gameplay
-      # CPU scales ~125 mcpu per player (sublinear past the first);
+      # Current SteamCMD builds include Windrose's official idle-CPU fix.
+      # Older/pinned server builds may still need patchIdleCpu: "1" or a
+      # cgroup cap below. Gameplay CPU scales ~125 mcpu per player
+      # (sublinear past the first);
       # budget 300m for solo, 500m for 2-4, 1000m for 10. A CPU cap
       # is safe to layer on top of the patch as belt-and-braces.
       # cpu: 500m

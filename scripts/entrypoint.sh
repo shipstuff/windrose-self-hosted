@@ -319,15 +319,14 @@ restore_legacy_sentry_plugin() {
   fi
 }
 
-# Optional: maintain a PATCHED COPY of the shipping EXE alongside the
-# original, and launch that instead of the original. This throttles a
-# Boost.Asio drain-loop spin (see scripts/patch-idle-cpu.py for the
-# derivation) that otherwise burns ~2 CPU cores when no client is
-# connected. Sibling-file approach keeps Steam's manifest-managed
+# Optional legacy workaround for older/pinned server builds before
+# Windrose's official idle-CPU fix: maintain a PATCHED COPY of the
+# shipping EXE alongside the original, and launch that instead of the
+# original. The sibling-file approach keeps Steam's manifest-managed
 # original untouched — SteamCMD doesn't revert anything because there's
-# nothing to revert. On each boot we md5 the original and compare to
-# the source md5 recorded alongside the patched sibling; rebuild iff
-# the source changed (Windrose update) or the sibling is missing.
+# nothing to revert. On each boot we md5 the original and compare to the
+# source md5 recorded alongside the patched sibling; rebuild iff the
+# source changed (Windrose update) or the sibling is missing.
 #
 # Off by default. Enable via WINDROSE_PATCH_IDLE_CPU=1. UI override
 # via $WINDROSE_PATCH_OVERRIDE_FILE ("disabled" forces OFF, "enabled"
@@ -1001,11 +1000,9 @@ if [ ! -S "/tmp/.X11-unix/X${display_num}" ]; then
 fi
 
 # Extra launch args for the game binary. Default caps the engine tick to
-# 60 FPS — the patch (scripts/patch-idle-cpu.py) is the real fix for the
-# unpaced-main-loop spin; this cap is belt-and-braces for hosts that
-# don't run the patch. Matches the Helm chart default so compose /
-# plain-manifest / bare-Linux deployments all behave identically. Set
-# empty to uncap, or to "-FPS=30" for the older behavior.
+# 60 FPS. Matches the Helm chart default so compose / plain-manifest /
+# bare-Linux deployments all behave identically. Set empty to uncap, or
+# to "-FPS=30" for the older behavior.
 : "${SERVER_LAUNCH_ARGS:=-FPS=60}"
 read -r -a launch_args <<< "${SERVER_LAUNCH_ARGS}"
 

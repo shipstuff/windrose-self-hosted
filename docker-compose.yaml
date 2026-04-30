@@ -41,11 +41,9 @@ services:
       WINDROSE_LAUNCH_STRATEGY: ${WINDROSE_LAUNCH_STRATEGY:-shipping}
       FILES_WAIT_TIMEOUT_SECONDS: ${FILES_WAIT_TIMEOUT_SECONDS:-0}
       PROTON_USE_XALIA: ${PROTON_USE_XALIA:-0}
-      # Apply the idle-CPU throttle patch at boot. Off by default because
-      # the patch targets a specific Windrose build (md5-checked); leaving
-      # it off means new operators aren't surprised by a no-op after the
-      # game updates. Operators who want the 97% idle-CPU reduction right
-      # now on the shipping 0.10.0 build opt in by setting this to 1.
+      # Legacy idle-CPU workaround for older/pinned server builds before
+      # Windrose's official CPU fix. Current SteamCMD installs should keep
+      # this off.
       # See scripts/patch-idle-cpu.py for derivation and rollback.
       WINDROSE_PATCH_IDLE_CPU: ${WINDROSE_PATCH_IDLE_CPU:-0}
       DISPLAY: ":99"

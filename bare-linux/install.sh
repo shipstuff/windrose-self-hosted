@@ -88,11 +88,13 @@ if [ "${WINDROSE_PATCH_IDLE_CPU:-}" = "1" ]; then
   if [ "${_prev}" != "1" ] && [ "${WINDROSE_PATCH_ACK_RISK:-}" != "1" ]; then
     cat >&2 <<'EOF'
 
-[install] ⚠️  You are enabling the idle-CPU binary patch.
+[install] ⚠️  You are enabling the legacy idle-CPU binary patch.
 
-  This is an EXPERIMENTAL community workaround that modifies the Windrose
-  dedicated-server binary in place. It is provided AS IS, with NO warranty
-  of any kind:
+  Windrose's current SteamCMD server build includes an official CPU fix.
+  This EXPERIMENTAL community workaround is only for older/pinned server
+  builds that still show the historical idle spin. It modifies the
+  Windrose dedicated-server binary in place and is provided AS IS, with
+  NO warranty of any kind:
 
     * It may break at any time — especially after a Windrose game update.
     * It may conflict with the Windrose EULA or Steam Subscriber Agreement.
@@ -355,7 +357,8 @@ DIRECT_CONNECTION_PROXY_ADDRESS=${DIRECT_CONNECTION_PROXY_ADDRESS:-0.0.0.0}
 NET_SERVER_MAX_TICK_RATE=${NET_SERVER_MAX_TICK_RATE:-60}
 PROTON_USE_XALIA=${PROTON_USE_XALIA:-0}
 FILES_WAIT_TIMEOUT_SECONDS=${FILES_WAIT_TIMEOUT_SECONDS:-0}
-# Opt in to the idle-CPU binary patch (scripts/patch-idle-cpu.py).
+# Legacy idle-CPU binary patch (scripts/patch-idle-cpu.py).
+# Current SteamCMD installs should keep this 0.
 # "1" -> entrypoint patches the EXE on every start (idempotent).
 # The UI Idle-CPU card can flip this per-host without editing this file.
 WINDROSE_PATCH_IDLE_CPU=${WINDROSE_PATCH_IDLE_CPU:-0}

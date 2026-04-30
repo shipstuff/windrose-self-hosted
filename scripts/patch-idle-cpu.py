@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """
-Patch `WindroseServer-Win64-Shipping.exe` to throttle the Boost.Asio
-`socket_select_interrupter::reset()` drain loop that busy-spins under
-Wine/Proton and burns ~2 CPU cores on an idle server.
+Legacy patch for older/pinned `WindroseServer-Win64-Shipping.exe` builds
+that predate Windrose's official idle-CPU fix. It throttles the
+Boost.Asio `socket_select_interrupter::reset()` drain loop that
+busy-spins under Wine/Proton and burns ~2 CPU cores on an idle server.
+
+Current SteamCMD server builds should not need this patch.
 
 Inserts a ~43-byte trampoline that calls `KERNEL32!Sleep(1)` on the
 loop-continue tail; the loop exits via its normal branch as soon as
