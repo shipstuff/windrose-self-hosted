@@ -995,7 +995,18 @@ async function stageConfig(json) {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(json),
   });
-  log(`${res.ok ? "config staged" : "stage failed"}: ${await res.text()}`);
+  const text = await res.text();
+  log(`${res.ok ? "config staged" : "stage failed"}: ${text}`);
+  if (!res.ok) {
+    try {
+      const body = JSON.parse(text);
+      showConfigErrors(body.errors || [body.error || `HTTP ${res.status}`]);
+    } catch (e) {
+      showConfigErrors([text || `HTTP ${res.status}`]);
+    }
+    return;
+  }
+  hideConfigErrors();
   loadStatus(); loadConfig();
 }
 

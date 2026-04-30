@@ -1324,7 +1324,8 @@ def validate_server_description(doc: Any) -> list[str]:
     #   UseDirectConnection: bool
     #   DirectConnectionServerAddress: string (host or IP; "" allowed
     #     when UseDirectConnection is false)
-    #   DirectConnectionServerPort: int 1-65535
+    #   DirectConnectionServerPort: int 1-65535, or -1 when direct
+    #     connection is disabled (Windrose's stock sentinel)
     #   DirectConnectionProxyAddress: string (typically "0.0.0.0" when
     #     the operator isn't fronting with an explicit proxy)
     def optional(key, typ, extra=None):
@@ -1337,8 +1338,16 @@ def validate_server_description(doc: Any) -> list[str]:
             extra(key, p[key])
     optional("UseDirectConnection", bool)
     optional("DirectConnectionServerAddress", str, lambda k, v: check_str(k, v, None, 0, 255))
-    optional("DirectConnectionServerPort", int,
-             lambda k, v: errs.append(f"ServerDescription_Persistent.{k}: must be 1-65535") if not (1 <= v <= 65535) else None)
+    def check_direct_port(key, val):
+        if 1 <= val <= 65535:
+            return
+        if val == -1 and p.get("UseDirectConnection") is not True:
+            return
+        if p.get("UseDirectConnection") is True:
+            errs.append(f"ServerDescription_Persistent.{key}: must be 1-65535 when UseDirectConnection is true")
+        else:
+            errs.append(f"ServerDescription_Persistent.{key}: must be -1 or 1-65535")
+    optional("DirectConnectionServerPort", int, check_direct_port)
     optional("DirectConnectionProxyAddress", str, lambda k, v: check_str(k, v, None, 0, 255))
     # UseDirectConnection=true requires a non-empty server address —
     # an empty address under Direct IP mode is the classic silent-fail
