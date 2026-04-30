@@ -266,7 +266,6 @@ worldConfig:
   presetType: Medium
 
 protonUseXalia: "0"
-disableSentry: "1"
 # Binary-patch the shipping EXE at boot to throttle the idle-CPU busy-
 # loop (boost::asio socket_select_interrupter::reset spinning under
 # Wine). When set to "1", the entrypoint runs `patch-idle-cpu.py`

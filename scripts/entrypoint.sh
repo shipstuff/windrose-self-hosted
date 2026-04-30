@@ -223,6 +223,7 @@ install_via_steamcmd() {
     mv "${WINDROSE_SERVER_DIR}/R5/Saved" "${preserve_dir}/Saved"
   fi
   preserve_r5_state "${WINDROSE_SERVER_DIR}/R5" "${preserve_dir}"
+  restore_legacy_sentry_plugin
 
   mkdir -p "${WINDROSE_SERVER_DIR}"
   # SteamCMD's anonymous app_update is flaky on the first attempt
@@ -308,17 +309,13 @@ wait_for_files() {
   done
 }
 
-maybe_disable_sentry() {
-  : "${DISABLE_SENTRY:=1}"
+restore_legacy_sentry_plugin() {
   local sentry_dir="${WINDROSE_SERVER_DIR}/R5/Plugins/3rdParty/Sentry"
   local disabled_dir="${WINDROSE_SERVER_DIR}/R5/Plugins/3rdParty/Sentry.DISABLED"
-  if [ "${DISABLE_SENTRY}" != "1" ]; then
-    return 0
-  fi
-  if [ -d "${sentry_dir}" ]; then
-    echo "$(timestamp) INFO: Disabling Sentry plugin (Crashpad hard-aborts the process under Proton; set DISABLE_SENTRY=0 to keep it)"
-    rm -rf "${disabled_dir}"
-    mv "${sentry_dir}" "${disabled_dir}"
+  if [ ! -d "${sentry_dir}" ] && [ -d "${disabled_dir}" ]; then
+    echo "$(timestamp) INFO: Restoring legacy Sentry.DISABLED plugin before SteamCMD update"
+    rm -rf "${sentry_dir:?}"
+    mv "${disabled_dir}" "${sentry_dir}"
   fi
 }
 
@@ -902,7 +899,6 @@ fi
 migrate_saves_on_version_change
 ensure_world_layout
 reconcile_server_config
-maybe_disable_sentry
 maybe_patch_idle_cpu
 
 if [ -f "${WINDROSE_SERVER_DIR}/R5/.mods.staged.json" ]; then

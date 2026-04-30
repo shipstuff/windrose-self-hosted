@@ -278,7 +278,6 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 | `worldConfig.name` | `Default Windrose World` | |
 | `worldConfig.presetType` | `Medium` | `Easy` / `Medium` / `Hard` / `Custom`. |
 | `protonUseXalia` | `"0"` | Keep off; Xalia crashes on headless Proton. |
-| `disableSentry` | `"1"` | Keep on; Crashpad hard-aborts under Wine. |
 | `patchIdleCpu` | `"0"` | **Experimental.** `"1"` enables the idle-CPU binary patch at boot. See [main README § Caveats](../../README.md) for the disclaimer. |
 | `filesWaitTimeoutSeconds` | `"0"` | 0 = wait forever. |
 | `xvfb.enabled` | `true` | Keep on; the game container requires a display. |
