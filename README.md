@@ -190,7 +190,6 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `NET_SERVER_MAX_TICK_RATE` | `60` | Server-side tick rate (`stat srvfps`) — stamped into Engine.ini's `NetServerMaxTickRate` + `t.MaxFPS` on every boot. **This is the knob that moves the needle** — `SERVER_LAUNCH_ARGS=-FPS=N` alone doesn't change the net tick, only the render cap. Lower to `30` on constrained hosts (1-2 vCPU VPSes, older NAS) to halve per-tick CPU + replication bandwidth at the cost of visibly choppier movement. Raise to `120` on real hardware with LAN/low-latency clients. Uses shadow-stamp: hand-edits to Engine.ini for these two keys survive subsequent helm upgrades (we only overwrite when the on-disk value matches the one we last wrote). |
 | `FILES_WAIT_TIMEOUT_SECONDS` | `0` | 0 = wait forever for `WindowsServer/` to appear before launching. Only relevant when `WINDROSE_SERVER_SOURCE=files`. |
 | `PROTON_USE_XALIA` | `0` | Xalia crashes on headless Proton; leave off. |
-| `DISABLE_SENTRY` | `1` | Crashpad hard-aborts under Wine; keep Sentry disabled unless you're debugging. |
 
 **Idle-CPU patch**
 | Env var | Default | Purpose |
@@ -544,7 +543,6 @@ CI runs these plus JSON validation and YAML lint.
   - **≥3 vCPU / 4 GB**: comfortable. Real headroom above the idle bug.
 - **GE-Proton version matters.** We pin `10-34`. `10-32` hit WSA error 996 (gRPC `UNAVAILABLE`) on backend registration for this UE5 build. If you bump, test backend registration before the registry; see [GE-Proton releases](https://github.com/GloriousEggroll/proton-ge-custom/releases).
 - **World Island ID is backend-assigned.** When the server registers with Windrose's backend, the backend mints (or looks up) an island ID keyed off the server's `PersistentServerId`. Game syncs *down* from the backend — it does not discover an island ID *up* from local save files. Dropping a save onto disk doesn't make the server adopt it unless you can preserve the PSID that originally owned that island. See `memory/windrose_island_identity.md`.
-- **Sentry/Crashpad is disabled.** Under Proton it hard-aborts the process ~5 s after launch. `DISABLE_SENTRY=1` in the entrypoint renames the plugin to `Sentry.DISABLED`; set `DISABLE_SENTRY=0` only if you're actively debugging Sentry behavior.
 - **No US backend gateway.** The Windrose cloud runs auth/gRPC gateways only in KR (AWS ap-northeast-2), EU (AWS eu-central-1), and RU. Their Coturn relay has a US presence (`coturn-us.windrose.support`) but the gateway does not. US operators hit ~150 ms to KR or EU regardless.
 - **Windrose backend instability is a thing.** The game binary is brittle against gRPC hiccups: any `RST_STREAM` or `502 Bad Gateway` from a gateway region fatal-asserts the dedicated-server process (`GsStream is broken. Cannot reconnect to Cm`) → exit code 3 → kubelet restart → the same stuck state if that region is still flaking. If you see the game consistently failing against one region, evict it:
   ```bash
@@ -599,8 +597,7 @@ Bare-Linux is a planned fourth surface. When changing ports, env vars, image nam
 3. Save-version migration: if a new `<GameVersion>` folder exists under `R5/Saved/.../RocksDB/`, copy prior world dirs forward so existing saves load after a game patch.
 4. `ensure_world_layout` — patch `WorldDescription.json` for the known world (`env` mode only).
 5. `reconcile_server_config` — patch `ServerDescription.json` from env (`env` mode), render from ConfigMap+Secret (`managed` mode), or leave untouched (`mutable` mode).
-6. `maybe_disable_sentry` — rename the Sentry plugin directory to `Sentry.DISABLED` so Crashpad doesn't hard-abort the process under Proton.
-7. `exec proton waitforexitandrun "${EXE}" -log` — Proton becomes PID 1; Xvfb is in the sibling sidecar.
+6. `exec proton waitforexitandrun "${EXE}" -log` — Proton becomes PID 1; Xvfb is in the sibling sidecar.
 
 Important specifics:
 

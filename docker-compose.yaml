@@ -41,7 +41,6 @@ services:
       WINDROSE_LAUNCH_STRATEGY: ${WINDROSE_LAUNCH_STRATEGY:-shipping}
       FILES_WAIT_TIMEOUT_SECONDS: ${FILES_WAIT_TIMEOUT_SECONDS:-0}
       PROTON_USE_XALIA: ${PROTON_USE_XALIA:-0}
-      DISABLE_SENTRY: ${DISABLE_SENTRY:-1}
       # Apply the idle-CPU throttle patch at boot. Off by default because
       # the patch targets a specific Windrose build (md5-checked); leaving
       # it off means new operators aren't surprised by a no-op after the
