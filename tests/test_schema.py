@@ -10,7 +10,8 @@ Scope:
   3. UseDirectConnection=true without a server address is rejected
      (the footgun the release notes warn about — silent bounce to menu).
   4. Wrong types are rejected with shape errors.
-  5. Out-of-range port (0 or >65535) is rejected.
+  5. The stock -1 disabled sentinel is allowed only when Direct IP is off.
+  6. Out-of-range port (0 or >65535) is rejected.
 """
 import sys
 from pathlib import Path
@@ -86,6 +87,29 @@ def test_direct_ip_disabled_allows_empty_address():
     assert errs == [], f"Direct IP off should allow empty address: {errs}"
 
 
+def test_direct_ip_disabled_allows_minus_one_port_sentinel():
+    doc = _base_valid_doc()
+    doc["ServerDescription_Persistent"].update({
+        "UseDirectConnection": False,
+        "DirectConnectionServerAddress": "",
+        "DirectConnectionServerPort": -1,
+        "DirectConnectionProxyAddress": "0.0.0.0",
+    })
+    errs = server.validate_server_description(doc)
+    assert errs == [], f"Direct IP off should allow -1 port sentinel: {errs}"
+
+
+def test_direct_ip_enabled_rejects_minus_one_port_sentinel():
+    doc = _base_valid_doc()
+    doc["ServerDescription_Persistent"].update({
+        "UseDirectConnection": True,
+        "DirectConnectionServerAddress": "1.2.3.4",
+        "DirectConnectionServerPort": -1,
+    })
+    errs = server.validate_server_description(doc)
+    assert any("DirectConnectionServerPort" in e for e in errs), errs
+
+
 def test_wrong_types_rejected():
     doc = _base_valid_doc()
     doc["ServerDescription_Persistent"]["UseDirectConnection"] = "yes"  # should be bool
@@ -94,7 +118,7 @@ def test_wrong_types_rejected():
 
 
 def test_port_out_of_range_rejected():
-    for bad_port in (0, 70000, -1):
+    for bad_port in (0, 70000):
         doc = _base_valid_doc()
         doc["ServerDescription_Persistent"].update({
             "UseDirectConnection": True,
@@ -111,6 +135,8 @@ if __name__ == "__main__":
     _run("Direct IP enabled + address — valid",       test_direct_ip_enabled_with_address_validates)
     _run("Direct IP enabled + no address — rejected", test_direct_ip_enabled_without_address_rejected)
     _run("Direct IP disabled + empty address OK",     test_direct_ip_disabled_allows_empty_address)
+    _run("Direct IP disabled + -1 port OK",           test_direct_ip_disabled_allows_minus_one_port_sentinel)
+    _run("Direct IP enabled + -1 port rejected",      test_direct_ip_enabled_rejects_minus_one_port_sentinel)
     _run("wrong types rejected",                      test_wrong_types_rejected)
     _run("port out of range rejected",                test_port_out_of_range_rejected)
     print("\nall schema validation tests passed")
