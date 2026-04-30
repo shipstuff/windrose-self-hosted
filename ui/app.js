@@ -1302,9 +1302,11 @@ backupImportBtn.addEventListener("click", async () => {
 });
 
 const IDLE_PATCH_DISCLAIMER =
-  "You are enabling the EXPERIMENTAL idle-CPU binary patch.\n\n" +
+  "You are enabling the legacy EXPERIMENTAL idle-CPU binary patch.\n\n" +
+  "Current SteamCMD server builds include Windrose's official CPU fix. " +
+  "Only use this for older/pinned builds that still show the historical idle spin.\n\n" +
   "It modifies the Windrose dedicated-server binary in place. NO warranty — " +
-  "it may break at any time (especially after a Windrose update), may conflict " +
+  "it may break at any time, may conflict " +
   "with the Windrose EULA or Steam Subscriber Agreement, may corrupt saves, " +
   "and the authors do not distribute or authorize redistributing modified " +
   "binaries. Full risk rests with you.\n\n" +

@@ -7,13 +7,15 @@ anywhere the [`Dockerfile`](../Dockerfile) deps are available.
 
 ## Sizing
 
-An upstream idle-CPU bug in the dedicated server eats ~1.82 cores
-before any player is connected (UE5 task-worker busy-spin, tracked on
-the [community thread](https://steamcommunity.com/app/3041230/discussions/0/807974232125564069/)).
-The community binary patch at `scripts/patch-idle-cpu.py` (opt in via
-`WINDROSE_PATCH_IDLE_CPU=1` in `/etc/windrose/windrose.env`) drops that
-to ~5% — if you apply it, a 1 vCPU host becomes viable. Without the
-patch the box needs real headroom above the idle floor:
+Windrose's April 30, 2026 dedicated-server update includes an official
+idle-CPU fix. Current SteamCMD installs should leave
+`WINDROSE_PATCH_IDLE_CPU=0`.
+
+The sizing table below is historical, from older server builds where an
+upstream idle-CPU bug ate ~1.82 cores before any player connected. The
+community binary patch at `scripts/patch-idle-cpu.py` remains available
+for older/pinned server files that still show that behavior, but it is
+no longer the default recommendation for current SteamCMD installs.
 
 | Box                | Verdict                                                                 |
 | ------------------ | ----------------------------------------------------------------------- |

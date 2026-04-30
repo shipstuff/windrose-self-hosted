@@ -278,7 +278,7 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 | `worldConfig.name` | `Default Windrose World` | |
 | `worldConfig.presetType` | `Medium` | `Easy` / `Medium` / `Hard` / `Custom`. |
 | `protonUseXalia` | `"0"` | Keep off; Xalia crashes on headless Proton. |
-| `patchIdleCpu` | `"0"` | **Experimental.** `"1"` enables the idle-CPU binary patch at boot. See [main README § Caveats](../../README.md) for the disclaimer. |
+| `patchIdleCpu` | `"0"` | Legacy workaround for older/pinned server builds before Windrose's official idle-CPU fix. Current SteamCMD installs should keep `"0"`. `"1"` enables the experimental binary patch at boot; see [main README § Caveats](../../README.md). |
 | `filesWaitTimeoutSeconds` | `"0"` | 0 = wait forever. |
 | `xvfb.enabled` | `true` | Keep on; the game container requires a display. |
 | `xvfb.display` | `99` | Canary releases should use a different number (:98, :97…) to avoid hostNetwork collisions. |
