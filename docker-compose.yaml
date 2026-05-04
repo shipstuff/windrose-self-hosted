@@ -1,6 +1,6 @@
 services:
   windrose:
-    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.2.1}
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.3.0}
     build:
       context: .
       dockerfile: Dockerfile
@@ -54,7 +54,7 @@ services:
       - xvfb
 
   xvfb:
-    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.2.1}
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.3.0}
     restart: unless-stopped
     # Dedicated X display server. Lives in its own container so its lifecycle
     # and signal space can't interfere with Proton's (a backgrounded Xvfb in
@@ -66,7 +66,7 @@ services:
   windrose-ui:
     # Same image as the game container. Drops the old separate ui image;
     # the Python admin console is baked at /opt/windrose-ui/server.py.
-    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.2.1}
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.3.0}
     restart: unless-stopped
     # Share the game service's PID namespace so the UI's /api/server/restart
     # can find the Proton/game process via /proc and os.kill() it. Without
