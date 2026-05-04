@@ -225,7 +225,7 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 |---|---|---|
 | `WINDROSE_WEBHOOK_URL` | `` | Generic JSON `POST` target. |
 | `WINDROSE_DISCORD_WEBHOOK_URL` | `` | Discord embed target. |
-| `WINDROSE_WEBHOOK_EVENTS` | `server.online,server.offline,player.join,player.leave` | Comma-separated subset. Additional events: `backup.created`, `backup.restored`, `config.applied`. |
+| `WINDROSE_WEBHOOK_EVENTS` | `server.online,server.offline,server.crashed,player.join,player.leave,backup.failed,backup.restore.failed,config.apply.failed` | Comma-separated subset. Additional opt-in success events: `backup.created`, `backup.restored`, `config.applied`. |
 | `WINDROSE_WEBHOOK_POLL_SECONDS` | `15` | Poll cadence for the event detector thread. |
 | `WINDROSE_WEBHOOK_TIMEOUT` | `5` | HTTP POST timeout (seconds). |
 
@@ -467,15 +467,19 @@ The admin console's UI container runs a small event detector in a background thr
 
 Event types:
 
-| Event             | Fires when                                                         |
-| ----------------- | ------------------------------------------------------------------ |
-| `server.online`   | The game process appears (post-restart or first boot).             |
-| `server.offline`  | The game process goes away (crash, `stop`, pod eviction).          |
-| `player.join`     | A new `AccountId` appears in the connected-players snapshot.       |
-| `player.leave`    | An `AccountId` drops out of the connected-players snapshot.        |
-| `backup.created`  | The admin console's **Create backup now**, `POST /api/backups`, or an auto-backup from the scheduler (payload includes `source: "auto"` + `reason: "idle"` or `"floor"`). |
-| `backup.restored` | A backup is restored via `POST /api/backups/{id}/restore` or a game auto-backup is merged via `POST /api/game-backups/{ts}/restore`. |
-| `config.applied`  | Config changes are applied via **Apply + restart**.                |
+| Event                    | Fires when                                                         |
+| ------------------------ | ------------------------------------------------------------------ |
+| `server.online`          | The game process appears (post-restart or first boot).             |
+| `server.offline`         | The game process goes away within ~30 s of an operator-initiated `/api/server/stop` or `/api/server/restart` (clean shutdown). |
+| `server.crashed`         | The game process goes away with no recent operator stop/restart — i.e. an unexpected exit, OOM kill, pod eviction, etc. |
+| `player.join`            | A new `AccountId` appears in the connected-players snapshot.       |
+| `player.leave`           | An `AccountId` drops out of the connected-players snapshot.        |
+| `backup.created`         | The admin console's **Create backup now**, `POST /api/backups`, `POST /api/backups/upload`, or an auto-backup from the scheduler (payload includes `source: "auto"` + `reason: "idle"` or `"floor"`). |
+| `backup.failed`          | An auto, manual, or imported backup raised. Payload includes `source` (`auto` / `manual` / `imported`) and `reason`. |
+| `backup.restored`        | A backup is restored via `POST /api/backups/{id}/restore` or a game auto-backup is merged via `POST /api/game-backups/{ts}/restore`. |
+| `backup.restore.failed`  | A restore raised. Payload includes `backupId` and `reason`.        |
+| `config.applied`         | Config changes are applied via **Apply + restart**.                |
+| `config.apply.failed`    | Apply raised partway through (mod stop or mod apply). Payload includes `stage` and `reason`. |
 
 Restrict the fired set with `WINDROSE_WEBHOOK_EVENTS` (comma-separated). Empty URLs disable delivery entirely — leave both URLs unset to suppress webhooks even if the event list is populated.
 
