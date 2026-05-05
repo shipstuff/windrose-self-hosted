@@ -162,6 +162,53 @@ ui:
 `urlSecret` / `discordUrlSecret` take precedence over `url` / `discordUrl`
 when both are set.
 
+## Prometheus Metrics + Grafana Dashboard
+
+The chart can add an opt-in `windrose-metrics` sidecar that serves
+Prometheus text metrics from the same PVC and shared PID namespace as the
+admin UI. This keeps monitoring code out of the admin surface while still
+letting the exporter reuse the same stdlib filesystem/process parsers.
+
+```yaml
+metrics:
+  enabled: true
+  # Plain Prometheus annotation discovery:
+  serviceAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "9464"
+    prometheus.io/job: windrose-canary
+  # Prometheus Operator:
+  serviceMonitor:
+    enabled: false
+    # labels:
+    #   release: kube-prometheus-stack
+  grafanaDashboard:
+    enabled: true
+    # namespace: monitoring
+```
+
+Use `metrics.serviceAnnotations` for plain Prometheus annotation
+discovery, or set `metrics.serviceMonitor.enabled` for Prometheus
+Operator. Set `metrics.serviceMonitor.labels` if your Prometheus operator
+only selects monitors with a specific release label. The dashboard is
+packaged as a ConfigMap using `metrics.grafanaDashboard.labels`; set
+`metrics.grafanaDashboard.namespace` for Grafana sidecars that only watch
+their own namespace.
+
+The packaged dashboard includes `Server job` and `Target instance`
+variables populated from Prometheus labels on
+`windrose_exporter_scrape_success`. Grafana does not discover Windrose
+servers directly; if Prometheus only scrapes canary, canary is the only
+dashboard option. For multi-server operators, give each Windrose release a
+unique Prometheus job label when using annotation scraping, or rely on your
+Prometheus/ServiceMonitor relabeling to provide readable `job` and
+`instance` labels.
+
+For simpler non-operator installs, `metrics.uiRouteEnabled: true` exposes
+the same scrape payload at the admin server's `/metrics` route. Kubernetes
+deployments should prefer the sidecar.
+
 ## Evict A Flaky Backend Region
 
 Windrose's gRPC gateways in KR / EU / RU occasionally hit 502s and
@@ -259,6 +306,24 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 | `ingress.annotations` | nginx tuning for 8 GiB upload cap, 1h upstream timeout, streaming bodies | Sized for the UI upload + saves-download endpoints. |
 | `ingress.tls` | `[]` | Standard k8s TLS block. |
 
+### Metrics
+
+| Value | Default | Purpose |
+|---|---|---|
+| `metrics.enabled` | `false` | Add a dedicated `windrose-metrics` sidecar and service port. |
+| `metrics.port` | `9464` | Port exposed by the metrics sidecar and service. Must differ from `service.port` when `hostNetwork: true`. |
+| `metrics.serviceAnnotations` | `{}` | Extra Service annotations, useful for plain Prometheus `prometheus.io/*` annotation scraping. |
+| `metrics.uiRouteEnabled` | `false` | Also expose `/metrics` from the admin UI process. Useful for small/simple installs; the sidecar is preferred on k8s. |
+| `metrics.serviceMonitor.enabled` | `false` | Render a Prometheus Operator `ServiceMonitor` for the metrics service port. |
+| `metrics.serviceMonitor.interval` | `30s` | Prometheus scrape interval. |
+| `metrics.serviceMonitor.scrapeTimeout` | `10s` | Prometheus scrape timeout. |
+| `metrics.serviceMonitor.labels` | `{}` | Extra labels for Prometheus selector compatibility. |
+| `metrics.serviceMonitor.annotations` | `{}` | Extra annotations on the ServiceMonitor. |
+| `metrics.grafanaDashboard.enabled` | `false` | Render the packaged Windrose Grafana dashboard ConfigMap. |
+| `metrics.grafanaDashboard.namespace` | `""` | Namespace for the dashboard ConfigMap. Empty means the Windrose release namespace. |
+| `metrics.grafanaDashboard.labels` | `grafana_dashboard: "1"` | Dashboard ConfigMap labels for Grafana sidecar discovery. |
+| `metrics.grafanaDashboard.annotations` | `{}` | Extra annotations on the dashboard ConfigMap. |
+
 ### Game runtime
 
 | Value | Default | Purpose |
@@ -306,6 +371,7 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 | `resources.game.limits.cpu` | *(unset)* | Leave unset to let the patch pace the idle loop; set a cap (e.g. `500m`) as belt-and-braces. |
 | `resources.xvfb.{requests,limits}` | `cpu: 50m`/`memory: 32Mi` → `memory: 256Mi` | Xvfb is tiny. |
 | `resources.ui.{requests,limits}` | `cpu: 10m`/`memory: 32Mi` → `memory: 256Mi` | 256Mi covers `/api/idle-cpu-patch` scanning an unknown-MD5 binary; steady state is ~20 MB. |
+| `resources.metrics.{requests,limits}` | `cpu: 10m`/`memory: 32Mi` → `memory: 128Mi` | Prometheus exporter sidecar. |
 
 ### Security
 

@@ -1,3 +1,6 @@
+{{- if and .Values.hostNetwork .Values.metrics.enabled (eq (toString .Values.metrics.port) (toString .Values.service.port)) -}}
+{{- fail "metrics.port must differ from service.port when hostNetwork=true and metrics.enabled=true" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -216,6 +219,8 @@ spec:
               value: {{ .Values.ui.enableAdminWithoutPassword | quote }}
             - name: UI_SERVE_STATIC
               value: {{ .Values.ui.serveStatic | quote }}
+            - name: UI_ENABLE_METRICS_ROUTE
+              value: {{ .Values.metrics.uiRouteEnabled | quote }}
             {{- with .Values.ui.webhooks }}
             - name: WINDROSE_WEBHOOK_EVENTS
               value: {{ .events | quote }}
@@ -261,6 +266,33 @@ spec:
             - name: data
               mountPath: /home/steam
               subPath: {{ .Values.persistence.subPath | quote }}
+        {{- if .Values.metrics.enabled }}
+        - name: windrose-metrics
+          image: "{{ .Values.uiImage.repository | default .Values.image.repository }}:{{ .Values.uiImage.tag | default .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.uiImage.pullPolicy | default .Values.image.pullPolicy }}
+          command: ["python3", "/opt/windrose-ui/metrics.py"]
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | indent 12 }}
+          env:
+            - name: METRICS_BIND
+              value: "0.0.0.0"
+            - name: METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
+            - name: WINDROSE_GAME_CPU_LIMIT
+              value: {{ .Values.resources.game.limits.cpu | default "" | quote }}
+            - name: WINDROSE_GAME_MEM_LIMIT
+              value: {{ .Values.resources.game.limits.memory | default "" | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          resources:
+{{ toYaml .Values.resources.metrics | indent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /home/steam
+              subPath: {{ .Values.persistence.subPath | quote }}
+        {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:

@@ -1,8 +1,9 @@
 # Bare Linux Install
 
 Run Windrose directly on a spare Linux box (Ubuntu 22.04+ / Debian 12+) as
-three systemd system services: game + Xvfb + admin UI. Validated on an
-Ubuntu 24.04 DigitalOcean droplet with 2 cores / 4 GiB RAM; should run
+three systemd system services by default: game + Xvfb + admin UI. A fourth
+Prometheus metrics exporter service is available as an opt-in. Validated on
+an Ubuntu 24.04 DigitalOcean droplet with 2 cores / 4 GiB RAM; should run
 anywhere the [`Dockerfile`](../Dockerfile) deps are available.
 
 ## Sizing
@@ -67,6 +68,9 @@ See § What The Install Includes for the full picture.
   - `windrose-xvfb.service` — virtual display on `:99`
   - `windrose-game.service` — the game under GE-Proton
   - `windrose-ui.service`   — the Python admin console (stdlib, no deps)
+- **Optional metrics unit**:
+  - `windrose-metrics.service` — Prometheus exporter on `127.0.0.1:9464`
+    when `WINDROSE_METRICS_ENABLED=true`
 - **Files under `/opt/windrose/`** (the installed code) and
   **`/home/steam/windrose/`** (the PVC-equivalent: game binaries,
   saves, backups). `/etc/windrose/windrose.env` holds all runtime knobs,
@@ -98,6 +102,33 @@ sudo journalctl -fu windrose-game
 sudo journalctl -fu windrose-ui
 ```
 
+## Prometheus Metrics
+
+Enable the standalone metrics exporter at install time:
+
+```bash
+sudo WINDROSE_METRICS_ENABLED=true ./bare-linux/install.sh
+curl -s http://127.0.0.1:9464/metrics
+```
+
+The installer writes `windrose-metrics.service` on every run, but only
+enables and starts it when `WINDROSE_METRICS_ENABLED=true`. Re-run with
+`WINDROSE_METRICS_ENABLED=false` to disable and stop the service.
+
+Defaults are loopback-only:
+
+```env
+WINDROSE_METRICS_ENABLED=false
+METRICS_BIND=127.0.0.1
+METRICS_PORT=9464
+```
+
+For a Prometheus running on the same host, scrape `127.0.0.1:9464`. For a
+remote Prometheus, either use an SSH tunnel/reverse proxy or set
+`METRICS_BIND=0.0.0.0` and firewall the port. The metrics endpoint has no
+auth; it does not expose invite codes or player identities, but it does
+expose operational state.
+
 ## Overrides
 
 All env vars are read from `/etc/windrose/windrose.env`. The installer
@@ -119,6 +150,10 @@ Or just edit the env file and `systemctl restart windrose-game` after.
 | `UI_PORT` | `28080` | UI listen port |
 | `UI_PASSWORD` | empty | HTTP basic-auth password. Strongly recommended for any publicly-reachable host. |
 | `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` | `false` | explicit opt-in for destructive routes when no password is set — LAN-only |
+| `UI_ENABLE_METRICS_ROUTE` | `false` | expose `/metrics` from `windrose-ui` instead of, or in addition to, the standalone metrics service |
+| `WINDROSE_METRICS_ENABLED` | `false` | enable/start `windrose-metrics.service` |
+| `METRICS_BIND` | `127.0.0.1` | metrics exporter listen iface |
+| `METRICS_PORT` | `9464` | metrics exporter listen port |
 | `SERVER_NAME` | `Windrose Bare-Linux` | informational |
 | `MAX_PLAYER_COUNT` | `4` | 4 is the vendor guide; up to 10 with more RAM |
 | `WORLD_NAME` | `Default Windrose World` | display name |
@@ -246,11 +281,12 @@ the game's RSS spikes on world load + backend handshake.
 ```
 /opt/windrose/scripts/entrypoint.sh        # game launcher
 /opt/windrose/server.py                    # admin console
+/opt/windrose/metrics.py                   # Prometheus exporter
 /opt/windrose/ui/{index.html,app.js,app.css}
 /etc/windrose/windrose.env                 # runtime env (root-rw, group-r for steam)
 /home/steam/windrose/                      # game data (WindowsServer/, saves, backups)
 /home/steam/steamcmd/                      # SteamCMD + GE-Proton compat data
-/etc/systemd/system/windrose-{xvfb,game,ui}.service
+/etc/systemd/system/windrose-{xvfb,game,ui,metrics}.service
 ```
 
 The admin console writes backups into `/home/steam/backups/<utc>/`
@@ -259,8 +295,8 @@ The admin console writes backups into `/home/steam/backups/<utc>/`
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now windrose-game windrose-ui windrose-xvfb
-sudo rm /etc/systemd/system/windrose-{game,ui,xvfb}.service
+sudo systemctl disable --now windrose-game windrose-ui windrose-xvfb windrose-metrics
+sudo rm /etc/systemd/system/windrose-{game,ui,xvfb,metrics}.service
 sudo systemctl daemon-reload
 # Data under /home/steam/ stays — delete manually if desired:
 # sudo userdel -r steam

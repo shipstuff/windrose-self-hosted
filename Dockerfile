@@ -70,9 +70,10 @@ COPY --chmod=755 scripts/reconcile-engine-ini.sh /usr/local/bin/reconcile-engine
 # the same image as the game binary; the UI sidecar runs via a command
 # override at /opt/windrose-ui/server.py. Backend lives at the repo
 # root (server.py); frontend bundle is the sibling ui/ tree.
-COPY --chown=10000:10000 server.py    /opt/windrose-ui/server.py
-COPY --chown=10000:10000 ui/          /opt/windrose-ui/ui/
-RUN chmod 755 /opt/windrose-ui/server.py
+COPY --chown=10000:10000 server.py     /opt/windrose-ui/server.py
+COPY --chown=10000:10000 metrics.py    /opt/windrose-ui/metrics.py
+COPY --chown=10000:10000 ui/           /opt/windrose-ui/ui/
+RUN chmod 755 /opt/windrose-ui/server.py /opt/windrose-ui/metrics.py
 
 USER steam
 

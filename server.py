@@ -8,6 +8,7 @@ and serves a single HTML page.
 Routing:
     GET  /                    index.html
     GET  /healthz             (always open, no auth)
+    GET  /metrics             Prometheus metrics (only with UI_ENABLE_METRICS_ROUTE=true)
     GET  /api/status          full status JSON (status of game, players, resources)
     GET  /api/invite          plain-text invite code
     POST /api/upload          stream tarball to PVC, preserve identity+saves
@@ -86,6 +87,7 @@ UI_ENABLE_ADMIN_WITHOUT_PASSWORD  = os.environ.get("UI_ENABLE_ADMIN_WITHOUT_PASS
 # pod "/api/*-only" so an nginx in front (ingress or sidecar) can own
 # the static assets (and possibly auth) and reverse-proxy /api/* here.
 UI_SERVE_STATIC       = os.environ.get("UI_SERVE_STATIC", "true").lower() not in ("0", "false", "no")
+UI_ENABLE_METRICS_ROUTE = os.environ.get("UI_ENABLE_METRICS_ROUTE", "false").lower() in ("1", "true", "yes")
 BACKUP_RETAIN         = int(os.environ.get("WINDROSE_BACKUP_RETAIN", "10"))
 BACKUP_RETAIN_DAYS    = float(os.environ.get("WINDROSE_BACKUP_RETAIN_DAYS", "7"))
 # Auto-backup scheduler defaults. Zero on either disables that trigger.
@@ -2265,6 +2267,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str):
         path = urllib.parse.urlparse(self.path).path
+        if method == "GET" and path == "/metrics":
+            if UI_ENABLE_METRICS_ROUTE:
+                self._metrics()
+            else:
+                self._send(HTTPStatus.NOT_FOUND, "text/plain", b"not found\n")
+            return
         self._authed = check_basic_auth(self.headers.get("Authorization", ""))
         if path not in self.PUBLIC_PATHS and not self._authed:
             self.send_response(HTTPStatus.UNAUTHORIZED)
@@ -2358,6 +2366,15 @@ class Handler(BaseHTTPRequestHandler):
     # --- handlers -----------------------------------------------------------
     def _healthz(self):
         self._send(HTTPStatus.OK, "text/plain", b"ok\n")
+
+    def _metrics(self):
+        try:
+            import metrics
+        except Exception as e:  # noqa: BLE001 - surface import failure to scraper.
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, "text/plain", f"metrics unavailable: {e}\n".encode())
+            return
+        self._send(HTTPStatus.OK, "text/plain; version=0.0.4; charset=utf-8",
+                   metrics.render_metrics().encode("utf-8"))
 
     def _index(self):
         self._static("/index.html")

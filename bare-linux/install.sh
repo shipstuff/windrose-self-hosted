@@ -1,6 +1,7 @@
 #!/bin/bash
-# Install the Windrose dedicated server as three systemd services
-# (game + Xvfb + admin UI) on a bare Linux box. Tested on Ubuntu
+# Install the Windrose dedicated server as three systemd services by default
+# (game + Xvfb + admin UI) on a bare Linux box, with an optional metrics
+# exporter service. Tested on Ubuntu
 # 24.04; should work on Debian 12+ / Ubuntu 22.04+ with no changes.
 #
 # Run from the repo root (or anywhere as long as the paths resolve):
@@ -9,12 +10,16 @@
 # Overrides:
 #   WINDROSE_USER                user that owns the install (default: steam)
 #   WINDROSE_INSTALL_DIR         where scripts/* land       (default: /opt/windrose)
-#   UI_BIND                      UI listen interface        (default: 0.0.0.0)
+#   UI_BIND                      UI listen interface        (default: 127.0.0.1)
 #   UI_PORT                      UI listen port             (default: 28080)
 #   UI_PASSWORD                  HTTP basic-auth password   (default: empty)
 #   UI_ENABLE_ADMIN_WITHOUT_PASSWORD
 #                                 explicit opt-in for destructive routes when
 #                                 UI_PASSWORD is empty      (default: false)
+#   WINDROSE_METRICS_ENABLED     install/start Prometheus exporter service
+#                                                            (default: false)
+#   METRICS_BIND                 metrics listen interface   (default: 127.0.0.1)
+#   METRICS_PORT                 metrics listen port        (default: 9464)
 #   WINDROSE_PATCH_IDLE_CPU       opt in to the idle-CPU binary patch
 #                                 (default: 0; flip to "1" to apply on boot)
 #   SERVER_NAME, MAX_PLAYER_COUNT, WORLD_NAME, WORLD_PRESET_TYPE,
@@ -23,8 +28,8 @@
 #   through to the entrypoint's default.
 #
 # Uninstall:
-#   sudo systemctl disable --now windrose-game windrose-ui windrose-xvfb
-#   sudo rm /etc/systemd/system/windrose-{game,ui,xvfb}.service
+#   sudo systemctl disable --now windrose-game windrose-ui windrose-xvfb windrose-metrics
+#   sudo rm /etc/systemd/system/windrose-{game,ui,xvfb,metrics}.service
 #   sudo systemctl daemon-reload
 #   (data under /home/steam/ stays — delete manually if desired)
 
@@ -67,6 +72,17 @@ if [ "${UI_BIND:-127.0.0.1}" = "0.0.0.0" ] && [ -z "${UI_PASSWORD:-}" ] && [ "${
   printf '          hit it. Set UI_PASSWORD=... or keep UI_BIND=127.0.0.1\n'
   printf '          and reverse-proxy via nginx/caddy with auth in front.\033[0m\n' >&2
 fi
+
+case "${WINDROSE_METRICS_ENABLED:-false}" in
+  1|true|TRUE|yes|YES)
+    if [ "${METRICS_BIND:-127.0.0.1}" = "0.0.0.0" ]; then
+      printf '\033[33m[install] WARN: METRICS_BIND=0.0.0.0 exposes unauthenticated\n'
+      printf '          Prometheus metrics. They do not include invite codes or\n'
+      printf '          player identities, but they do expose operational state.\n'
+      printf '          Prefer loopback + Prometheus on-host scrape or firewall it.\033[0m\n' >&2
+    fi
+    ;;
+esac
 
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '\033[33m[install] WARN: %s\033[0m\n' "$*" >&2; }
@@ -197,6 +213,8 @@ install -m 0644 "${SCRIPTS_SRC}/WorldDescription_example.json" \
 install -d -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" "${WINDROSE_INSTALL_DIR}/ui"
 install -m 0755 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
   "${REPO_ROOT}/server.py" "${WINDROSE_INSTALL_DIR}/server.py"
+install -m 0755 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
+  "${REPO_ROOT}/metrics.py" "${WINDROSE_INSTALL_DIR}/metrics.py"
 for f in index.html app.js app.css; do
   install -m 0644 -o "${WINDROSE_USER}" -g "${WINDROSE_GROUP}" \
     "${UI_SRC}/${f}" "${WINDROSE_INSTALL_DIR}/ui/${f}"
@@ -268,6 +286,8 @@ _MANAGED_KEYS=" \
   FILES_WAIT_TIMEOUT_SECONDS WINDROSE_PATCH_IDLE_CPU \
   UI_BIND UI_PORT UI_PASSWORD \
   UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
+  UI_ENABLE_METRICS_ROUTE WINDROSE_METRICS_ENABLED \
+  METRICS_BIND METRICS_PORT \
   WINDROSE_DISCORD_WEBHOOK_URL WINDROSE_WEBHOOK_URL \
   WINDROSE_WEBHOOK_EVENTS WINDROSE_WEBHOOK_POLL_SECONDS \
   WINDROSE_WEBHOOK_TIMEOUT \
@@ -321,6 +341,10 @@ fi
 : "${UI_PORT:=28080}"
 : "${UI_PASSWORD:=}"
 : "${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:=false}"
+: "${UI_ENABLE_METRICS_ROUTE:=false}"
+: "${WINDROSE_METRICS_ENABLED:=false}"
+: "${METRICS_BIND:=127.0.0.1}"
+: "${METRICS_PORT:=9464}"
 
 log "writing env file ${WINDROSE_ENV_FILE}"
 tmp_env="$(mktemp)"
@@ -367,6 +391,14 @@ UI_PORT=${UI_PORT:-28080}
 UI_PASSWORD=${UI_PASSWORD:-}
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD=${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}
 UI_SERVE_STATIC=${UI_SERVE_STATIC:-true}
+UI_ENABLE_METRICS_ROUTE=${UI_ENABLE_METRICS_ROUTE:-false}
+
+# Prometheus metrics. WINDROSE_METRICS_ENABLED controls the standalone
+# windrose-metrics.service; UI_ENABLE_METRICS_ROUTE exposes the same
+# payload from windrose-ui at /metrics for simpler reverse-proxy setups.
+WINDROSE_METRICS_ENABLED=${WINDROSE_METRICS_ENABLED:-false}
+METRICS_BIND=${METRICS_BIND:-127.0.0.1}
+METRICS_PORT=${METRICS_PORT:-9464}
 
 # Webhook notifications — Discord embed + generic JSON POST. Leave URLs
 # empty to disable delivery (the EventDetector thread still runs but
@@ -473,9 +505,36 @@ RestartSec=5
 WantedBy=multi-user.target
 "
 
+write_unit "windrose-metrics.service" "[Unit]
+Description=Windrose Prometheus Metrics Exporter
+After=network-online.target windrose-game.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${WINDROSE_USER}
+Group=${WINDROSE_GROUP}
+WorkingDirectory=${WINDROSE_HOME}
+EnvironmentFile=${WINDROSE_ENV_FILE}
+ExecStart=/usr/bin/python3 ${WINDROSE_INSTALL_DIR}/metrics.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"
+
 # --- Reload + enable --------------------------------------------------
 systemctl daemon-reload
 systemctl enable --now windrose-xvfb.service windrose-ui.service windrose-game.service
+case "${WINDROSE_METRICS_ENABLED}" in
+  1|true|TRUE|yes|YES)
+    systemctl enable --now windrose-metrics.service
+    ;;
+  *)
+    systemctl disable --now windrose-metrics.service >/dev/null 2>&1 || true
+    ;;
+esac
 # `enable --now` is a no-op on services that are already running, so
 # re-runs of install.sh (e.g. picking up new UI code) wouldn't restart
 # them — the Python process would keep the old server.py in memory.
@@ -483,15 +542,26 @@ systemctl enable --now windrose-xvfb.service windrose-ui.service windrose-game.s
 # fresh installs aren't double-started and upgrades actually pick up
 # new code without the operator having to chase extra systemctl calls.
 systemctl try-restart windrose-ui.service windrose-game.service
+case "${WINDROSE_METRICS_ENABLED}" in
+  1|true|TRUE|yes|YES)
+    systemctl try-restart windrose-metrics.service
+    ;;
+esac
 
 log "done."
 echo
 echo "  Services run as:   ${WINDROSE_USER} (non-root; systemd units at"
-echo "                      /etc/systemd/system/windrose-{xvfb,game,ui}.service)"
+echo "                      /etc/systemd/system/windrose-{xvfb,game,ui,metrics}.service)"
 echo "  Game data lives:   ${WINDROSE_HOME}/windrose/"
 echo "  Env file (edit):   ${WINDROSE_ENV_FILE}"
 echo "  Tail game logs:    sudo journalctl -fu windrose-game"
 echo "  Tail UI logs:      sudo journalctl -fu windrose-ui"
+case "${WINDROSE_METRICS_ENABLED}" in
+  1|true|TRUE|yes|YES)
+    echo "  Metrics:           http://${METRICS_BIND}:${METRICS_PORT}/metrics"
+    echo "  Tail metrics logs: sudo journalctl -fu windrose-metrics"
+    ;;
+esac
 echo
 echo "  Admin console:     http://${UI_BIND}:${UI_PORT}/"
 if [ "${UI_BIND}" = "127.0.0.1" ]; then

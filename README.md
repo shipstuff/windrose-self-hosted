@@ -8,13 +8,13 @@ This is a community project. It is not affiliated with or endorsed by the Windro
 
 The Windrose dedicated-server Steam app (id `4129620`) pulls fine via anonymous SteamCMD — that's the default bootstrap, so a fresh pod / droplet / compose stack goes from nothing to a running server without any WindowsServer tarball work. Save data lives on persistent storage and survives game patches automatically. The admin console also exposes an upload path for operators running a pre-release or modded `WindowsServer/` build; see *Optional: Bring Your Own Server Files* below.
 
-The pod runs three containers:
+The pod runs three containers by default:
 
 - **`windrose`** — the game itself under GE-Proton. Only runs the game binary; no backgrounded work in its shell (Proton hates shell job-control races with Xvfb).
 - **`xvfb`** — a dedicated X display server on `:99`, shared into the game container via an `emptyDir` at `/tmp/.X11-unix`. Lives in its own container so its signal space can't interfere with Proton.
 - **`windrose-ui`** — a stdlib-only Python admin console (served from the same image as the game container via `python3 /opt/windrose-ui/server.py`). Exposes the invite-code card, server/players/resources status, config editor, backups, per-world editor, manual `WindowsServer` upload, and Discord/generic webhook dispatch. Shares the PVC with the game container so both see the same filesystem.
 
-All three share the pod's PID namespace (`shareProcessNamespace: true`) so the UI sidecar can `pgrep` for the game process.
+All three share the pod's PID namespace (`shareProcessNamespace: true`) so the UI sidecar can `pgrep` for the game process. Helm can also add an opt-in **`windrose-metrics`** sidecar for Prometheus scraping.
 
 Other Windrose dockerizations exist — this one leans on patterns we already operate in [`enshrouded-self-hosted`](https://github.com/shipstuff/enshrouded-self-hosted): GE-Proton, non-root container, PVC-backed persistence, host networking, Helm + plain manifests + Docker Compose in sync.
 
@@ -140,15 +140,24 @@ for the full env list; it's commented inline.
 
 All three containers come up: `windrose` (game, `network_mode: host`), `xvfb` (display server), `windrose-ui` (UI on `127.0.0.1:28080` by default).
 
+Enable the optional Prometheus exporter sidecar with the `metrics` compose profile:
+
+```bash
+docker compose --profile metrics up -d
+curl -s http://127.0.0.1:9464/metrics
+```
+
 ## Install On Bare Linux
 
 ```bash
 sudo ./bare-linux/install.sh
 ```
 
-Three systemd system services (game + Xvfb + admin UI), running as a
-non-root `steam` user. UI binds to `127.0.0.1` by default; override
-with `UI_BIND=0.0.0.0 UI_PASSWORD=…` at install time. See
+Three systemd system services (game + Xvfb + admin UI), plus an optional
+Prometheus metrics service, running as a non-root `steam` user. UI binds
+to `127.0.0.1` by default; override with
+`UI_BIND=0.0.0.0 UI_PASSWORD=…` at install time. Enable the metrics
+exporter with `WINDROSE_METRICS_ENABLED=true`. See
 [`bare-linux/README.md`](bare-linux/README.md) for sizing, swap recipe,
 and the pre-loaded-world workflow (recommended for small VPSes).
 
@@ -205,6 +214,13 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `UI_PASSWORD` | `` | HTTP basic-auth password; empty = no auth (only safe on LAN-only / firewalled hosts). Username is ignored. |
 | `UI_ENABLE_ADMIN_WITHOUT_PASSWORD` | `false` | Explicit opt-in for destructive endpoints when `UI_PASSWORD` is empty. With a password set, destructive is always allowed. |
 | `UI_SERVE_STATIC` | `true` | Set `false` to have the Python sidecar serve only `/api/*`; pair with an nginx that owns the static bundle. |
+| `UI_ENABLE_METRICS_ROUTE` | `false` | Optional simple-install mode: expose Prometheus metrics at the admin UI's `/metrics` route. Kubernetes should prefer the dedicated metrics sidecar. |
+
+**Metrics exporter**
+| Env var | Default | Purpose |
+|---|---|---|
+| `METRICS_BIND` | `0.0.0.0` | Bind address for standalone `python3 /opt/windrose-ui/metrics.py`. |
+| `METRICS_PORT` | `9464` | Prometheus scrape port for the standalone exporter. |
 
 **Backups**
 | Env var | Default | Purpose |
@@ -228,6 +244,34 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | `WINDROSE_WEBHOOK_EVENTS` | `server.online,server.offline,server.crashed,player.join,player.leave,backup.failed,backup.restore.failed,config.apply.failed` | Comma-separated subset. Additional opt-in success events: `backup.created`, `backup.restored`, `config.applied`. |
 | `WINDROSE_WEBHOOK_POLL_SECONDS` | `15` | Poll cadence for the event detector thread. |
 | `WINDROSE_WEBHOOK_TIMEOUT` | `5` | HTTP POST timeout (seconds). |
+
+## Prometheus Metrics And Grafana
+
+The metrics exporter is stdlib Python in [`metrics.py`](metrics.py). It can run as a separate process (`python3 /opt/windrose-ui/metrics.py`) or be imported by the admin server for an opt-in `/metrics` route. Kubernetes installs should use the dedicated sidecar so metrics stay isolated from the admin UI.
+
+![Grafana dashboard: Windrose server metrics](docs/screenshots/03-grafana-dashboard.jpg)
+
+Helm example:
+
+```yaml
+metrics:
+  enabled: true
+  serviceAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "9464"
+    prometheus.io/job: windrose-canary
+  serviceMonitor:
+    enabled: false
+  grafanaDashboard:
+    enabled: true
+```
+
+Use either `metrics.serviceMonitor.*` for Prometheus Operator or `metrics.serviceAnnotations` for plain Prometheus annotation discovery. If your Prometheus install only selects `ServiceMonitor`s with a release label, set it under `metrics.serviceMonitor.labels`. If Grafana only watches a monitoring namespace for dashboard ConfigMaps, set `metrics.grafanaDashboard.namespace`.
+
+**Multiple servers.** Grafana does not discover Windrose servers directly; it asks Prometheus for `job` and `instance` label values on `windrose_exporter_scrape_success`. If Prometheus only scrapes canary, canary is the only option in the dashboard. Prometheus attaches target labels such as `job` and `instance` to every scrape, so the packaged dashboard can view all Windrose servers together or drill into one. For annotation-based Prometheus installs, set a unique `prometheus.io/job` per server/release so the dropdown is readable; for Compose or bare-Linux, use distinct Prometheus scrape jobs or relabel `instance` to a friendly server name.
+
+The exporter intentionally publishes aggregate operational state only: running status, player counts, process CPU/RSS/uptime, resource ceilings, staged config/world/mod changes, mod counts, backup counts, backend region, save version, and build identity from Steam/logs. It does not publish invite codes, player account IDs, or player names.
 
 ## Update The Server On Game Patch
 
@@ -398,6 +442,7 @@ All routes are served by the `windrose-ui` container at `:28080`. Static assets 
 | Method | Path                                          | Auth          | Purpose                                                                                 |
 | ------ | --------------------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
 | GET    | `/healthz`                                    | open          | Liveness — returns `ok`. Safe for k8s probes and external monitors.                      |
+| GET    | `/metrics`                                    | open          | Optional Prometheus scrape endpoint when `UI_ENABLE_METRICS_ROUTE=true`. Prefer the metrics sidecar on k8s. |
 | GET    | `/`, `/app.css`, `/app.js`, `/index.html`     | open          | Served when `ui.serveStatic=true` (default). Disable if nginx serves the static assets. |
 | GET    | `/api/status`                                 | open / authed | Game process state, player list, resource usage, invite code, backend region, staged-change hints. Public view redacts `AccountId`s and omits `allowDestructive` / `stagedWorlds`. |
 | GET    | `/api/invite`                                 | authed        | Plain-text invite code.                                                                  |
@@ -511,10 +556,11 @@ kubectl kustomize . >/dev/null
 helm lint ./helm/windrose
 helm template windrose ./helm/windrose >/dev/null
 shellcheck scripts/entrypoint.sh scripts/pack-windowsserver.sh
-python3 -m py_compile server.py
+python3 -m py_compile server.py metrics.py
 python3 tests/test_retention.py
 python3 tests/test_restore.py
 python3 tests/test_auto_backup.py
+python3 tests/test_metrics.py
 python3 tests/test_http.py
 bash tests/test_api.sh  # requires a running canary — see CLAUDE.md
 ```

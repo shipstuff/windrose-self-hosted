@@ -6,7 +6,7 @@
 #   UI_AUTH=admin:canary  — basic-auth creds; empty = unauth (then auth'd routes expect 401)
 #   RUN_STOP=1            — also POST /api/server/stop (disruptive, off by default)
 #
-# Default target: windrose-canary-0 / games / 28081
+# Default target: windrose-canary-0 / games / 28081 (canary admin UI)
 set -u
 
 POD="${1:-windrose-canary-0}"
