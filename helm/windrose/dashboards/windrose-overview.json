@@ -81,8 +81,9 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "windrose_server_running",
-          "refId": "A"
+          "expr": "windrose_server_running{job=~\"$job\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}}"
         }
       ],
       "title": "Server",
@@ -131,8 +132,9 @@
       },
       "targets": [
         {
-          "expr": "windrose_players_current",
-          "refId": "A"
+          "expr": "windrose_players_current{job=~\"$job\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}}"
         }
       ],
       "title": "Players",
@@ -189,8 +191,9 @@
       },
       "targets": [
         {
-          "expr": "windrose_process_cpu_percent",
-          "refId": "A"
+          "expr": "windrose_process_cpu_percent{job=~\"$job\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}}"
         }
       ],
       "title": "Game CPU",
@@ -239,8 +242,9 @@
       },
       "targets": [
         {
-          "expr": "windrose_process_resident_memory_bytes",
-          "refId": "A"
+          "expr": "windrose_process_resident_memory_bytes{job=~\"$job\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}}"
         }
       ],
       "title": "Game RSS",
@@ -289,8 +293,9 @@
       },
       "targets": [
         {
-          "expr": "windrose_process_uptime_seconds",
-          "refId": "A"
+          "expr": "windrose_process_uptime_seconds{job=~\"$job\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}}"
         }
       ],
       "title": "Uptime",
@@ -339,8 +344,9 @@
       },
       "targets": [
         {
-          "expr": "windrose_worlds_total",
-          "refId": "A"
+          "expr": "windrose_worlds_total{job=~\"$job\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}}"
         }
       ],
       "title": "Worlds",
@@ -384,8 +390,8 @@
       },
       "targets": [
         {
-          "expr": "windrose_process_cpu_percent",
-          "legendFormat": "CPU %",
+          "expr": "windrose_process_cpu_percent{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{job}} {{instance}}",
           "refId": "A"
         }
       ],
@@ -430,8 +436,8 @@
       },
       "targets": [
         {
-          "expr": "windrose_process_resident_memory_bytes",
-          "legendFormat": "RSS",
+          "expr": "windrose_process_resident_memory_bytes{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{job}} {{instance}}",
           "refId": "A"
         }
       ],
@@ -469,8 +475,8 @@
       },
       "targets": [
         {
-          "expr": "windrose_staged_changes",
-          "legendFormat": "{{type}}",
+          "expr": "windrose_staged_changes{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{job}} {{instance}} {{type}}",
           "refId": "A"
         }
       ],
@@ -508,8 +514,8 @@
       },
       "targets": [
         {
-          "expr": "windrose_mods_total",
-          "legendFormat": "{{state}}",
+          "expr": "windrose_mods_total{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{job}} {{instance}} {{state}}",
           "refId": "A"
         }
       ],
@@ -547,8 +553,8 @@
       },
       "targets": [
         {
-          "expr": "windrose_backups_total",
-          "legendFormat": "{{source}}",
+          "expr": "windrose_backups_total{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{job}} {{instance}} {{source}}",
           "refId": "A"
         }
       ],
@@ -595,16 +601,18 @@
       },
       "targets": [
         {
-          "expr": "windrose_game_build_info",
+          "expr": "windrose_game_build_info{job=~\"$job\",instance=~\"$instance\"}",
           "format": "table",
           "instant": true,
-          "refId": "A"
+          "refId": "A",
+          "legendFormat": "{{job}} {{instance}} build"
         },
         {
-          "expr": "windrose_backend_region_info",
+          "expr": "windrose_backend_region_info{job=~\"$job\",instance=~\"$instance\"}",
           "format": "table",
           "instant": true,
-          "refId": "B"
+          "refId": "B",
+          "legendFormat": "{{job}} {{instance}} backend"
         }
       ],
       "title": "Build / Backend",
@@ -634,6 +642,54 @@
         "refresh": 1,
         "regex": "",
         "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(windrose_exporter_scrape_success, job)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Server job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": "label_values(windrose_exporter_scrape_success, job)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(windrose_exporter_scrape_success{job=~\"$job\"}, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Target instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": "label_values(windrose_exporter_scrape_success{job=~\"$job\"}, instance)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
       }
     ]
   },

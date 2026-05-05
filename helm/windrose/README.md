@@ -177,6 +177,7 @@ metrics:
     prometheus.io/scrape: "true"
     prometheus.io/path: /metrics
     prometheus.io/port: "28081"
+    prometheus.io/job: windrose-canary
   # Prometheus Operator:
   serviceMonitor:
     enabled: false
@@ -194,6 +195,12 @@ only selects monitors with a specific release label. The dashboard is
 packaged as a ConfigMap using `metrics.grafanaDashboard.labels`; set
 `metrics.grafanaDashboard.namespace` for Grafana sidecars that only watch
 their own namespace.
+
+The packaged dashboard includes `Server job` and `Target instance`
+variables. For multi-server operators, give each Windrose release a unique
+Prometheus job label when using annotation scraping, or rely on your
+Prometheus/ServiceMonitor relabeling to provide readable `job` and
+`instance` labels.
 
 For simpler non-operator installs, `metrics.uiRouteEnabled: true` exposes
 the same scrape payload at the admin server's `/metrics` route. Kubernetes

@@ -247,6 +247,8 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 
 The metrics exporter is stdlib Python in [`metrics.py`](metrics.py). It can run as a separate process (`python3 /opt/windrose-ui/metrics.py`) or be imported by the admin server for an opt-in `/metrics` route. Kubernetes installs should use the dedicated sidecar so metrics stay isolated from the admin UI.
 
+![Grafana dashboard: Windrose server metrics](docs/screenshots/03-grafana-dashboard.jpg)
+
 Helm example:
 
 ```yaml
@@ -256,6 +258,7 @@ metrics:
     prometheus.io/scrape: "true"
     prometheus.io/path: /metrics
     prometheus.io/port: "28081"
+    prometheus.io/job: windrose-canary
   serviceMonitor:
     enabled: false
   grafanaDashboard:
@@ -263,6 +266,8 @@ metrics:
 ```
 
 Use either `metrics.serviceMonitor.*` for Prometheus Operator or `metrics.serviceAnnotations` for plain Prometheus annotation discovery. If your Prometheus install only selects `ServiceMonitor`s with a release label, set it under `metrics.serviceMonitor.labels`. If Grafana only watches a monitoring namespace for dashboard ConfigMaps, set `metrics.grafanaDashboard.namespace`.
+
+**Multiple servers.** Prometheus attaches target labels such as `job` and `instance` to every scrape. The packaged dashboard has `Server job` and `Target instance` variables so operators can view all Windrose servers together or drill into one. For annotation-based Prometheus installs, set a unique `prometheus.io/job` per server/release so the dropdown is readable; for Compose or bare-Linux, use distinct Prometheus scrape jobs or relabel `instance` to a friendly server name.
 
 The exporter intentionally publishes aggregate operational state only: running status, player counts, process CPU/RSS/uptime, resource ceilings, staged config/world/mod changes, mod counts, backup counts, backend region, save version, and build identity from Steam/logs. It does not publish invite codes, player account IDs, or player names.
 
