@@ -176,7 +176,7 @@ metrics:
   serviceAnnotations:
     prometheus.io/scrape: "true"
     prometheus.io/path: /metrics
-    prometheus.io/port: "28081"
+    prometheus.io/port: "9464"
     prometheus.io/job: windrose-canary
   # Prometheus Operator:
   serviceMonitor:
@@ -197,8 +197,11 @@ packaged as a ConfigMap using `metrics.grafanaDashboard.labels`; set
 their own namespace.
 
 The packaged dashboard includes `Server job` and `Target instance`
-variables. For multi-server operators, give each Windrose release a unique
-Prometheus job label when using annotation scraping, or rely on your
+variables populated from Prometheus labels on
+`windrose_exporter_scrape_success`. Grafana does not discover Windrose
+servers directly; if Prometheus only scrapes canary, canary is the only
+dashboard option. For multi-server operators, give each Windrose release a
+unique Prometheus job label when using annotation scraping, or rely on your
 Prometheus/ServiceMonitor relabeling to provide readable `job` and
 `instance` labels.
 
@@ -308,7 +311,7 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 | Value | Default | Purpose |
 |---|---|---|
 | `metrics.enabled` | `false` | Add a dedicated `windrose-metrics` sidecar and service port. |
-| `metrics.port` | `28081` | Port exposed by the metrics sidecar and service. Must differ from `service.port` when `hostNetwork: true`. |
+| `metrics.port` | `9464` | Port exposed by the metrics sidecar and service. Must differ from `service.port` when `hostNetwork: true`. |
 | `metrics.serviceAnnotations` | `{}` | Extra Service annotations, useful for plain Prometheus `prometheus.io/*` annotation scraping. |
 | `metrics.uiRouteEnabled` | `false` | Also expose `/metrics` from the admin UI process. Useful for small/simple installs; the sidecar is preferred on k8s. |
 | `metrics.serviceMonitor.enabled` | `false` | Render a Prometheus Operator `ServiceMonitor` for the metrics service port. |

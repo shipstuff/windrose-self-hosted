@@ -116,11 +116,11 @@ services:
     entrypoint: ["python3", "/opt/windrose-ui/metrics.py"]
     environment:
       METRICS_BIND: "0.0.0.0"
-      METRICS_PORT: ${METRICS_PORT:-28081}
+      METRICS_PORT: ${METRICS_PORT:-9464}
       WINDROSE_GAME_CPU_LIMIT: ${WINDROSE_GAME_CPU_LIMIT:-}
       WINDROSE_GAME_MEM_LIMIT: ${WINDROSE_GAME_MEM_LIMIT:-}
     ports:
-      - "${METRICS_BIND:-127.0.0.1}:${METRICS_PORT:-28081}:${METRICS_PORT:-28081}"
+      - "${METRICS_BIND:-127.0.0.1}:${METRICS_PORT:-9464}:${METRICS_PORT:-9464}"
     volumes:
       - windrose-data:/home/steam
 

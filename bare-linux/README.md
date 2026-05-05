@@ -69,7 +69,7 @@ See § What The Install Includes for the full picture.
   - `windrose-game.service` — the game under GE-Proton
   - `windrose-ui.service`   — the Python admin console (stdlib, no deps)
 - **Optional metrics unit**:
-  - `windrose-metrics.service` — Prometheus exporter on `127.0.0.1:28081`
+  - `windrose-metrics.service` — Prometheus exporter on `127.0.0.1:9464`
     when `WINDROSE_METRICS_ENABLED=true`
 - **Files under `/opt/windrose/`** (the installed code) and
   **`/home/steam/windrose/`** (the PVC-equivalent: game binaries,
@@ -108,7 +108,7 @@ Enable the standalone metrics exporter at install time:
 
 ```bash
 sudo WINDROSE_METRICS_ENABLED=true ./bare-linux/install.sh
-curl -s http://127.0.0.1:28081/metrics
+curl -s http://127.0.0.1:9464/metrics
 ```
 
 The installer writes `windrose-metrics.service` on every run, but only
@@ -120,10 +120,10 @@ Defaults are loopback-only:
 ```env
 WINDROSE_METRICS_ENABLED=false
 METRICS_BIND=127.0.0.1
-METRICS_PORT=28081
+METRICS_PORT=9464
 ```
 
-For a Prometheus running on the same host, scrape `127.0.0.1:28081`. For a
+For a Prometheus running on the same host, scrape `127.0.0.1:9464`. For a
 remote Prometheus, either use an SSH tunnel/reverse proxy or set
 `METRICS_BIND=0.0.0.0` and firewall the port. The metrics endpoint has no
 auth; it does not expose invite codes or player identities, but it does
@@ -153,7 +153,7 @@ Or just edit the env file and `systemctl restart windrose-game` after.
 | `UI_ENABLE_METRICS_ROUTE` | `false` | expose `/metrics` from `windrose-ui` instead of, or in addition to, the standalone metrics service |
 | `WINDROSE_METRICS_ENABLED` | `false` | enable/start `windrose-metrics.service` |
 | `METRICS_BIND` | `127.0.0.1` | metrics exporter listen iface |
-| `METRICS_PORT` | `28081` | metrics exporter listen port |
+| `METRICS_PORT` | `9464` | metrics exporter listen port |
 | `SERVER_NAME` | `Windrose Bare-Linux` | informational |
 | `MAX_PLAYER_COUNT` | `4` | 4 is the vendor guide; up to 10 with more RAM |
 | `WORLD_NAME` | `Default Windrose World` | display name |

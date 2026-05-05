@@ -29,7 +29,7 @@ UI_SERVE_STATIC=true
 UI_ENABLE_METRICS_ROUTE=false
 WINDROSE_METRICS_ENABLED=true
 METRICS_BIND=127.0.0.1
-METRICS_PORT=28081
+METRICS_PORT=9464
 WINDROSE_DISCORD_WEBHOOK_URL=https://discord.example/webhooks/abc
 WINDROSE_WEBHOOK_URL=
 WINDROSE_WEBHOOK_EVENTS=server.online,server.offline
@@ -110,7 +110,7 @@ UI_SERVE_STATIC=\${UI_SERVE_STATIC:-true}
 UI_ENABLE_METRICS_ROUTE=\${UI_ENABLE_METRICS_ROUTE:-false}
 WINDROSE_METRICS_ENABLED=\${WINDROSE_METRICS_ENABLED:-false}
 METRICS_BIND=\${METRICS_BIND:-127.0.0.1}
-METRICS_PORT=\${METRICS_PORT:-28081}
+METRICS_PORT=\${METRICS_PORT:-9464}
 WINDROSE_DISCORD_WEBHOOK_URL=\${WINDROSE_DISCORD_WEBHOOK_URL:-}
 WINDROSE_WEBHOOK_URL=\${WINDROSE_WEBHOOK_URL:-}
 WINDROSE_WEBHOOK_EVENTS=\${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}
@@ -149,7 +149,7 @@ assert WINDROSE_PATCH_IDLE_CPU "1"                                         || fa
 assert UI_ENABLE_METRICS_ROUTE "false"                                     || fail=1
 assert WINDROSE_METRICS_ENABLED "true"                                     || fail=1
 assert METRICS_BIND "127.0.0.1"                                            || fail=1
-assert METRICS_PORT "28081"                                                || fail=1
+assert METRICS_PORT "9464"                                                || fail=1
 assert CUSTOM_OPERATOR_KEY "custom_value"                                  || fail=1
 
 # Also assert unset-in-existing vars fall back to their defaults.
@@ -188,7 +188,7 @@ WINDROSE_ENV_FILE="${_tmp}/does-not-exist-$$.env"  # no prior env file
 : "\${UI_ENABLE_METRICS_ROUTE:=false}"
 : "\${WINDROSE_METRICS_ENABLED:=false}"
 : "\${METRICS_BIND:=127.0.0.1}"
-: "\${METRICS_PORT:=28081}"
+: "\${METRICS_PORT:=9464}"
 
 # Simulated status echo — the thing that would fail under set -u
 # without the fix.
@@ -199,7 +199,7 @@ if [ ! -f "${out2}" ]; then
   echo "  FAIL  fresh install set -u aborted before echo"
   exit 1
 fi
-if ! grep -q "bind=127.0.0.1 port=28080 pwlen=0 admin=false metrics=false mbind=127.0.0.1 mport=28081" "${out2}"; then
+if ! grep -q "bind=127.0.0.1 port=28080 pwlen=0 admin=false metrics=false mbind=127.0.0.1 mport=9464" "${out2}"; then
   echo "  FAIL  fresh-install defaults incorrect:"
   cat "${out2}"
   exit 1

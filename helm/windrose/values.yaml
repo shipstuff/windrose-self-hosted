@@ -77,7 +77,7 @@ ui:
 # dedicated sidecar so metrics are isolated from the admin UI surface.
 metrics:
   enabled: false
-  port: 28081
+  port: 9464
   # For plain Prometheus setups that scrape services by annotation, e.g.
   # prometheus.io/scrape: "true". Leave empty when using ServiceMonitor.
   serviceAnnotations: {}

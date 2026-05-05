@@ -19,7 +19,7 @@
 #   WINDROSE_METRICS_ENABLED     install/start Prometheus exporter service
 #                                                            (default: false)
 #   METRICS_BIND                 metrics listen interface   (default: 127.0.0.1)
-#   METRICS_PORT                 metrics listen port        (default: 28081)
+#   METRICS_PORT                 metrics listen port        (default: 9464)
 #   WINDROSE_PATCH_IDLE_CPU       opt in to the idle-CPU binary patch
 #                                 (default: 0; flip to "1" to apply on boot)
 #   SERVER_NAME, MAX_PLAYER_COUNT, WORLD_NAME, WORLD_PRESET_TYPE,
@@ -344,7 +344,7 @@ fi
 : "${UI_ENABLE_METRICS_ROUTE:=false}"
 : "${WINDROSE_METRICS_ENABLED:=false}"
 : "${METRICS_BIND:=127.0.0.1}"
-: "${METRICS_PORT:=28081}"
+: "${METRICS_PORT:=9464}"
 
 log "writing env file ${WINDROSE_ENV_FILE}"
 tmp_env="$(mktemp)"
@@ -398,7 +398,7 @@ UI_ENABLE_METRICS_ROUTE=${UI_ENABLE_METRICS_ROUTE:-false}
 # payload from windrose-ui at /metrics for simpler reverse-proxy setups.
 WINDROSE_METRICS_ENABLED=${WINDROSE_METRICS_ENABLED:-false}
 METRICS_BIND=${METRICS_BIND:-127.0.0.1}
-METRICS_PORT=${METRICS_PORT:-28081}
+METRICS_PORT=${METRICS_PORT:-9464}
 
 # Webhook notifications — Discord embed + generic JSON POST. Leave URLs
 # empty to disable delivery (the EventDetector thread still runs but

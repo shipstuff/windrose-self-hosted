@@ -21,7 +21,7 @@ from typing import Any
 import server
 
 BIND = os.environ.get("METRICS_BIND", "0.0.0.0")
-PORT = int(os.environ.get("METRICS_PORT", "28081"))
+PORT = int(os.environ.get("METRICS_PORT", "9464"))
 _EXE_MD5_CACHE: tuple[Path, int, int, str] | None = None
 
 

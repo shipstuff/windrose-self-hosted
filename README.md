@@ -144,7 +144,7 @@ Enable the optional Prometheus exporter sidecar with the `metrics` compose profi
 
 ```bash
 docker compose --profile metrics up -d
-curl -s http://127.0.0.1:28081/metrics
+curl -s http://127.0.0.1:9464/metrics
 ```
 
 ## Install On Bare Linux
@@ -220,7 +220,7 @@ Every variable below is consumed by the container entrypoint, so it applies iden
 | Env var | Default | Purpose |
 |---|---|---|
 | `METRICS_BIND` | `0.0.0.0` | Bind address for standalone `python3 /opt/windrose-ui/metrics.py`. |
-| `METRICS_PORT` | `28081` | Prometheus scrape port for the standalone exporter. |
+| `METRICS_PORT` | `9464` | Prometheus scrape port for the standalone exporter. |
 
 **Backups**
 | Env var | Default | Purpose |
@@ -259,7 +259,7 @@ metrics:
   serviceAnnotations:
     prometheus.io/scrape: "true"
     prometheus.io/path: /metrics
-    prometheus.io/port: "28081"
+    prometheus.io/port: "9464"
     prometheus.io/job: windrose-canary
   serviceMonitor:
     enabled: false
@@ -269,7 +269,7 @@ metrics:
 
 Use either `metrics.serviceMonitor.*` for Prometheus Operator or `metrics.serviceAnnotations` for plain Prometheus annotation discovery. If your Prometheus install only selects `ServiceMonitor`s with a release label, set it under `metrics.serviceMonitor.labels`. If Grafana only watches a monitoring namespace for dashboard ConfigMaps, set `metrics.grafanaDashboard.namespace`.
 
-**Multiple servers.** Prometheus attaches target labels such as `job` and `instance` to every scrape. The packaged dashboard has `Server job` and `Target instance` variables so operators can view all Windrose servers together or drill into one. For annotation-based Prometheus installs, set a unique `prometheus.io/job` per server/release so the dropdown is readable; for Compose or bare-Linux, use distinct Prometheus scrape jobs or relabel `instance` to a friendly server name.
+**Multiple servers.** Grafana does not discover Windrose servers directly; it asks Prometheus for `job` and `instance` label values on `windrose_exporter_scrape_success`. If Prometheus only scrapes canary, canary is the only option in the dashboard. Prometheus attaches target labels such as `job` and `instance` to every scrape, so the packaged dashboard can view all Windrose servers together or drill into one. For annotation-based Prometheus installs, set a unique `prometheus.io/job` per server/release so the dropdown is readable; for Compose or bare-Linux, use distinct Prometheus scrape jobs or relabel `instance` to a friendly server name.
 
 The exporter intentionally publishes aggregate operational state only: running status, player counts, process CPU/RSS/uptime, resource ceilings, staged config/world/mod changes, mod counts, backup counts, backend region, save version, and build identity from Steam/logs. It does not publish invite codes, player account IDs, or player names.
 
