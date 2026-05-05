@@ -73,6 +73,32 @@ ui:
       name: ""
       key: discord-webhook-url
 
+# Optional Prometheus exporter. Kubernetes deployments should prefer this
+# dedicated sidecar so metrics are isolated from the admin UI surface.
+metrics:
+  enabled: false
+  port: 28081
+  # For plain Prometheus setups that scrape services by annotation, e.g.
+  # prometheus.io/scrape: "true". Leave empty when using ServiceMonitor.
+  serviceAnnotations: {}
+  # Simple installs can expose /metrics from the admin UI process instead
+  # of running the sidecar. Helm keeps this false by default.
+  uiRouteEnabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+  grafanaDashboard:
+    enabled: false
+    # Empty = same namespace as the Windrose release. Set to "monitoring"
+    # for Grafana sidecars that only watch their own namespace.
+    namespace: ""
+    labels:
+      grafana_dashboard: "1"
+    annotations: {}
+
 persistence:
   existingClaim: ""
   size: 20Gi
@@ -301,6 +327,12 @@ resources:
       memory: 32Mi
     limits:
       memory: 256Mi
+  metrics:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
 
 securityContext:
   runAsUser: 10000

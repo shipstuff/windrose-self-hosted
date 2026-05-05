@@ -86,6 +86,8 @@ services:
       # Opt-in: allow destructive actions when no password is set (LAN-only).
       # With UI_PASSWORD set, destructive is always allowed.
       UI_ENABLE_ADMIN_WITHOUT_PASSWORD: ${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}
+      # Optional simple-install mode. Prefer windrose-metrics for Prometheus.
+      UI_ENABLE_METRICS_ROUTE: ${UI_ENABLE_METRICS_ROUTE:-false}
       # Optional Discord / generic JSON webhook notifications. Background
       # thread polls game state every WINDROSE_WEBHOOK_POLL_SECONDS and
       # fires events (server.online/offline, player.join/leave, plus
@@ -101,6 +103,24 @@ services:
     # opts in by setting UI_BIND=0.0.0.0 and publishing the port.
     ports:
       - "${UI_BIND:-127.0.0.1}:${UI_PORT:-28080}:${UI_PORT:-28080}"
+    volumes:
+      - windrose-data:/home/steam
+
+  windrose-metrics:
+    profiles: ["metrics"]
+    image: ${WINDROSE_IMAGE:-ghcr.io/shipstuff/windrose-server:0.3.0}
+    restart: unless-stopped
+    pid: service:windrose
+    depends_on:
+      - windrose
+    entrypoint: ["python3", "/opt/windrose-ui/metrics.py"]
+    environment:
+      METRICS_BIND: "0.0.0.0"
+      METRICS_PORT: ${METRICS_PORT:-28081}
+      WINDROSE_GAME_CPU_LIMIT: ${WINDROSE_GAME_CPU_LIMIT:-}
+      WINDROSE_GAME_MEM_LIMIT: ${WINDROSE_GAME_MEM_LIMIT:-}
+    ports:
+      - "${METRICS_BIND:-127.0.0.1}:${METRICS_PORT:-28081}:${METRICS_PORT:-28081}"
     volumes:
       - windrose-data:/home/steam
 

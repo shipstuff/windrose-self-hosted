@@ -28,8 +28,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Syntax-check UI server
-        run: python3 -m py_compile server.py scripts/patch-idle-cpu.py
+      - name: Syntax-check Python entrypoints
+        run: python3 -m py_compile server.py metrics.py scripts/patch-idle-cpu.py
 
   python-tests:
     runs-on: ubuntu-latest
@@ -46,6 +46,8 @@ jobs:
         run: python3 tests/test_auto_backup.py
       - name: Server-control (systemctl dispatch) tests
         run: python3 tests/test_server_control.py
+      - name: Metrics exporter tests
+        run: python3 tests/test_metrics.py
       - name: ServerDescription schema tests
         run: python3 tests/test_schema.py
       - name: HTTP integration tests
@@ -102,7 +104,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate example JSON
         run: |
-          python3 -c "import json,sys; [json.load(open(f)) for f in ['scripts/ServerDescription_example.json','scripts/WorldDescription_example.json']]"
+          python3 -c "import json,sys; [json.load(open(f)) for f in ['scripts/ServerDescription_example.json','scripts/WorldDescription_example.json','helm/windrose/dashboards/windrose-overview.json']]"
 
   kustomize-render:
     runs-on: ubuntu-latest
@@ -125,3 +127,10 @@ jobs:
           helm template windrose ./helm/windrose >/dev/null
           helm template windrose ./helm/windrose --set serverConfig.mode=managed >/dev/null
           helm template windrose ./helm/windrose --set serverConfig.mode=mutable >/dev/null
+          helm template windrose ./helm/windrose \
+            --set metrics.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
+            --set metrics.grafanaDashboard.enabled=true >/dev/null
+          ! helm template windrose ./helm/windrose \
+            --set metrics.enabled=true \
+            --set metrics.port=28080 >/dev/null

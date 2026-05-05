@@ -5,6 +5,12 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "windrose.labels" . | indent 4 }}
+{{- with .Values.metrics.serviceAnnotations }}
+  annotations:
+{{- range $key, $value := . }}
+    {{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end }}
 spec:
   type: {{ .Values.service.type }}
   selector:
@@ -18,3 +24,9 @@ spec:
       protocol: TCP
       port: {{ .Values.service.port }}
       targetPort: ui
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      protocol: TCP
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+    {{- end }}
