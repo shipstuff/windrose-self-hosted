@@ -26,6 +26,10 @@ UI_PORT=28080
 UI_PASSWORD=s3cretOperatorValue
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD=false
 UI_SERVE_STATIC=true
+UI_ENABLE_METRICS_ROUTE=false
+WINDROSE_METRICS_ENABLED=true
+METRICS_BIND=127.0.0.1
+METRICS_PORT=28081
 WINDROSE_DISCORD_WEBHOOK_URL=https://discord.example/webhooks/abc
 WINDROSE_WEBHOOK_URL=
 WINDROSE_WEBHOOK_EVENTS=server.online,server.offline
@@ -63,6 +67,8 @@ _MANAGED_KEYS=" \
   FILES_WAIT_TIMEOUT_SECONDS WINDROSE_PATCH_IDLE_CPU \
   UI_BIND UI_PORT UI_PASSWORD \
   UI_ENABLE_ADMIN_WITHOUT_PASSWORD UI_SERVE_STATIC \
+  UI_ENABLE_METRICS_ROUTE WINDROSE_METRICS_ENABLED \
+  METRICS_BIND METRICS_PORT \
   WINDROSE_DISCORD_WEBHOOK_URL WINDROSE_WEBHOOK_URL \
   WINDROSE_WEBHOOK_EVENTS WINDROSE_WEBHOOK_POLL_SECONDS \
   WINDROSE_WEBHOOK_TIMEOUT \
@@ -101,6 +107,10 @@ UI_PORT=\${UI_PORT:-28080}
 UI_PASSWORD=\${UI_PASSWORD:-}
 UI_ENABLE_ADMIN_WITHOUT_PASSWORD=\${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:-false}
 UI_SERVE_STATIC=\${UI_SERVE_STATIC:-true}
+UI_ENABLE_METRICS_ROUTE=\${UI_ENABLE_METRICS_ROUTE:-false}
+WINDROSE_METRICS_ENABLED=\${WINDROSE_METRICS_ENABLED:-false}
+METRICS_BIND=\${METRICS_BIND:-127.0.0.1}
+METRICS_PORT=\${METRICS_PORT:-28081}
 WINDROSE_DISCORD_WEBHOOK_URL=\${WINDROSE_DISCORD_WEBHOOK_URL:-}
 WINDROSE_WEBHOOK_URL=\${WINDROSE_WEBHOOK_URL:-}
 WINDROSE_WEBHOOK_EVENTS=\${WINDROSE_WEBHOOK_EVENTS:-server.online,server.offline,player.join,player.leave,backup.created,backup.restored,config.applied}
@@ -136,6 +146,10 @@ assert SERVER_NAME "My Server"                                             || fa
 assert MAX_PLAYER_COUNT "6"                                                || fail=1
 assert P2P_PROXY_ADDRESS "192.168.1.50"                                    || fail=1
 assert WINDROSE_PATCH_IDLE_CPU "1"                                         || fail=1
+assert UI_ENABLE_METRICS_ROUTE "false"                                     || fail=1
+assert WINDROSE_METRICS_ENABLED "true"                                     || fail=1
+assert METRICS_BIND "127.0.0.1"                                            || fail=1
+assert METRICS_PORT "28081"                                                || fail=1
 assert CUSTOM_OPERATOR_KEY "custom_value"                                  || fail=1
 
 # Also assert unset-in-existing vars fall back to their defaults.
@@ -171,17 +185,21 @@ WINDROSE_ENV_FILE="${_tmp}/does-not-exist-$$.env"  # no prior env file
 : "\${UI_PORT:=28080}"
 : "\${UI_PASSWORD:=}"
 : "\${UI_ENABLE_ADMIN_WITHOUT_PASSWORD:=false}"
+: "\${UI_ENABLE_METRICS_ROUTE:=false}"
+: "\${WINDROSE_METRICS_ENABLED:=false}"
+: "\${METRICS_BIND:=127.0.0.1}"
+: "\${METRICS_PORT:=28081}"
 
 # Simulated status echo — the thing that would fail under set -u
 # without the fix.
-echo "bind=\${UI_BIND} port=\${UI_PORT} pwlen=\${#UI_PASSWORD} admin=\${UI_ENABLE_ADMIN_WITHOUT_PASSWORD}" > '${out2}'
+echo "bind=\${UI_BIND} port=\${UI_PORT} pwlen=\${#UI_PASSWORD} admin=\${UI_ENABLE_ADMIN_WITHOUT_PASSWORD} metrics=\${WINDROSE_METRICS_ENABLED} mbind=\${METRICS_BIND} mport=\${METRICS_PORT}" > '${out2}'
 HARNESS
 
 if [ ! -f "${out2}" ]; then
   echo "  FAIL  fresh install set -u aborted before echo"
   exit 1
 fi
-if ! grep -q "bind=127.0.0.1 port=28080 pwlen=0 admin=false" "${out2}"; then
+if ! grep -q "bind=127.0.0.1 port=28080 pwlen=0 admin=false metrics=false mbind=127.0.0.1 mport=28081" "${out2}"; then
   echo "  FAIL  fresh-install defaults incorrect:"
   cat "${out2}"
   exit 1

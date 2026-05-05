@@ -153,9 +153,11 @@ curl -s http://127.0.0.1:28081/metrics
 sudo ./bare-linux/install.sh
 ```
 
-Three systemd system services (game + Xvfb + admin UI), running as a
-non-root `steam` user. UI binds to `127.0.0.1` by default; override
-with `UI_BIND=0.0.0.0 UI_PASSWORD=…` at install time. See
+Three systemd system services (game + Xvfb + admin UI), plus an optional
+Prometheus metrics service, running as a non-root `steam` user. UI binds
+to `127.0.0.1` by default; override with
+`UI_BIND=0.0.0.0 UI_PASSWORD=…` at install time. Enable the metrics
+exporter with `WINDROSE_METRICS_ENABLED=true`. See
 [`bare-linux/README.md`](bare-linux/README.md) for sizing, swap recipe,
 and the pre-loaded-world workflow (recommended for small VPSes).
 
