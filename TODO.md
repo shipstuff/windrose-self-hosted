@@ -37,6 +37,10 @@ Everything's in the tree; what's left is shipping it to strangers.
 
 Small, coherent UX follow-ups on top of the current admin console.
 
+- **Roll out split persistence for HA.** Validate and migrate canary/prod to a
+  runtime/cache volume plus a small durable state volume so replicated CSI only
+  carries save/config identity state, not SteamCMD, Proton, and WindowsServer
+  cache.
 - **SSE log stream**. UI's "Log" card today shows ephemeral client-side
   events. Since the game-container's stdout has `tail -F R5.log`, we can
   expose `/api/logs/stream` as a Server-Sent-Events endpoint from

@@ -240,11 +240,82 @@ the chart is a thin wrapper around those vars plus Kubernetes-level knobs
 
 | Value | Default | Purpose |
 |---|---|---|
-| `persistence.existingClaim` | `""` | If set, use an existing PVC instead of creating one. |
-| `persistence.size` | `20Gi` | New-PVC size request. `WindowsServer/` is ~3 GiB; saves + backups + GE-Proton cache add headroom. |
-| `persistence.accessMode` | `ReadWriteOnce` | |
-| `persistence.storageClassName` | `""` | `""` = cluster default. |
-| `persistence.subPath` | `steam-root` | Mount subdir; gives the pod a clean `/home/steam` view. |
+| `persistence.claims` | one `data` claim, `20Gi` | PVCs to create/use. Set `existingClaim` on a claim to mount an operator-managed PVC instead of rendering one. |
+| `persistence.mounts` | `data` mounted at `/home/steam`, `subPath: steam-root` | Kubernetes `volumeMounts` rendered into the game and UI containers. Mount names must match `persistence.claims[].name`. |
+| `env` | `[]` | Additional env vars rendered into the game and UI containers. Names must be unique and cannot duplicate chart-managed env vars; use the matching chart value for those. |
+
+The default persistence values preserve the original single-PVC layout:
+
+```yaml
+persistence:
+  claims:
+    - name: data
+      existingClaim: ""
+      size: 20Gi
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+  mounts:
+    - name: data
+      mountPath: /home/steam
+      subPath: steam-root
+```
+
+Customized old scalar keys such as `persistence.size` and
+`persistence.existingClaim` fail chart rendering with a migrated
+`claims[]` / `mounts[]` snippet. The old default scalar values are
+tolerated so `helm upgrade --reuse-values` from `0.2.1` can preserve the
+single-PVC layout without a manual values rewrite.
+
+For split runtime/state/backup storage, override the same block with direct
+mountpoints. This keeps the runtime cache replaceable while the R5 root,
+server identity/config, saves, and mod metadata live on the state PVC. The
+large Steam-managed R5 content directories are mounted back from the runtime
+PVC, and mod payload directories are nested back onto the state PVC:
+
+```yaml
+persistence:
+  claims:
+    - name: runtime
+      size: 20Gi
+      storageClassName: local-path
+      accessMode: ReadWriteOnce
+    - name: state
+      size: 5Gi
+      storageClassName: longhorn-rf3
+      accessMode: ReadWriteOnce
+    - name: backups
+      size: 20Gi
+      storageClassName: local-path
+      accessMode: ReadWriteOnce
+  mounts:
+    - name: runtime
+      mountPath: /home/steam
+      subPath: steam-root
+    - name: state
+      mountPath: /home/steam/windrose/WindowsServer/R5
+      subPath: r5-state
+    - name: runtime
+      mountPath: /home/steam/windrose/WindowsServer/R5/Binaries
+      subPath: steam-root/windrose/WindowsServer/R5/Binaries
+    - name: runtime
+      mountPath: /home/steam/windrose/WindowsServer/R5/Config
+      subPath: steam-root/windrose/WindowsServer/R5/Config
+    - name: runtime
+      mountPath: /home/steam/windrose/WindowsServer/R5/Content
+      subPath: steam-root/windrose/WindowsServer/R5/Content
+    - name: runtime
+      mountPath: /home/steam/windrose/WindowsServer/R5/Plugins
+      subPath: steam-root/windrose/WindowsServer/R5/Plugins
+    - name: state
+      mountPath: /home/steam/windrose/WindowsServer/R5/Content/Paks/~mods
+      subPath: r5-state/mods/enabled
+    - name: state
+      mountPath: /home/steam/windrose/WindowsServer/R5/Content/Paks/~mods.disabled
+      subPath: r5-state/mods/disabled
+    - name: backups
+      mountPath: /home/steam/backups
+      subPath: windrose-backups
+```
 
 ### Service + Ingress
 
